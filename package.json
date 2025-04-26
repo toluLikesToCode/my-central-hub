@@ -5,7 +5,10 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon src/main.ts",
-    "build": "tsc",
+    "format": "prettier --write \"src/**/*.{ts,js,json,md}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,js,json,md}\"",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc",
     "start": "node dist/main.js",
     "test": "jest",
     "type-check": "tsc --noEmit",
