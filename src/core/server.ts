@@ -2,6 +2,7 @@ import { createServer, Socket } from 'net';
 import { parser } from './parser';
 import { router } from './router';
 import { logger } from '../utils/logger';
+import { sendResponse } from '../entities/sendResponse';
 
 export class HttpServer {
   private server = createServer();
@@ -20,7 +21,7 @@ export class HttpServer {
           // router handles response sending
         } catch (error) {
           logger.error(`Failed to process request: ${(error as Error).message}`);
-          socket.end('HTTP/1.1 400 Bad Request\r\n\r\nBad Request');
+          sendResponse(socket, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
         }
       });
 

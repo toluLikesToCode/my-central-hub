@@ -3,6 +3,7 @@ import { IncomingRequest } from '../entities/http';
 import { fileStreamingController } from '../modules/file-streamer/index';
 import { logger } from '../utils/logger';
 import { URL } from 'url';
+import { sendResponse } from '../entities/sendResponse';
 
 type Handler = (req: IncomingRequest, socket: Socket) => Promise<void>;
 
@@ -38,8 +39,7 @@ class Router {
 
     if (!req.path) {
       logger.warn(`No path provided in request`);
-      socket.write('HTTP/1.1 400 Bad Request\r\n\r\nMissing path');
-      socket.end();
+      sendResponse(socket, 400, { 'Content-Type': 'text/plain' }, 'Missing path');
       return;
     }
 
@@ -50,8 +50,7 @@ class Router {
 
     if (!route) {
       logger.warn(`No route found for ${req.method} ${pathname}`);
-      socket.write('HTTP/1.1 404 Not Found\r\n\r\n404 Not Found');
-      socket.end();
+      sendResponse(socket, 404, { 'Content-Type': 'text/plain' }, '404 Not Found');
       return;
     }
 
@@ -59,8 +58,7 @@ class Router {
       await route.handler(req, socket);
     } catch (error) {
       logger.error(`Handler error: ${(error as Error).message}`);
-      socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\nServer Error');
-      socket.end();
+      sendResponse(socket, 500, { 'Content-Type': 'text/plain' }, 'Server Error');
     }
   }
 }

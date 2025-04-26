@@ -4,6 +4,7 @@ import { join } from 'path';
 import { config } from '../../config/server.config';
 import { logger } from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
+import { sendResponse } from '../../entities/sendResponse';
 
 export class FileService {
   static streamFile(fileName: string, range: string | undefined, socket: Socket) {
@@ -11,8 +12,7 @@ export class FileService {
 
     if (!existsSync(filePath)) {
       logger.warn(`File not found: ${fileName}`);
-      socket.write('HTTP/1.1 404 Not Found\r\n\r\nFile Not Found');
-      socket.end();
+      sendResponse(socket, 404, { 'Content-Type': 'text/plain' }, 'File Not Found');
       return;
     }
 
@@ -34,30 +34,26 @@ export class FileService {
 
     if (start >= totalSize || end >= totalSize) {
       logger.error(`Invalid range: ${start}-${end}`);
-      socket.write('HTTP/1.1 416 Range Not Satisfiable\r\n\r\nInvalid Range');
-      socket.end();
+      sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, 'Invalid Range');
       return;
     }
 
     const chunkSize = end - start + 1;
     const fileStream = createReadStream(filePath, { start, end });
 
-    const headers = [
-      'HTTP/1.1 206 Partial Content',
-      `Content-Type: ${contentType}`,
-      `Content-Length: ${chunkSize}`,
-      `Content-Range: bytes ${start}-${end}/${totalSize}`,
-      'Accept-Ranges: bytes',
-      '',
-      '',
-    ].join('\r\n');
+    const headers = {
+      'Content-Type': contentType,
+      'Content-Length': chunkSize.toString(),
+      'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+      'Accept-Ranges': 'bytes',
+    };
 
-    socket.write(headers);
+    sendResponse(socket, 206, headers, '');
 
     fileStream.pipe(socket);
     fileStream.on('error', (err) => {
       logger.error(`File stream error: ${err.message}`);
-      socket.end();
+      sendResponse(socket, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
     });
   }
 
