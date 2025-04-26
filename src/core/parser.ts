@@ -43,7 +43,7 @@ export const parser = {
 
     let invalid =
       !method ||
-      !ALLOWED_METHODS.includes(method as any) ||
+      !ALLOWED_METHODS.includes(method as (typeof ALLOWED_METHODS)[number]) ||
       !fullPath.startsWith('/') ||
       !httpVersion.startsWith('HTTP/');
 
