@@ -19,6 +19,7 @@ describe('Router', () => {
       httpVersion: 'HTTP/1.1',
       headers: { host: 'localhost' },
       raw: '',
+      query: {},
     };
 
     await router.handle(req, fakeSocket);
@@ -33,6 +34,7 @@ describe('Router', () => {
       httpVersion: 'HTTP/1.1',
       headers: { host: 'localhost' },
       raw: '',
+      query: {},
     };
 
     await router.handle(req, fakeSocket);

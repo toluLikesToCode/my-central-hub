@@ -25,7 +25,16 @@ describe('HTTP Parser', () => {
     const raw = 'INVALID REQUEST';
     const parsed = parser.parse(raw);
 
-    expect(parsed.method).toBeUndefined();
-    expect(parsed.path).toBeUndefined();
+    expect(parsed.invalid).toBe(true);
+    expect(parsed.method).toBeFalsy();
+    expect(parsed.path).toBeFalsy();
+  });
+
+  it('should parse url.pathname and headersMap correctly', () => {
+    const raw = 'GET /hello HTTP/1.1\r\nHost: localhost\r\nUser-Agent: test\r\n\r\n';
+    const parsed = parser.parse(raw);
+
+    expect(parsed.url?.pathname).toBe('/hello');
+    expect(parsed.headersMap?.get('host')).toEqual(['localhost']);
   });
 });

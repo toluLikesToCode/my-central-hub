@@ -19,6 +19,7 @@ describe('fileStreamingController', () => {
       httpVersion: 'HTTP/1.1',
       headers: { host: 'localhost' },
       raw: '',
+      query: {},
     };
 
     await fileStreamingController.handleStream(req, fakeSocket);
@@ -33,6 +34,7 @@ describe('fileStreamingController', () => {
       httpVersion: 'HTTP/1.1',
       headers: { host: 'localhost' },
       raw: '',
+      query: {},
     };
 
     await fileStreamingController.listFiles(req, fakeSocket);
