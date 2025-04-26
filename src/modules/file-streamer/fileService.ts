@@ -69,7 +69,7 @@ export class FileService {
             return { files: [] };
         }
 
-        const files = readdirSync(mediaDir).filter(file => {
+        const files = readdirSync(mediaDir).filter(() => {
             // Later: you can filter by allowed extensions (e.g., .mp4, .mp3)
             return true;
         });

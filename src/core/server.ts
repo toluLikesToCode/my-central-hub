@@ -16,7 +16,7 @@ export class HttpServer {
             socket.on("data", async (chunk: Buffer) => {
                 try {
                     const request = parser.parse(chunk.toString());
-                    const response = await router.handle(request, socket);
+                    await router.handle(request, socket);
                     // router handles response sending
                 } catch (error) {
                     logger.error(`Failed to process request: ${(error as Error).message}`);

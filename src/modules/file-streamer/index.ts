@@ -23,7 +23,7 @@ export const fileStreamingController = {
             const range = req.headers["range"];
 
             FileService.streamFile(fileName, range, socket);
-        } catch (error) {
+        } catch {
             socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\nServer Error");
             socket.end();
         }
@@ -45,7 +45,7 @@ export const fileStreamingController = {
             socket.write(headers);
             socket.write(responseBody);
             socket.end();
-        } catch (error) {
+        } catch {
             socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\nServer Error");
             socket.end();
         }
