@@ -1,16 +1,44 @@
-# Node.js modules
+# Node.js dependencies
 node_modules/
 
-# TypeScript build outputs
+# Output directories
 dist/
 build/
 
 # Logs
 *.log
 
-# System Files
+# System-specific files
 .DS_Store
 Thumbs.db
 
-# Environment
+# Environment variables
 .env
+.env.*
+
+# Editor folders
+.vscode/
+.idea/
+
+# Coverage reports (future testing)
+coverage/
+
+# Temporary files
+temp/
+*.tmp
+*.swp
+
+# OS Trash
+*.Trash-*
+
+# Lock files
+yarn.lock
+package-lock.json
+pnpm-lock.yaml
+
+# Miscellaneous
+.eslintcache
+*.config
+
+# Public files
+public/
