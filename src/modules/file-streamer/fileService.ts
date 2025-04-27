@@ -69,8 +69,8 @@ export class FileService {
     const stats = statSync(abs);
     const size = stats.size;
 
-    let start = 0;
-    let end = size - 1;
+    const start = 0;
+    const end = size - 1;
 
     if (rangeHeader) {
       // Matches bytes=START-END, bytes=START-, bytes=-END

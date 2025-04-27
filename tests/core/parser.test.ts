@@ -57,8 +57,8 @@ describe('HTTP Parser', () => {
     const parsed = parser.parse(raw);
 
     expect(parsed.invalid).toBe(true);
-    expect(parsed.method).toBeFalsy;
-    expect(parsed.path).toBeFalsy;
+    expect(parsed.method).toBeFalsy();
+    expect(parsed.path).toBeFalsy();
     expect(parsed.headers).toEqual({});
   });
 
