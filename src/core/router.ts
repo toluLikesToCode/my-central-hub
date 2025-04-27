@@ -54,6 +54,10 @@ class Router {
 
   /* ---------- Main entry ---------- */
   async handle(req: IncomingRequest, sock: Socket): Promise<void> {
+    if (!req.path || typeof req.path !== 'string') {
+      sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
+      return;
+    }
     logger.info(`router saw ${req.method} ${req.path}`);
     // 1. run middleware chain
     let i = 0;
@@ -98,7 +102,7 @@ class Router {
       await route.handler(req, sock);
     } catch (err) {
       logger.error(`Handler error: ${(err as Error).message}`);
-      sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Server Error');
+      sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, '500 Server Error');
     }
   }
 }

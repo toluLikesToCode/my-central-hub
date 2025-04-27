@@ -6,6 +6,7 @@ import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
 import { logger } from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
+import { Readable } from 'stream';
 
 const fileSvc = new FileService(config.mediaDir);
 
@@ -39,39 +40,55 @@ export const fileStreamingController = {
 
     try {
       const rangeHdr = getHeader(req, 'range'); // e.g. "bytes=0-1023"
-      let stream,
-        start = 0,
-        end: number | undefined;
-
+      let stream: Readable;
+      const fileStat = await fileSvc.stat(fileName);
+      const size = fileStat.size;
       if (rangeHdr) {
-        const [, range] = /bytes=(\d+)-(\d*)/.exec(rangeHdr) ?? [];
-        if (!range) throw new Error('Invalid Range header');
-        const [s, e] = range.split('-');
-        start = Number(s);
-        end = e ? Number(e) : undefined;
-        stream = await fileSvc.readFile(fileName, { start, end: end ?? start + 1_000_000 });
-        const fileStat = await fileSvc.stat(fileName);
-        const len = (end ?? fileStat.size - 1) - start + 1;
-
+        // Parse Range header: bytes=START-END, bytes=START-, bytes=-END
+        const m = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
+        if (!m) {
+          sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
+          sock.end();
+          return;
+        }
+        const startStr = m[1];
+        const endStr = m[2];
+        let start: number;
+        let end: number;
+        if (startStr) {
+          start = parseInt(startStr, 10);
+          end = endStr ? parseInt(endStr, 10) : size - 1;
+        } else {
+          // suffix range
+          const suffix = parseInt(endStr, 10);
+          start = size - suffix;
+          end = size - 1;
+        }
+        if (start > end || start < 0 || end >= size) {
+          sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
+          sock.end();
+          return;
+        }
+        stream = await fileSvc.readFile(fileName, { start, end });
+        const len = end - start + 1;
         sendResponse(
           sock,
           206,
           {
-            'Content-Type': 'application/octet-stream',
+            'Content-Type': getMimeType(fileName) || 'application/octet-stream',
             'Accept-Ranges': 'bytes',
-            'Content-Range': `bytes ${start}-${start + len - 1}/${fileStat.size}`,
+            'Content-Range': `bytes ${start}-${end}/${size}`,
             'Content-Length': String(len),
           },
           stream,
         );
       } else {
         stream = await fileSvc.readFile(fileName);
-        const fileStat = await fileSvc.stat(fileName);
         const mimeType = getMimeType(fileName);
         sendResponse(
           sock,
           200,
-          { 'Content-Type': mimeType, 'Content-Length': String(fileStat.size) },
+          { 'Content-Type': mimeType, 'Content-Length': String(size) },
           stream,
         );
       }

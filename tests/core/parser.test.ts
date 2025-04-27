@@ -51,4 +51,32 @@ describe('HTTP Parser', () => {
     const r = parser.parse(raw);
     expect(r.httpVersion).toBe('HTTP/1.1');
   });
+
+  it('should handle completely empty request', () => {
+    const raw = '';
+    const parsed = parser.parse(raw);
+
+    expect(parsed.invalid).toBe(true);
+    expect(parsed.method).toBeFalsy;
+    expect(parsed.path).toBeFalsy;
+    expect(parsed.headers).toEqual({});
+  });
+
+  it('should correctly parse multiple query parameters', () => {
+    const raw = 'GET /search?q=nodejs&sort=desc HTTP/1.1\r\nHost: localhost\r\n\r\n';
+    const parsed = parser.parse(raw);
+
+    expect(parsed.method).toBe('GET');
+    expect(parsed.path).toBe('/search');
+    expect(parsed.query).toEqual({ q: 'nodejs', sort: 'desc' });
+  });
+
+  it('should handle duplicated headers gracefully', () => {
+    const raw = `GET / HTTP/1.1\r\nHost: localhost\r\nCookie: a=1\r\nCookie: b=2\r\n\r\n`;
+    const parsed = parser.parse(raw);
+
+    expect(parsed.headers.host).toBe('localhost');
+    expect(parsed.headers['cookie']).toBe('b=2'); // Note: last wins in simple parsing
+    expect(parsed.headersMap?.get('cookie')).toEqual(['a=1', 'b=2']);
+  });
 });

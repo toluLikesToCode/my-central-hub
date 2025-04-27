@@ -90,5 +90,77 @@ describe('FileService', () => {
 
       expect(fakeSocket.end).toHaveBeenCalled();
     });
+
+    it('should stream partial content for valid small range', () => {
+      (fs.existsSync as jest.Mock).mockReturnValue(true);
+      (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
+      (fs.createReadStream as jest.Mock).mockReturnValue({
+        pipe: jest.fn(),
+        on: jest.fn(),
+      });
+
+      FileService.streamFile('video.mp4', 'bytes=0-499', fakeSocket);
+
+      expect(fakeSocket.write).toHaveBeenCalledWith(
+        expect.stringContaining('HTTP/1.1 206 Partial Content'),
+      );
+    });
+
+    it('should stream partial content for valid range bytes=0-499', () => {
+      (fs.existsSync as jest.Mock).mockReturnValue(true);
+      (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
+      (fs.createReadStream as jest.Mock).mockReturnValue({
+        pipe: jest.fn(),
+        on: jest.fn(),
+      });
+
+      FileService.streamFile('video.mp4', 'bytes=0-499', fakeSocket);
+
+      expect(fakeSocket.write).toHaveBeenCalledWith(
+        expect.stringContaining('HTTP/1.1 206 Partial Content'),
+      );
+    });
+
+    it('should handle range with no start (e.g., bytes=-500)', () => {
+      (fs.existsSync as jest.Mock).mockReturnValue(true);
+      (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
+      (fs.createReadStream as jest.Mock).mockReturnValue({
+        pipe: jest.fn(),
+        on: jest.fn(),
+      });
+
+      FileService.streamFile('video.mp4', 'bytes=-500', fakeSocket);
+
+      expect(fakeSocket.write).toHaveBeenCalledWith(
+        expect.stringContaining('HTTP/1.1 206 Partial Content'),
+      );
+    });
+
+    it('should handle range with no end (e.g., bytes=500-)', () => {
+      (fs.existsSync as jest.Mock).mockReturnValue(true);
+      (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
+      (fs.createReadStream as jest.Mock).mockReturnValue({
+        pipe: jest.fn(),
+        on: jest.fn(),
+      });
+
+      FileService.streamFile('video.mp4', 'bytes=500-', fakeSocket);
+
+      expect(fakeSocket.write).toHaveBeenCalledWith(
+        expect.stringContaining('HTTP/1.1 206 Partial Content'),
+      );
+    });
+
+    it('should return 416 for invalid range format (e.g., bytes=invalid)', () => {
+      (fs.existsSync as jest.Mock).mockReturnValue(true);
+      (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
+
+      FileService.streamFile('video.mp4', 'bytes=invalid', fakeSocket);
+
+      expect(fakeSocket.write).toHaveBeenCalledWith(
+        expect.stringContaining('416 Range Not Satisfiable'),
+      );
+      expect(fakeSocket.end).toHaveBeenCalled();
+    });
   });
 });
