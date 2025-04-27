@@ -37,4 +37,18 @@ describe('HTTP Parser', () => {
     expect(parsed.url?.pathname).toBe('/hello');
     expect(parsed.headersMap?.get('host')).toEqual(['localhost']);
   });
+
+  it('exposes url, path, and query consistently', () => {
+    const raw = 'GET /stream?file=test.mp4 HTTP/1.1\r\nHost: x\r\n\r\n';
+    const r = parser.parse(raw);
+    expect(r.url.pathname).toBe('/stream');
+    expect(r.path).toBe('/stream');
+    expect(r.query).toEqual({ file: 'test.mp4' });
+  });
+
+  it('includes httpVersion', () => {
+    const raw = 'GET /test HTTP/1.1\r\nHost: x\r\n\r\n';
+    const r = parser.parse(raw);
+    expect(r.httpVersion).toBe('HTTP/1.1');
+  });
 });

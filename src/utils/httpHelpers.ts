@@ -18,3 +18,15 @@ export function getHeader(req: IncomingRequest, name: string): string | undefine
   }
   return req.headers?.[key];
 }
+
+/** Case-sensitive query lookup that falls back to searchParams */
+export function getQuery(req: IncomingRequest, key: string): string | undefined {
+  if (req.invalid || !req.query || !req.url) return undefined;
+
+  // ✅ look in the parser-built map first
+  const direct = req.query?.[key];
+  if (direct !== undefined) return direct;
+
+  // fallback (rare) – parse from URL
+  return req.url.searchParams.get(key) ?? undefined;
+}

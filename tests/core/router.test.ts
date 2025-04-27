@@ -14,6 +14,7 @@ describe('Router', () => {
 
   it('should return 404 for unknown route', async () => {
     const req: IncomingRequest = {
+      url: new URL('http://localhost/doesnotexist'),
       method: 'GET',
       path: '/doesnotexist',
       httpVersion: 'HTTP/1.1',
@@ -29,6 +30,7 @@ describe('Router', () => {
 
   it('should handle a valid /files GET request', async () => {
     const req: IncomingRequest = {
+      url: new URL('http://localhost/files'),
       method: 'GET',
       path: '/files',
       httpVersion: 'HTTP/1.1',

@@ -1,47 +1,42 @@
 import { Socket } from 'net';
+import { Readable } from 'stream';
+
+const STATUS_TEXT: Record<number, string> = {
+  200: 'OK',
+  206: 'Partial Content',
+  400: 'Bad Request',
+  404: 'Not Found',
+  405: 'Method Not Allowed',
+  416: 'Range Not Satisfiable', // ← new
+  500: 'Internal Server Error',
+};
 
 export function sendResponse(
   socket: Socket,
-  statusCode: number,
+  status: number,
   headers: Record<string, string>,
-  body: string | Buffer,
+  body?: string | Buffer | Readable,
 ): void {
-  const statusMessage = getStatusMessage(statusCode);
+  const head =
+    `HTTP/1.1 ${status} ${STATUS_TEXT[status] ?? ''}\r\n` +
+    Object.entries(headers)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('\r\n') +
+    '\r\n\r\n';
 
-  const headerLines = Object.entries(headers)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join('\r\n');
+  socket.write(head);
 
-  const responseHeaders = `HTTP/1.1 ${statusCode} ${statusMessage}\r\n${headerLines}\r\n\r\n`;
+  if (!body) {
+    socket.end();
+    return;
+  }
 
-  socket.write(responseHeaders);
-  socket.write(body);
-  socket.end();
-}
-
-function getStatusMessage(statusCode: number): string {
-  switch (statusCode) {
-    case 200:
-      return 'OK';
-    case 201:
-      return 'Created';
-    case 204:
-      return 'No Content';
-    case 206:
-      return 'Partial Content';
-    case 400:
-      return 'Bad Request';
-    case 401:
-      return 'Unauthorized';
-    case 403:
-      return 'Forbidden';
-    case 404:
-      return 'Not Found';
-    case 416:
-      return 'Range Not Satisfiable';
-    case 500:
-      return 'Internal Server Error';
-    default:
-      return 'Unknown';
+  if (body instanceof Readable) {
+    body.pipe(socket);
+    body.once('error', () => socket.end());
+    body.once('end', () => socket.end());
+  } else {
+    socket.write(body);
+    socket.end();
   }
 }
