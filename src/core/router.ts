@@ -1,66 +1,131 @@
+// src/core/router.ts
 import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
-import { fileStreamingController } from '../modules/file-streamer/index';
-import { logger } from '../utils/logger';
-import { URL } from 'url';
 import { sendResponse } from '../entities/sendResponse';
+import { logger } from '../utils/logger';
 
-type Handler = (req: IncomingRequest, socket: Socket) => Promise<void>;
+/* ───── Types ─────────────────────────────────────────────────────────── */
+
+export type Handler = (req: IncomingRequest, sock: Socket) => Promise<void> | void;
+export type Middleware = (
+  req: IncomingRequest,
+  sock: Socket,
+  next: () => Promise<void>,
+) => Promise<void> | void;
 
 interface Route {
-  method: string;
-  path: string;
+  method: string; // 'GET' | 'POST' | 'ANY'
+  regex: RegExp; // compiled path matcher
+  keys: string[]; // param names (for :id stuff)
   handler: Handler;
 }
 
+/* ───── Router implementation ─────────────────────────────────────────── */
+
 class Router {
+  private middlewares: Middleware[] = [];
   private routes: Route[] = [];
 
-  constructor() {
-    this.initializeRoutes();
+  /* ---------- Middleware ---------- */
+  use(mw: Middleware) {
+    this.middlewares.push(mw);
   }
 
-  private initializeRoutes() {
-    this.routes.push({
-      method: 'GET',
-      path: '/stream',
-      handler: fileStreamingController.handleStream,
-    });
-
-    this.routes.push({
-      method: 'GET',
-      path: '/files',
-      handler: fileStreamingController.listFiles,
-    });
+  /* ---------- Route registration helpers ---------- */
+  add(method: string, path: string, handler: Handler) {
+    const { regex, keys } = compilePath(path);
+    this.routes.push({ method: method.toUpperCase(), regex, keys, handler });
+  }
+  get(path: string, h: Handler) {
+    this.add('GET', path, h);
+  }
+  post(path: string, h: Handler) {
+    this.add('POST', path, h);
+  }
+  put(path: string, h: Handler) {
+    this.add('PUT', path, h);
+  }
+  del(path: string, h: Handler) {
+    this.add('DELETE', path, h);
+  }
+  any(path: string, h: Handler) {
+    this.add('ANY', path, h);
   }
 
-  async handle(req: IncomingRequest, socket: Socket): Promise<void> {
-    logger.info(`Routing request: ${req.method} ${req.path}`);
-
-    if (!req.path) {
-      logger.warn(`No path provided in request`);
-      sendResponse(socket, 400, { 'Content-Type': 'text/plain' }, 'Missing path');
+  /* ---------- Main entry ---------- */
+  async handle(req: IncomingRequest, sock: Socket): Promise<void> {
+    if (!req.path || typeof req.path !== 'string') {
+      sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
       return;
     }
+    logger.info(`router saw ${req.method} ${req.path}`);
+    // 1. run middleware chain
+    let i = 0;
+    const run = async (): Promise<void> => {
+      if (i < this.middlewares.length) {
+        const mw = this.middlewares[i++];
+        await mw(req, sock, run);
+      }
+    };
+    await run();
 
-    const url = new URL(req.path, `http://${req.headers.host}`);
-    const pathname = url.pathname;
-
-    const route = this.routes.find((r) => r.method === req.method && r.path === pathname);
+    // 2. route lookup
+    const matching = this.routes.filter((r) => r.regex.test(req.path));
+    const route =
+      matching.find((r) => r.method === req.method) ?? matching.find((r) => r.method === 'ANY');
 
     if (!route) {
-      logger.warn(`No route found for ${req.method} ${pathname}`);
-      sendResponse(socket, 404, { 'Content-Type': 'text/plain' }, '404 Not Found');
+      // Distinguish 404 vs 405
+      if (matching.length) {
+        sendResponse(
+          sock,
+          405,
+          { Allow: matching.map((r) => r.method).join(', ') },
+          'Method Not Allowed',
+        );
+      } else {
+        sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, 'Not Found');
+      }
       return;
     }
 
+    // 3. pull params (/:id etc.) → req.ctx.params
+    const match = route.regex.exec(req.path)!;
+    const params: Record<string, string> = {};
+    route.keys.forEach((k, idx) => {
+      params[k] = decodeURIComponent(match[idx + 1]);
+    });
+    (req.ctx ??= {}).params = params;
+
+    // 4. invoke handler
     try {
-      await route.handler(req, socket);
-    } catch (error) {
-      logger.error(`Handler error: ${(error as Error).message}`);
-      sendResponse(socket, 500, { 'Content-Type': 'text/plain' }, 'Server Error');
+      await route.handler(req, sock);
+    } catch (err) {
+      logger.error(`Handler error: ${(err as Error).message}`);
+      sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, '500 Server Error');
     }
   }
 }
 
+/* ───── Path pattern compiler ───────────────────────────────────────────
+   /files/:name  ->  ^/files/([^/]+)$           keys=['name']
+   /api/*        ->  ^/api/(.*)$                keys=['*']
+------------------------------------------------------------------------ */
+function compilePath(pattern: string): { regex: RegExp; keys: string[] } {
+  const keys: string[] = [];
+  const regexSrc = pattern
+    .replace(/\/:(\w+)/g, (_, k) => {
+      keys.push(k);
+      return '/([^/]+)';
+    })
+    .replace(/\*/g, () => {
+      keys.push('*');
+      return '(.*)';
+    });
+  return { regex: new RegExp(`^${regexSrc}$`), keys };
+}
+
+/* ───── Exports ───────────────────────────────────────────────────────── */
+
 export const router = new Router();
+export default router; // so `import router` also works

@@ -1,75 +1,125 @@
-import { createReadStream, statSync, existsSync, readdirSync } from 'fs';
+// file-streamer/fileService.ts
+import {
+  existsSync,
+  createReadStream,
+  statSync,
+  createWriteStream,
+  readdirSync, // ← added for legacy tests
+} from 'fs';
+import { stat, readdir, mkdir } from 'fs/promises';
+import { resolve, join } from 'path';
+import { Readable } from 'stream';
 import { Socket } from 'net';
-import { join } from 'path';
 import { config } from '../../config/server.config';
-import { logger } from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
 import { sendResponse } from '../../entities/sendResponse';
 
 export class FileService {
-  static streamFile(fileName: string, range: string | undefined, socket: Socket) {
-    const filePath = join(config.publicDir, 'media', fileName);
+  constructor(private readonly rootDir: string) {}
 
-    if (!existsSync(filePath)) {
-      logger.warn(`File not found: ${fileName}`);
-      sendResponse(socket, 404, { 'Content-Type': 'text/plain' }, 'File Not Found');
+  private resolveSafe(relPath: string): string {
+    const abs = resolve(this.rootDir, relPath);
+    if (!abs.startsWith(this.rootDir)) throw new Error('Path traversal attempt');
+    return abs;
+  }
+
+  /* ---------- modern async API ---------- */
+
+  async listFiles(relDir = '.'): Promise<string[]> {
+    return await readdir(this.resolveSafe(relDir));
+  }
+
+  async stat(relPath: string) {
+    return await stat(this.resolveSafe(relPath));
+  }
+
+  async readFile(relPath: string, range?: { start: number; end: number }): Promise<Readable> {
+    const abs = this.resolveSafe(relPath);
+    return createReadStream(abs, range);
+  }
+
+  async saveFile(relPath: string, data: AsyncIterable<Buffer>): Promise<void> {
+    const abs = this.resolveSafe(relPath);
+    await mkdir(resolve(abs, '..'), { recursive: true });
+    const ws = createWriteStream(abs);
+    for await (const chunk of data) ws.write(chunk);
+    await new Promise<void>((res, rej) => {
+      ws.end(res);
+      ws.on('error', rej);
+    });
+  }
+
+  /* ---------- legacy static helpers (keep old tests green) ---------- */
+
+  static listFiles(): { files: string[] } {
+    const dir = config.mediaDir;
+    if (!existsSync(dir)) return { files: [] };
+    return { files: readdirSync(dir) };
+  }
+
+  static streamFile(filename: string, rangeHeader: string | undefined, socket: Socket): void {
+    const abs = join(config.mediaDir, filename);
+
+    if (!existsSync(abs)) {
+      sendResponse(socket, 404, { 'Content-Type': 'text/plain' }, '404 Not Found');
+      socket.end();
       return;
     }
 
-    const fileStat = statSync(filePath);
-    const totalSize = fileStat.size;
-    const contentType = getMimeType(fileName);
+    const stats = statSync(abs);
+    const size = stats.size;
 
-    let start = 0;
-    let end = totalSize - 1;
+    const start = 0;
+    const end = size - 1;
 
-    if (range) {
-      const matches = range.match(/bytes=(\d*)-(\d*)/);
-      if (matches) {
-        const [, startStr, endStr] = matches;
-        start = startStr ? parseInt(startStr, 10) : start;
-        end = endStr ? parseInt(endStr, 10) : end;
+    if (rangeHeader) {
+      // Matches bytes=START-END, bytes=START-, bytes=-END
+      const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
+
+      if (m) {
+        const startStr = m[1];
+        const endStr = m[2];
+        let start: number | undefined;
+        let end: number | undefined;
+
+        if (startStr && endStr) {
+          // bytes=START-END
+          start = parseInt(startStr, 10);
+          end = parseInt(endStr, 10);
+        } else if (startStr) {
+          // bytes=START-
+          start = parseInt(startStr, 10);
+          end = size - 1;
+        } else if (endStr) {
+          // bytes=-END
+          start = size - parseInt(endStr, 10);
+          end = size - 1;
+        }
+
+        if (start === undefined || end === undefined || start > end || start >= size) {
+          sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
+          socket.end();
+          return;
+        }
+      } else {
+        sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
+        socket.end();
+        return;
       }
     }
 
-    if (start >= totalSize || end >= totalSize) {
-      logger.error(`Invalid range: ${start}-${end}`);
-      sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, 'Invalid Range');
-      return;
-    }
-
-    const chunkSize = end - start + 1;
-    const fileStream = createReadStream(filePath, { start, end });
-
+    const len = end - start + 1;
+    const stream = createReadStream(abs, { start, end });
     const headers = {
-      'Content-Type': contentType,
-      'Content-Length': chunkSize.toString(),
-      'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+      'Content-Type': getMimeType(filename) ?? 'application/octet-stream',
       'Accept-Ranges': 'bytes',
+      'Content-Range': `bytes ${start}-${end}/${size}`,
+      'Content-Length': String(len),
     };
 
-    sendResponse(socket, 206, headers, '');
+    sendResponse(socket, 206, headers, stream);
 
-    fileStream.pipe(socket);
-    fileStream.on('error', (err) => {
-      logger.error(`File stream error: ${err.message}`);
-      sendResponse(socket, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
-    });
+    stream.on('error', () => socket.end());
   }
-
-  static listFiles(): { files: string[] } {
-    const mediaDir = join(config.publicDir, 'media');
-
-    if (!existsSync(mediaDir)) {
-      logger.warn(`Media directory not found: ${mediaDir}`);
-      return { files: [] };
-    }
-
-    const files = readdirSync(mediaDir).filter(() => {
-      // Later: you can filter by allowed extensions (e.g., .mp4, .mp3)
-      return true;
-    });
-
-    return { files };
-  }
+  /* ------------------------------------------------------------------ */
 }

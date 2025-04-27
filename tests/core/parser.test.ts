@@ -25,7 +25,58 @@ describe('HTTP Parser', () => {
     const raw = 'INVALID REQUEST';
     const parsed = parser.parse(raw);
 
-    expect(parsed.method).toBeUndefined();
-    expect(parsed.path).toBeUndefined();
+    expect(parsed.invalid).toBe(true);
+    expect(parsed.method).toBeFalsy();
+    expect(parsed.path).toBeFalsy();
+  });
+
+  it('should parse url.pathname and headersMap correctly', () => {
+    const raw = 'GET /hello HTTP/1.1\r\nHost: localhost\r\nUser-Agent: test\r\n\r\n';
+    const parsed = parser.parse(raw);
+
+    expect(parsed.url?.pathname).toBe('/hello');
+    expect(parsed.headersMap?.get('host')).toEqual(['localhost']);
+  });
+
+  it('exposes url, path, and query consistently', () => {
+    const raw = 'GET /stream?file=test.mp4 HTTP/1.1\r\nHost: x\r\n\r\n';
+    const r = parser.parse(raw);
+    expect(r.url.pathname).toBe('/stream');
+    expect(r.path).toBe('/stream');
+    expect(r.query).toEqual({ file: 'test.mp4' });
+  });
+
+  it('includes httpVersion', () => {
+    const raw = 'GET /test HTTP/1.1\r\nHost: x\r\n\r\n';
+    const r = parser.parse(raw);
+    expect(r.httpVersion).toBe('HTTP/1.1');
+  });
+
+  it('should handle completely empty request', () => {
+    const raw = '';
+    const parsed = parser.parse(raw);
+
+    expect(parsed.invalid).toBe(true);
+    expect(parsed.method).toBeFalsy();
+    expect(parsed.path).toBeFalsy();
+    expect(parsed.headers).toEqual({});
+  });
+
+  it('should correctly parse multiple query parameters', () => {
+    const raw = 'GET /search?q=nodejs&sort=desc HTTP/1.1\r\nHost: localhost\r\n\r\n';
+    const parsed = parser.parse(raw);
+
+    expect(parsed.method).toBe('GET');
+    expect(parsed.path).toBe('/search');
+    expect(parsed.query).toEqual({ q: 'nodejs', sort: 'desc' });
+  });
+
+  it('should handle duplicated headers gracefully', () => {
+    const raw = `GET / HTTP/1.1\r\nHost: localhost\r\nCookie: a=1\r\nCookie: b=2\r\n\r\n`;
+    const parsed = parser.parse(raw);
+
+    expect(parsed.headers.host).toBe('localhost');
+    expect(parsed.headers['cookie']).toBe('b=2'); // Note: last wins in simple parsing
+    expect(parsed.headersMap?.get('cookie')).toEqual(['a=1', 'b=2']);
   });
 });
