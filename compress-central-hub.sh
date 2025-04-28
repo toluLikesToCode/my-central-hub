@@ -48,7 +48,7 @@ for arg in "$@"; do
 done
 
 # Setup Repomix options based on compression level
-REPO_OPTIONS="--style xml -i \"**/*.log,**/*.json,**/.gitignore,node_modules/**,thumbnails/**,**/dist/**,**/build/**\" --token-count-encoding o200k_base"
+REPO_OPTIONS="--style xml -i **/*.log,**/*.json,**/.gitignore,node_modules/**,thumbnails/**,**/dist/**,**/build/** --token-count-encoding o200k_base"
 
 case $COMPRESSION_LEVEL in
   1)
