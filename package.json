@@ -11,6 +11,7 @@
     "build": "npm run clean && tsc",
     "start": "node dist/main.js",
     "test": "jest",
+    "test:stress": "jest \"stress/**/*.test.ts\"",
     "type-check": "tsc --noEmit",
     "lint:ts": "eslint src tests --ext .ts",
     "lint:md": "markdownlint --fix './**/*.md' --ignore node_modules --ignore dist --ignore coverage --ignore public",

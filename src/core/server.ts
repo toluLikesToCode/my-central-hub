@@ -1,8 +1,9 @@
 import { createServer, Socket } from 'net';
-import { parser } from './parser';
+import { HttpRequestParser } from './httpParser';
 import { router } from './router';
 import { logger } from '../utils/logger';
 import { sendResponse } from '../entities/sendResponse';
+import { config } from '../config/server.config'; // Assuming config is imported from a config file
 
 export class HttpServer {
   private server = createServer();
@@ -15,25 +16,69 @@ export class HttpServer {
   private setupServer() {
     this.server.on('connection', (socket: Socket) => {
       this.connections.add(socket);
-      const buffer: Buffer[] = [];
+      const parser = new HttpRequestParser();
 
-      socket.once('close', () => this.connections.delete(socket));
+      // --- ⏰ Idle Timeout (Protection) ---
+      const HEADER_TIMEOUT_MS = config.headerTimeoutMs;
+      const BODY_TIMEOUT_MS = config.bodyTimeoutMs;
+      let headerTimer: NodeJS.Timeout | undefined;
+      let bodyTimer: NodeJS.Timeout | undefined;
+
+      const refreshTimeout = () => {
+        if (headerTimer) clearTimeout(headerTimer);
+        headerTimer = setTimeout(() => {
+          logger.warn('Closing idle socket (header timeout)');
+          socket.destroy();
+        }, HEADER_TIMEOUT_MS);
+      };
+
+      const refreshBodyTimeout = () => {
+        if (bodyTimer) clearTimeout(bodyTimer);
+        bodyTimer = setTimeout(() => {
+          logger.warn('Closing idle socket (body timeout)');
+          socket.destroy();
+        }, BODY_TIMEOUT_MS);
+      };
+
+      refreshTimeout(); // start immediately
+
+      socket.once('close', () => {
+        this.connections.delete(socket);
+        if (headerTimer) clearTimeout(headerTimer);
+        if (bodyTimer) clearTimeout(bodyTimer);
+      });
       logger.info('New connection established.');
       socket.on('data', async (chunk: Buffer) => {
-        buffer.push(chunk);
-        const full = Buffer.concat(buffer);
-
-        // wait until we have all headers
-        if (!full.includes('\r\n\r\n')) return;
-
+        refreshTimeout();
         try {
-          const request = parser.parse(full.toString());
+          const request = parser.feed(chunk);
+          if (!request) return; // still waiting for complete request
+
+          clearTimeout(headerTimer);
+          if (request.method === 'POST' || request.method === 'PUT' || request.method === 'PATCH') {
+            refreshBodyTimeout();
+          }
+
           await router.handle(request, socket);
+          clearTimeout(bodyTimer);
+
+          // Persistent connection support
+          const connectionHeader = request.headers['connection'] || '';
+          const isHttp10 = request.httpVersion === 'HTTP/1.0';
+          const isHttp11 = request.httpVersion === 'HTTP/1.1';
+          const conn = connectionHeader.toLowerCase();
+
+          if ((isHttp10 && conn !== 'keep-alive') || (isHttp11 && conn === 'close')) {
+            socket.end();
+          } else {
+            parser.reset();
+            refreshTimeout(); // reset header timer for next request
+          }
         } catch (err) {
           logger.error(`Failed request: ${(err as Error).message}`);
           sendResponse(socket, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
+          socket.destroy();
         }
-        buffer.length = 0; // reset for next
       });
 
       socket.on('error', (err) => {

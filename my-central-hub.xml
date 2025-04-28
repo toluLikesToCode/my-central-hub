@@ -1,0 +1,1146 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+4. Repository files, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: **/*.log, **/*.json, **/.gitignore, node_modules/**, thumbnails/**, **/dist/**, **/build/**
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+<additional_info>
+
+</additional_info>
+
+</file_summary>
+
+<directory_structure>
+config/
+  server.config.ts
+core/
+  httpParser.ts
+  parser.ts
+  router.ts
+  server.ts
+entities/
+  http.ts
+  sendResponse.ts
+modules/
+  file-streamer/
+    fileService.ts
+    fileStreamingController.ts
+    index.ts
+routes/
+  files.routes.ts
+  index.ts
+  stream.routes.ts
+utils/
+  helpers.ts
+  httpHelpers.ts
+  logger.ts
+  mimeTypes.ts
+main.ts
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="config/server.config.ts">
+import dotenv from 'dotenv';
+import { join } from 'path';
+import { logger } from '../utils/logger';
+
+// Load environment variables from .env file
+dotenv.config();
+
+export const config = {
+  port: process.env.PORT ? parseInt(process.env.PORT, 10) : 8080,
+  publicDir: process.env.PUBLIC_DIR
+    ? join(process.cwd(), process.env.PUBLIC_DIR)
+    : join(process.cwd(), 'public'),
+  mediaDir: process.env.MEDIA_DIR
+    ? join(process.cwd(), process.env.MEDIA_DIR)
+    : join(process.cwd(), 'media'),
+  headerTimeoutMs: process.env.HEADER_TIMEOUT_MS
+    ? parseInt(process.env.HEADER_TIMEOUT_MS, 10)
+    : 5000,
+};
+
+logger.info(`Server configuration:`);
+logger.info(`- Port: ${config.port}`);
+logger.info(`- Public Directory: ${config.publicDir}`);
+logger.info(`- Media Directory: ${config.mediaDir}`);
+logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
+</file>
+
+<file path="core/httpParser.ts">
+import { IncomingRequest } from '../entities/http';
+import { URL } from 'url';
+import { logger } from '../utils/logger';
+
+enum ParserState {
+  REQUEST_LINE,
+  HEADERS,
+  BODY,
+  CHUNK_SIZE,
+  CHUNK_BODY,
+  CHUNK_TRAILER,
+  DONE,
+  ERROR,
+}
+
+const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
+const MAX_HEADER_BYTES = 8192; // 8KB
+const MAX_HEADERS = 100; // Maximum number of headers allowed
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+
+export class HttpRequestParser {
+  private buffer = Buffer.alloc(0);
+  private state = ParserState.REQUEST_LINE;
+  private headers: Record<string, string> = {};
+  private headersMap = new Map<string, string[]>();
+  private bodyChunks: Buffer[] = [];
+  private method = '';
+  private httpVersion = '';
+  private url!: URL;
+  private contentLength = 0;
+  private remainingBody = 0;
+  private isChunked = false;
+  private invalid = false;
+
+  feed(data: Buffer): IncomingRequest | null {
+    this.buffer = Buffer.concat([this.buffer, data]);
+    try {
+      while (true) {
+        // REQUEST_LINE
+        if (this.state === ParserState.REQUEST_LINE) {
+          if (!this.buffer.includes('\r\n')) return null;
+          const idx = this.buffer.indexOf('\r\n');
+          const requestLine = this.buffer.subarray(0, idx).toString();
+          this.buffer = this.buffer.subarray(idx + 2);
+          const parts = requestLine.split(' ');
+          if (parts.length !== 3) {
+            this._setError('Invalid request line: ' + requestLine);
+            continue;
+          }
+          const [method, reqPath, version] = parts;
+          if (!ALLOWED_METHODS.includes(method)) {
+            this._setError('Unsupported method: ' + method);
+            continue;
+          }
+          if (!version.startsWith('HTTP/')) {
+            this._setError('Invalid HTTP version: ' + version);
+            continue;
+          }
+          this.method = method;
+          this.httpVersion = version;
+          try {
+            this.url = new URL(reqPath, 'http://placeholder');
+          } catch {
+            this._setError('Malformed URL: ' + reqPath);
+            continue;
+          }
+          this.state = ParserState.HEADERS;
+        }
+        // HEADERS
+        if (this.state === ParserState.HEADERS) {
+          const idx = this.buffer.indexOf('\r\n\r\n');
+          if (idx === -1) {
+            if (this.buffer.length > MAX_HEADER_BYTES) {
+              this._setError('Headers too large');
+            }
+            return null;
+          }
+          const headersRaw = this.buffer.subarray(0, idx).toString();
+          this.buffer = this.buffer.subarray(idx + 4);
+          const lines = headersRaw.split('\r\n');
+          let lastKey = '';
+          let headerCount = 0;
+          for (const line of lines) {
+            if (line.trim() === '') continue;
+            if (line.startsWith(' ') || line.startsWith('\t')) {
+              if (lastKey) {
+                this.headers[lastKey] += ' ' + line.trim();
+              }
+              continue;
+            }
+            const colon = line.indexOf(':');
+            if (colon === -1) {
+              this._setError('Invalid header line: ' + line);
+              continue;
+            }
+            const key = line.slice(0, colon).trim().toLowerCase();
+            const value = line.slice(colon + 1).trim();
+            lastKey = key;
+            this.headers[key] = value;
+            const list = this.headersMap.get(key) ?? [];
+            list.push(value);
+            this.headersMap.set(key, list);
+            headerCount++;
+            if (headerCount > MAX_HEADERS) {
+              this._setError('Too many headers');
+              break;
+            }
+          }
+          if (
+            this.headers['transfer-encoding'] &&
+            this.headers['transfer-encoding'].toLowerCase() === 'chunked'
+          ) {
+            this.isChunked = true;
+            this.state = ParserState.CHUNK_SIZE;
+          } else if (this.headers['content-length']) {
+            this.contentLength = parseInt(this.headers['content-length'], 10);
+            if (isNaN(this.contentLength) || this.contentLength < 0) {
+              this._setError('Invalid Content-Length');
+              continue;
+            }
+            this.remainingBody = this.contentLength;
+            this.state = this.contentLength > 0 ? ParserState.BODY : ParserState.DONE;
+          } else {
+            this.state = ParserState.DONE;
+          }
+        }
+        // BODY
+        if (this.state === ParserState.BODY) {
+          if (this.remainingBody > MAX_BODY_BYTES) {
+            this._setError('Request body too large');
+            continue;
+          }
+          if (this.buffer.length < this.remainingBody) return null;
+          this.bodyChunks.push(this.buffer.subarray(0, this.remainingBody));
+          this.buffer = this.buffer.subarray(this.remainingBody);
+          this.remainingBody = 0;
+          this.state = ParserState.DONE;
+        }
+        // CHUNK_SIZE
+        if (this.state === ParserState.CHUNK_SIZE) {
+          const idx = this.buffer.indexOf('\r\n');
+          if (idx === -1) return null;
+          const line = this.buffer.subarray(0, idx).toString();
+          this.buffer = this.buffer.subarray(idx + 2);
+          const chunkSize = parseInt(line, 16);
+          if (isNaN(chunkSize)) {
+            this._setError('Invalid chunk size: ' + line);
+            continue;
+          }
+          if (chunkSize === 0) {
+            this.state = ParserState.CHUNK_TRAILER;
+          } else {
+            this.remainingBody = chunkSize;
+            this.state = ParserState.CHUNK_BODY;
+          }
+        }
+        // CHUNK_BODY
+        if (this.state === ParserState.CHUNK_BODY) {
+          if (this.remainingBody > MAX_BODY_BYTES) {
+            this._setError('Chunk body too large');
+            continue;
+          }
+          if (this.buffer.length < this.remainingBody) return null;
+          const chunk = this.buffer.subarray(0, this.remainingBody);
+          this.bodyChunks.push(chunk);
+          this.buffer = this.buffer.subarray(this.remainingBody);
+          this.remainingBody = 0;
+          if (this.buffer.length < 2 || this.buffer.subarray(0, 2).toString() !== '\r\n') {
+            this._setError('Missing CRLF after chunk');
+            continue;
+          }
+          this.buffer = this.buffer.subarray(2);
+          this.state = ParserState.CHUNK_SIZE;
+        }
+        // CHUNK_TRAILER
+        if (this.state === ParserState.CHUNK_TRAILER) {
+          if (this.buffer.length === 0 || this.buffer.toString() === '\r\n') {
+            this.buffer = Buffer.alloc(0);
+            this.state = ParserState.DONE;
+            continue;
+          }
+          const idx = this.buffer.indexOf('\r\n\r\n');
+          if (idx === -1) return null;
+          this.buffer = this.buffer.subarray(idx + 4);
+          this.state = ParserState.DONE;
+        }
+        // DONE
+        if (this.state === ParserState.DONE) {
+          const finalBody = this.bodyChunks.length ? Buffer.concat(this.bodyChunks) : undefined;
+          const request = {
+            method: this.method,
+            path: this.url.pathname,
+            query: Object.fromEntries(this.url.searchParams.entries()),
+            headers: this.headers,
+            headersMap: this.headersMap,
+            httpVersion: this.httpVersion,
+            url: this.url,
+            body: finalBody,
+            raw: '',
+            ctx: {},
+            invalid: this.invalid,
+          };
+          this.reset();
+          return request;
+        }
+        // ERROR
+        if (this.state === ParserState.ERROR) {
+          this.reset();
+          return {
+            method: '',
+            path: '',
+            query: {},
+            headers: {},
+            httpVersion: '',
+            url: new URL('http://invalid'),
+            body: undefined,
+            raw: '',
+            ctx: {},
+            invalid: true,
+          };
+        }
+      }
+    } catch (err) {
+      this._setError(`Error during parsing: ${(err as Error).message}`);
+      this.reset();
+      return {
+        method: '',
+        path: '',
+        query: {},
+        headers: {},
+        httpVersion: '',
+        url: new URL('http://invalid'),
+        body: undefined,
+        raw: '',
+        ctx: {},
+        invalid: true,
+      };
+    }
+  }
+
+  private _setError(message: string): void {
+    logger.error(message);
+    this.invalid = true;
+    this.state = ParserState.ERROR;
+  }
+
+  reset(): void {
+    this.buffer = Buffer.alloc(0);
+    this.state = ParserState.REQUEST_LINE;
+    this.headers = {};
+    this.headersMap = new Map();
+    this.bodyChunks = [];
+    this.method = '';
+    this.httpVersion = '';
+    this.contentLength = 0;
+    this.remainingBody = 0;
+    this.isChunked = false;
+    this.invalid = false;
+  }
+}
+</file>
+
+<file path="core/parser.ts">
+import { IncomingRequest } from '../entities/http';
+import { URL } from 'url';
+
+const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'] as const;
+const MAX_HEADERS = 1000;
+
+// helper for duplicate headers
+function addHeader(map: Map<string, string[]>, key: string, value: string) {
+  const k = key.toLowerCase();
+  const list = map.get(k) ?? [];
+  list.push(value);
+  map.set(k, list);
+}
+
+export const parser = {
+  parse(raw: string): IncomingRequest {
+    const dummyUrl = new URL('http://placeholder/');
+    const earlyReturn = (): IncomingRequest => ({
+      url: dummyUrl,
+      path: '',
+      query: {},
+      httpVersion: '',
+      method: '',
+      headers: {},
+      headersMap: new Map(),
+      raw,
+      ctx: {},
+      invalid: true,
+    });
+
+    /* -------- empty buffer guard -------- */
+    if (raw.length === 0) return earlyReturn();
+
+    const [head = '', bodyString = ''] = raw.split('\r\n\r\n');
+    const lines = head.split('\r\n');
+
+    /* -------- request-line split -------- */
+    const [requestLine, ...headerLines] = lines;
+    const parts = requestLine.split(' ');
+    if (parts.length < 3) return earlyReturn();
+
+    const [method, fullPath, httpVersion] = parts;
+    let invalid =
+      !ALLOWED_METHODS.includes(method as (typeof ALLOWED_METHODS)[number]) ||
+      !fullPath.startsWith('/') ||
+      !httpVersion.startsWith('HTTP/');
+
+    /* -------- URL + query -------- */
+    const url = new URL(fullPath, 'http://placeholder');
+    const query: Record<string, string> = {};
+    url.searchParams.forEach((v, k) => (query[k] = v));
+
+    /* -------- headers -------- */
+    const headers: Record<string, string> = {};
+    const headersMap = new Map<string, string[]>();
+
+    if (headerLines.length > MAX_HEADERS) invalid = true;
+
+    for (const line of headerLines) {
+      const idx = line.indexOf(':');
+      if (idx === -1) {
+        invalid = true;
+        continue;
+      }
+      const key = line.slice(0, idx).trim();
+      const value = line.slice(idx + 1).trim();
+      headers[key.toLowerCase()] = value;
+      addHeader(headersMap, key, value);
+    }
+
+    const body = bodyString ? Buffer.from(bodyString, 'utf-8') : undefined;
+
+    return {
+      url,
+      path: url.pathname,
+      query,
+      httpVersion,
+      method,
+      headers,
+      headersMap,
+      body,
+      raw,
+      ctx: {},
+      invalid,
+    };
+  },
+};
+</file>
+
+<file path="core/router.ts">
+// src/core/router.ts
+import { Socket } from 'net';
+import { IncomingRequest } from '../entities/http';
+import { sendResponse } from '../entities/sendResponse';
+import { logger } from '../utils/logger';
+
+/* ───── Types ─────────────────────────────────────────────────────────── */
+
+export type Handler = (req: IncomingRequest, sock: Socket) => Promise<void> | void;
+export type Middleware = (
+  req: IncomingRequest,
+  sock: Socket,
+  next: () => Promise<void>,
+) => Promise<void> | void;
+
+interface Route {
+  method: string; // 'GET' | 'POST' | 'ANY'
+  regex: RegExp; // compiled path matcher
+  keys: string[]; // param names (for :id stuff)
+  handler: Handler;
+}
+
+/* ───── Router implementation ─────────────────────────────────────────── */
+
+class Router {
+  private middlewares: Middleware[] = [];
+  private routes: Route[] = [];
+
+  /* ---------- Middleware ---------- */
+  use(mw: Middleware) {
+    this.middlewares.push(mw);
+  }
+
+  /* ---------- Route registration helpers ---------- */
+  add(method: string, path: string, handler: Handler) {
+    const { regex, keys } = compilePath(path);
+    this.routes.push({ method: method.toUpperCase(), regex, keys, handler });
+  }
+  get(path: string, h: Handler) {
+    this.add('GET', path, h);
+  }
+  post(path: string, h: Handler) {
+    this.add('POST', path, h);
+  }
+  put(path: string, h: Handler) {
+    this.add('PUT', path, h);
+  }
+  del(path: string, h: Handler) {
+    this.add('DELETE', path, h);
+  }
+  any(path: string, h: Handler) {
+    this.add('ANY', path, h);
+  }
+
+  /* ---------- Main entry ---------- */
+  async handle(req: IncomingRequest, sock: Socket): Promise<void> {
+    if (!req.path || typeof req.path !== 'string') {
+      sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
+      return;
+    }
+    logger.info(`router saw ${req.method} ${req.path}`);
+    // 1. run middleware chain
+    let i = 0;
+    const run = async (): Promise<void> => {
+      if (i < this.middlewares.length) {
+        const mw = this.middlewares[i++];
+        await mw(req, sock, run);
+      }
+    };
+    await run();
+
+    // 2. route lookup
+    const matching = this.routes.filter((r) => r.regex.test(req.path));
+    const route =
+      matching.find((r) => r.method === req.method) ?? matching.find((r) => r.method === 'ANY');
+
+    if (!route) {
+      // Distinguish 404 vs 405
+      if (matching.length) {
+        sendResponse(
+          sock,
+          405,
+          { Allow: matching.map((r) => r.method).join(', ') },
+          'Method Not Allowed',
+        );
+      } else {
+        sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, 'Not Found');
+      }
+      return;
+    }
+
+    // 3. pull params (/:id etc.) → req.ctx.params
+    const match = route.regex.exec(req.path)!;
+    const params: Record<string, string> = {};
+    route.keys.forEach((k, idx) => {
+      params[k] = decodeURIComponent(match[idx + 1]);
+    });
+    (req.ctx ??= {}).params = params;
+
+    // 4. invoke handler
+    try {
+      await route.handler(req, sock);
+    } catch (err) {
+      logger.error(`Handler error: ${(err as Error).message}`);
+      sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, '500 Server Error');
+    }
+  }
+}
+
+/* ───── Path pattern compiler ───────────────────────────────────────────
+   /files/:name  ->  ^/files/([^/]+)$           keys=['name']
+   /api/*        ->  ^/api/(.*)$                keys=['*']
+------------------------------------------------------------------------ */
+function compilePath(pattern: string): { regex: RegExp; keys: string[] } {
+  const keys: string[] = [];
+  const regexSrc = pattern
+    .replace(/\/:(\w+)/g, (_, k) => {
+      keys.push(k);
+      return '/([^/]+)';
+    })
+    .replace(/\*/g, () => {
+      keys.push('*');
+      return '(.*)';
+    });
+  return { regex: new RegExp(`^${regexSrc}$`), keys };
+}
+
+/* ───── Exports ───────────────────────────────────────────────────────── */
+
+export const router = new Router();
+export default router; // so `import router` also works
+</file>
+
+<file path="core/server.ts">
+import { createServer, Socket } from 'net';
+import { HttpRequestParser } from './httpParser';
+import { router } from './router';
+import { logger } from '../utils/logger';
+import { sendResponse } from '../entities/sendResponse';
+import { config } from '../config/server.config'; // Assuming config is imported from a config file
+
+export class HttpServer {
+  private server = createServer();
+  private readonly connections = new Set<Socket>();
+
+  constructor(private port: number) {
+    this.setupServer();
+  }
+
+  private setupServer() {
+    this.server.on('connection', (socket: Socket) => {
+      this.connections.add(socket);
+      const parser = new HttpRequestParser();
+
+      // --- ⏰ Idle Timeout (Protection) ---
+      const HEADER_TIMEOUT_MS = config.headerTimeoutMs; // from config
+      let timer: NodeJS.Timeout | undefined;
+
+      const refreshTimeout = () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          logger.warn('Closing idle socket (header timeout)');
+          socket.destroy();
+        }, HEADER_TIMEOUT_MS);
+      };
+
+      refreshTimeout(); // start timer immediately
+
+      socket.once('close', () => {
+        this.connections.delete(socket);
+        if (timer) clearTimeout(timer);
+      });
+      logger.info('New connection established.');
+      socket.on('data', async (chunk: Buffer) => {
+        refreshTimeout();
+        try {
+          const request = parser.feed(chunk);
+          if (!request) return; // still waiting for complete request
+
+          await router.handle(request, socket);
+
+          // Persistent connection support
+          const connectionHeader = request.headers['connection'] || '';
+          if (connectionHeader.toLowerCase() === 'close' || request.httpVersion === 'HTTP/1.0') {
+            socket.end();
+          } else {
+            parser.reset(); // Reset for next request on same socket (keep-alive)
+          }
+        } catch (err) {
+          logger.error(`Failed request: ${(err as Error).message}`);
+          sendResponse(socket, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
+          socket.end();
+        }
+      });
+
+      socket.on('error', (err) => {
+        logger.error(`Socket error: ${err.message}`);
+      });
+    });
+
+    this.server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        this.port += 1; // try the next port
+        logger.warn(`Port busy, retrying on ${this.port}`);
+        this.server.listen(this.port);
+      } else {
+        logger.error(`Server error: ${err.message}`);
+      }
+    });
+  }
+
+  /**
+   * Gracefully shuts down the server and every open TCP socket.
+   */
+  public async stop(): Promise<void> {
+    logger.info('🛑  Shutting down HTTP server');
+    for (const sock of this.connections) sock.destroy();
+    await new Promise<void>((resolve, reject) =>
+      this.server.close((err) => (err ? reject(err) : resolve())),
+    );
+  }
+
+  public start() {
+    this.server.listen(this.port, () => {
+      logger.info(`🚀 Server running at port ${this.port}`);
+    });
+
+    // graceful shutdown on Ctrl-C / kill
+    ['SIGINT', 'SIGTERM'].forEach((sig) =>
+      process.on(sig as NodeJS.Signals, () => {
+        this.stop()
+          .then(() => process.exit(0))
+          .catch(() => process.exit(1));
+      }),
+    );
+
+    // src/core/server.ts  – inside start() after existing SIGINT/SIGTERM hooks
+    ['SIGUSR2'].forEach((sig) =>
+      process.once(sig as NodeJS.Signals, () => {
+        this.stop().then(() => process.kill(process.pid, sig));
+      }),
+    );
+  }
+}
+</file>
+
+<file path="entities/http.ts">
+export interface IncomingRequest {
+  url: URL; // canonical URL (always present)
+  path: string; // == url.pathname
+  query: Record<string, string>; // decoded single-value map
+  httpVersion: string; // e.g. "HTTP/1.1"
+
+  method: string;
+  headers: Record<string, string>;
+  headersMap?: Map<string, string[]>;
+  body?: Buffer;
+  raw: string;
+  ctx?: Record<string, unknown>;
+  invalid?: boolean;
+}
+</file>
+
+<file path="entities/sendResponse.ts">
+import { Socket } from 'net';
+import { Readable } from 'stream';
+
+const STATUS_TEXT: Record<number, string> = {
+  200: 'OK',
+  206: 'Partial Content',
+  400: 'Bad Request',
+  404: 'Not Found',
+  405: 'Method Not Allowed',
+  416: 'Range Not Satisfiable', // ← new
+  500: 'Internal Server Error',
+};
+
+export function sendResponse(
+  socket: Socket,
+  status: number,
+  headers: Record<string, string>,
+  body?: string | Buffer | Readable,
+): void {
+  const head =
+    `HTTP/1.1 ${status} ${STATUS_TEXT[status] ?? ''}\r\n` +
+    Object.entries(headers)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('\r\n') +
+    '\r\n\r\n';
+
+  socket.write(head);
+
+  if (!body) {
+    socket.end();
+    return;
+  }
+
+  if (body instanceof Readable) {
+    body.pipe(socket);
+    body.once('error', () => socket.end());
+    body.once('end', () => socket.end());
+  } else {
+    socket.write(body);
+    socket.end();
+  }
+}
+</file>
+
+<file path="modules/file-streamer/fileService.ts">
+// file-streamer/fileService.ts
+import {
+  existsSync,
+  createReadStream,
+  statSync,
+  createWriteStream,
+  readdirSync, // ← added for legacy tests
+} from 'fs';
+import { stat, readdir, mkdir } from 'fs/promises';
+import { resolve, join } from 'path';
+import { Readable } from 'stream';
+import { Socket } from 'net';
+import { config } from '../../config/server.config';
+import { getMimeType } from '../../utils/helpers';
+import { sendResponse } from '../../entities/sendResponse';
+
+export class FileService {
+  constructor(private readonly rootDir: string) {}
+
+  private resolveSafe(relPath: string): string {
+    const abs = resolve(this.rootDir, relPath);
+    if (!abs.startsWith(this.rootDir)) throw new Error('Path traversal attempt');
+    return abs;
+  }
+
+  /* ---------- modern async API ---------- */
+
+  async listFiles(relDir = '.'): Promise<string[]> {
+    return await readdir(this.resolveSafe(relDir));
+  }
+
+  async stat(relPath: string) {
+    return await stat(this.resolveSafe(relPath));
+  }
+
+  async readFile(relPath: string, range?: { start: number; end: number }): Promise<Readable> {
+    const abs = this.resolveSafe(relPath);
+    return createReadStream(abs, range);
+  }
+
+  async saveFile(relPath: string, data: AsyncIterable<Buffer>): Promise<void> {
+    const abs = this.resolveSafe(relPath);
+    await mkdir(resolve(abs, '..'), { recursive: true });
+    const ws = createWriteStream(abs);
+    for await (const chunk of data) ws.write(chunk);
+    await new Promise<void>((res, rej) => {
+      ws.end(res);
+      ws.on('error', rej);
+    });
+  }
+
+  /* ---------- legacy static helpers (keep old tests green) ---------- */
+
+  static listFiles(): { files: string[] } {
+    const dir = config.mediaDir;
+    if (!existsSync(dir)) return { files: [] };
+    return { files: readdirSync(dir) };
+  }
+
+  static streamFile(filename: string, rangeHeader: string | undefined, socket: Socket): void {
+    const abs = join(config.mediaDir, filename);
+
+    if (!existsSync(abs)) {
+      sendResponse(socket, 404, { 'Content-Type': 'text/plain' }, '404 Not Found');
+      socket.end();
+      return;
+    }
+
+    const stats = statSync(abs);
+    const size = stats.size;
+
+    const start = 0;
+    const end = size - 1;
+
+    if (rangeHeader) {
+      // Matches bytes=START-END, bytes=START-, bytes=-END
+      const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
+
+      if (m) {
+        const startStr = m[1];
+        const endStr = m[2];
+        let start: number | undefined;
+        let end: number | undefined;
+
+        if (startStr && endStr) {
+          // bytes=START-END
+          start = parseInt(startStr, 10);
+          end = parseInt(endStr, 10);
+        } else if (startStr) {
+          // bytes=START-
+          start = parseInt(startStr, 10);
+          end = size - 1;
+        } else if (endStr) {
+          // bytes=-END
+          start = size - parseInt(endStr, 10);
+          end = size - 1;
+        }
+
+        if (start === undefined || end === undefined || start > end || start >= size) {
+          sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
+          socket.end();
+          return;
+        }
+      } else {
+        sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
+        socket.end();
+        return;
+      }
+    }
+
+    const len = end - start + 1;
+    const stream = createReadStream(abs, { start, end });
+    const headers = {
+      'Content-Type': getMimeType(filename) ?? 'application/octet-stream',
+      'Accept-Ranges': 'bytes',
+      'Content-Range': `bytes ${start}-${end}/${size}`,
+      'Content-Length': String(len),
+    };
+
+    sendResponse(socket, 206, headers, stream);
+
+    stream.on('error', () => socket.end());
+  }
+  /* ------------------------------------------------------------------ */
+}
+</file>
+
+<file path="modules/file-streamer/fileStreamingController.ts">
+import { Socket } from 'net';
+import { sendResponse } from '../../entities/sendResponse';
+import { IncomingRequest } from '../../entities/http';
+import { FileService } from './fileService';
+import { getHeader, getQuery } from '../../utils/httpHelpers';
+import { config } from '../../config/server.config';
+import { logger } from '../../utils/logger';
+import { getMimeType } from '../../utils/helpers';
+import { Readable } from 'stream';
+
+const fileSvc = new FileService(config.mediaDir);
+
+export const fileStreamingController = {
+  /** GET /files – returns JSON list of filenames */
+  async listFiles(req: IncomingRequest, sock: Socket) {
+    try {
+      const files = await fileSvc.listFiles();
+      sendResponse(sock, 200, { 'Content-Type': 'application/json' }, JSON.stringify(files));
+    } catch (err) {
+      logger.error(`listFiles: ${(err as Error).message}`);
+      sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Server error');
+    }
+  },
+
+  /** GET /stream?file=video.mp4 – streams file (supports Range) */
+  async handleStream(req: IncomingRequest, sock: Socket) {
+    logger.info(
+      `[handleStream] url=${req.url} path=${req.path} query=${JSON.stringify(req.query)}`,
+    );
+    const fileName = getQuery(req, 'file');
+    if (!fileName) {
+      sendResponse(
+        sock,
+        400,
+        { 'Content-Type': 'text/plain' },
+        'Missing required "file" query parameter.',
+      );
+      return;
+    }
+
+    try {
+      const rangeHdr = getHeader(req, 'range'); // e.g. "bytes=0-1023"
+      let stream: Readable;
+      const fileStat = await fileSvc.stat(fileName);
+      const size = fileStat.size;
+      if (rangeHdr) {
+        // Parse Range header: bytes=START-END, bytes=START-, bytes=-END
+        const m = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
+        if (!m) {
+          sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
+          sock.end();
+          return;
+        }
+        const startStr = m[1];
+        const endStr = m[2];
+        let start: number;
+        let end: number;
+        if (startStr) {
+          start = parseInt(startStr, 10);
+          end = endStr ? parseInt(endStr, 10) : size - 1;
+        } else {
+          // suffix range
+          const suffix = parseInt(endStr, 10);
+          start = size - suffix;
+          end = size - 1;
+        }
+        if (start > end || start < 0 || end >= size) {
+          sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
+          sock.end();
+          return;
+        }
+        stream = await fileSvc.readFile(fileName, { start, end });
+        const len = end - start + 1;
+        sendResponse(
+          sock,
+          206,
+          {
+            'Content-Type': getMimeType(fileName) || 'application/octet-stream',
+            'Accept-Ranges': 'bytes',
+            'Content-Range': `bytes ${start}-${end}/${size}`,
+            'Content-Length': String(len),
+          },
+          stream,
+        );
+      } else {
+        stream = await fileSvc.readFile(fileName);
+        const mimeType = getMimeType(fileName);
+        sendResponse(
+          sock,
+          200,
+          { 'Content-Type': mimeType, 'Content-Length': String(size) },
+          stream,
+        );
+      }
+    } catch (err) {
+      logger.error(`[handleStream] fileName=${fileName}, error=${(err as Error).message}`);
+      sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, `File "${fileName}" not found.`);
+    }
+  },
+};
+</file>
+
+<file path="modules/file-streamer/index.ts">
+export { FileService } from './fileService';
+export { fileStreamingController } from './fileStreamingController';
+</file>
+
+<file path="routes/files.routes.ts">
+// routes/files.routes.ts
+import { router } from '../core/router';
+import { fileStreamingController } from '../modules/file-streamer';
+
+router.get('/files', fileStreamingController.listFiles);
+</file>
+
+<file path="routes/index.ts">
+// routes/index.ts
+import './stream.routes';
+import './files.routes';
+
+export {}; // side-effect imports run immediately
+</file>
+
+<file path="routes/stream.routes.ts">
+// routes/stream.routes.ts
+import { router } from '../core/router';
+import { fileStreamingController } from '../modules/file-streamer';
+
+router.get('/stream', fileStreamingController.handleStream);
+</file>
+
+<file path="utils/helpers.ts">
+import { extname } from 'path';
+import { mimeTypes } from './mimeTypes';
+
+export function getMimeType(fileName: string): string {
+  const ext = extname(fileName).toLowerCase();
+  return mimeTypes[ext] || 'application/octet-stream';
+}
+</file>
+
+<file path="utils/httpHelpers.ts">
+// Simple header accessor that falls back to legacy Record<string,string>
+import { IncomingRequest } from '../entities/http';
+
+/**
+ * Case-insensitive lookup that handles multi-value headers.
+ * @param req - The incoming request object.
+ * @param name - The name of the header to retrieve.
+ * @returns The value of the header, or undefined if not found.
+ * @example
+ * const contentType = getHeader(req, 'Content-Type');
+ * const userAgent = getHeader(req, 'User-Agent');
+ * const customHeader = getHeader(req, 'X-Custom-Header');
+ */
+export function getHeader(req: IncomingRequest, name: string): string | undefined {
+  const key = name.toLowerCase();
+  if (req.headersMap && req.headersMap.has(key)) {
+    return req.headersMap.get(key)![0]; // first value
+  }
+  return req.headers?.[key];
+}
+
+/** Case-sensitive query lookup that falls back to searchParams */
+export function getQuery(req: IncomingRequest, key: string): string | undefined {
+  if (req.invalid || !req.query || !req.url) return undefined;
+
+  // ✅ look in the parser-built map first
+  const direct = req.query?.[key];
+  if (direct !== undefined) return direct;
+
+  // fallback (rare) – parse from URL
+  return req.url.searchParams.get(key) ?? undefined;
+}
+</file>
+
+<file path="utils/logger.ts">
+// src/utils/logger.ts
+
+type LogLevel = 'info' | 'warn' | 'error' | 'debug';
+
+class Logger {
+  private getTimestamp(): string {
+    return new Date().toISOString();
+  }
+
+  private formatMessage(level: LogLevel, message: string): string {
+    return `[${this.getTimestamp()}] [${level.toUpperCase()}]: ${message}`;
+  }
+
+  info(message: string): void {
+    console.log(this.formatMessage('info', message));
+  }
+
+  warn(message: string): void {
+    console.warn(this.formatMessage('warn', message));
+  }
+
+  error(message: string): void {
+    console.error(this.formatMessage('error', message));
+  }
+
+  debug(message: string): void {
+    if (process.env.NODE_ENV === 'development') {
+      console.debug(this.formatMessage('debug', message));
+    }
+  }
+}
+
+// Export a singleton instance
+export const logger = new Logger();
+</file>
+
+<file path="utils/mimeTypes.ts">
+export const mimeTypes: Record<string, string> = {
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.js': 'application/javascript',
+  '.json': 'application/json',
+  '.css': 'text/css',
+  '.txt': 'text/plain',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.mp3': 'audio/mpeg',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.ogg': 'audio/ogg',
+  '.pdf': 'application/pdf',
+  '.zip': 'application/zip',
+  '.tar': 'application/x-tar',
+};
+</file>
+
+<file path="main.ts">
+// main.ts
+import './routes';
+import { HttpServer } from './core/server';
+import { config } from './config/server.config';
+import { logger } from './utils/logger';
+logger.info('routes loaded');
+
+const server = new HttpServer(config.port);
+server.start();
+</file>
+
+</files>
