@@ -65,10 +65,24 @@ describe('HTTP Parser', () => {
   it('should correctly parse multiple query parameters', () => {
     const raw = 'GET /search?q=nodejs&sort=desc HTTP/1.1\r\nHost: localhost\r\n\r\n';
     const parsed = parser.parse(raw);
-
     expect(parsed.method).toBe('GET');
     expect(parsed.path).toBe('/search');
+    expect(parsed.httpVersion).toBe('HTTP/1.1');
+    expect(parsed.headers.host).toBe('localhost');
     expect(parsed.query).toEqual({ q: 'nodejs', sort: 'desc' });
+  });
+
+  it('should decode percent-encoded paths', () => {
+    const raw = 'GET /foo%20bar HTTP/1.1\r\nHost: localhost\r\n\r\n';
+    const parsed = parser.parse(raw);
+    expect(parsed.path).toBe('/foo bar');
+  });
+
+  it('should handle OPTIONS * request', () => {
+    const raw = 'OPTIONS * HTTP/1.1\r\nHost: localhost\r\n\r\n';
+    const parsed = parser.parse(raw);
+    expect(parsed.method).toBe('OPTIONS');
+    expect(parsed.path).toBe('*');
   });
 
   it('should handle duplicated headers gracefully', () => {

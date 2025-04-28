@@ -2,6 +2,18 @@ import { router } from '../../src/core/router';
 import { IncomingRequest } from '../../src/entities/http';
 import { Socket } from 'net';
 
+// Mock the file-streaming controller so router tests stay focused
+jest.mock('../../src/modules/file-streamer/fileStreamingController', () => ({
+  fileStreamingController: {
+    listFiles: jest.fn(async (_req, sock) => {
+      sock.write('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n');
+    }),
+    handleStream: jest.fn(async (_req, sock) => {
+      sock.write('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n');
+    }),
+  },
+}));
+
 describe('Router', () => {
   const fakeSocket = {
     write: jest.fn(),
@@ -25,7 +37,9 @@ describe('Router', () => {
 
     await router.handle(req, fakeSocket);
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('404 Not Found'));
+    expect(fakeSocket.write).toHaveBeenCalledWith(
+      expect.stringContaining('HTTP/1.1 404 Not Found'),
+    );
   });
 
   it('should handle a valid /files GET request', async () => {
@@ -41,10 +55,10 @@ describe('Router', () => {
 
     await router.handle(req, fakeSocket);
 
-    expect(fakeSocket.write).toHaveBeenCalled(); // Should at least write something
+    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('HTTP/1.1 200 OK'));
   });
 
-  it('should return 404 for wrong method', async () => {
+  it('should return 405 Method Not Allowed for wrong method', async () => {
     const req: IncomingRequest = {
       url: new URL('http://localhost/files'),
       method: 'POST', // Should be GET
@@ -57,7 +71,9 @@ describe('Router', () => {
 
     await router.handle(req, fakeSocket);
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('404 Not Found'));
+    expect(fakeSocket.write).toHaveBeenCalledWith(
+      expect.stringContaining('HTTP/1.1 405 Method Not Allowed'),
+    );
   });
 
   it('should handle missing path safely', async () => {
@@ -76,20 +92,20 @@ describe('Router', () => {
     expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('400 Bad Request'));
   });
 
-  it('should match dynamic route /files/:filename', async () => {
+  it('should handle /stream route with file query parameter', async () => {
     const req: IncomingRequest = {
-      url: new URL('http://localhost/files/testfile.txt'),
+      url: new URL('http://localhost/stream?file=testfile.txt'),
       method: 'GET',
-      path: '/files/testfile.txt',
+      path: '/stream',
       httpVersion: 'HTTP/1.1',
       headers: { host: 'localhost' },
       raw: '',
-      query: {},
+      query: { file: 'testfile.txt' },
     };
 
     await router.handle(req, fakeSocket);
 
-    expect(fakeSocket.write).toHaveBeenCalled(); // we should attempt to serve file
+    expect(fakeSocket.write).toHaveBeenCalled(); // should attempt to stream the requested file
   });
 
   it('should return 500 if handler throws', async () => {

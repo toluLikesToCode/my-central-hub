@@ -40,13 +40,16 @@ export const parser = {
     if (parts.length < 3) return earlyReturn();
 
     const [method, fullPath, httpVersion] = parts;
+    const isOptionsStar = method === 'OPTIONS' && fullPath === '*';
     let invalid =
       !ALLOWED_METHODS.includes(method as (typeof ALLOWED_METHODS)[number]) ||
-      !fullPath.startsWith('/') ||
+      (!fullPath.startsWith('/') && !isOptionsStar) ||
       !httpVersion.startsWith('HTTP/');
 
     /* -------- URL + query -------- */
-    const url = new URL(fullPath, 'http://placeholder');
+    const url = isOptionsStar
+      ? new URL('http://placeholder')
+      : new URL(fullPath, 'http://placeholder');
     const query: Record<string, string> = {};
     url.searchParams.forEach((v, k) => (query[k] = v));
 
@@ -72,7 +75,7 @@ export const parser = {
 
     return {
       url,
-      path: url.pathname,
+      path: isOptionsStar ? '*' : decodeURIComponent(url.pathname),
       query,
       httpVersion,
       method,

@@ -128,4 +128,19 @@ function compilePath(pattern: string): { regex: RegExp; keys: string[] } {
 /* ───── Exports ───────────────────────────────────────────────────────── */
 
 export const router = new Router();
-export default router; // so `import router` also works
+
+// Dynamically load route definitions after router is initialized
+// (avoids circular-import issues with static `import '../routes'`)
+async function loadRoutesSafely() {
+  try {
+    await import('../routes');
+  } catch (error) {
+    console.error('Failed to dynamically import routes:', error);
+    // fallback or no-op if needed
+  }
+}
+
+// Immediately trigger loading
+loadRoutesSafely();
+
+export default router;

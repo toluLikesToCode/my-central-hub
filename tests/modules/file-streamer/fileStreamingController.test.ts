@@ -48,12 +48,17 @@ describe('fileStreamingController', () => {
     } as IncomingRequest;
     await fileStreamingController.handleStream(req, fakeSocket);
     expect(fakeSocket.write).toHaveBeenCalledWith(
+      expect.stringContaining('HTTP/1.1 400 Bad Request'),
+    );
+    expect(fakeSocket.write).toHaveBeenCalledWith(
       expect.stringContaining('Missing required "file"'),
     );
   });
 
   it('should respond with 404 if file does not exist', async () => {
-    fs.existsSync.mockReturnValue(false);
+    // Simulate missing file by having stat reject
+    fsPromises.stat.mockRejectedValueOnce(new Error('File not found'));
+
     const req = {
       url: new URL('http://localhost/stream?file=nonexistent.mp4'),
       method: 'GET',
@@ -61,10 +66,13 @@ describe('fileStreamingController', () => {
       httpVersion: 'HTTP/1.1',
       headers: { host: 'localhost' },
       raw: '',
-      query: {},
+      query: { file: 'nonexistent.mp4' },
     } as IncomingRequest;
+
     await fileStreamingController.handleStream(req, fakeSocket);
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('not found'));
+    expect(fakeSocket.write).toHaveBeenCalledWith(
+      expect.stringContaining('HTTP/1.1 404 Not Found'),
+    );
   });
 
   it('should list files correctly', async () => {
@@ -99,6 +107,8 @@ describe('fileStreamingController', () => {
     expect(fakeSocket.write).toHaveBeenCalledWith(
       expect.stringContaining('HTTP/1.1 206 Partial Content'),
     );
+    // also assert correct Content-Type header
+    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('Content-Type:'));
     expect(fs.createReadStream).toHaveBeenCalledWith(expect.stringContaining('video.mp4'), {
       start: 0,
       end: 499,

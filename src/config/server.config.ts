@@ -13,9 +13,17 @@ export const config = {
   mediaDir: process.env.MEDIA_DIR
     ? join(process.cwd(), process.env.MEDIA_DIR)
     : join(process.cwd(), 'media'),
+  headerTimeoutMs: process.env.HEADER_TIMEOUT_MS
+    ? Math.max(parseInt(process.env.HEADER_TIMEOUT_MS, 10), 0)
+    : 5000,
+  bodyTimeoutMs: process.env.BODY_TIMEOUT_MS
+    ? Math.max(parseInt(process.env.BODY_TIMEOUT_MS, 10), 0)
+    : 10000,
 };
 
 logger.info(`Server configuration:`);
 logger.info(`- Port: ${config.port}`);
 logger.info(`- Public Directory: ${config.publicDir}`);
 logger.info(`- Media Directory: ${config.mediaDir}`);
+logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
+logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);

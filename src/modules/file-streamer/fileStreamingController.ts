@@ -43,8 +43,8 @@ export const fileStreamingController = {
       let stream: Readable;
       const fileStat = await fileSvc.stat(fileName);
       const size = fileStat.size;
+
       if (rangeHdr) {
-        // Parse Range header: bytes=START-END, bytes=START-, bytes=-END
         const m = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
         if (!m) {
           sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
@@ -59,7 +59,6 @@ export const fileStreamingController = {
           start = parseInt(startStr, 10);
           end = endStr ? parseInt(endStr, 10) : size - 1;
         } else {
-          // suffix range
           const suffix = parseInt(endStr, 10);
           start = size - suffix;
           end = size - 1;
@@ -70,6 +69,13 @@ export const fileStreamingController = {
           return;
         }
         stream = await fileSvc.readFile(fileName, { start, end });
+        if (!stream) {
+          throw new Error('Stream is undefined');
+        }
+        stream.on('error', (err) => {
+          logger.error(`[handleStream] Stream error: ${err.message}`);
+          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
+        });
         const len = end - start + 1;
         sendResponse(
           sock,
@@ -84,6 +90,13 @@ export const fileStreamingController = {
         );
       } else {
         stream = await fileSvc.readFile(fileName);
+        if (!stream) {
+          throw new Error('Stream is undefined');
+        }
+        stream.on('error', (err) => {
+          logger.error(`[handleStream] Stream error: ${err.message}`);
+          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
+        });
         const mimeType = getMimeType(fileName);
         sendResponse(
           sock,
