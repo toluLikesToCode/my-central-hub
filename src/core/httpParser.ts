@@ -262,6 +262,7 @@ export class HttpRequestParser {
     this.bodyChunks = [];
     this.method = '';
     this.httpVersion = '';
+    this.url = new URL('http://placeholder');
     this.contentLength = 0;
     this.remainingBody = 0;
     this.isChunked = false;
