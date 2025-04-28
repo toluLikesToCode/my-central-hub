@@ -74,7 +74,7 @@ describe('🔥 HTTP Server TCP Stress Tests', () => {
     const massiveHeaders = Array(1200).fill('X-Flood: yes').join('\r\n');
     const request = `GET / HTTP/1.1\r\n${massiveHeaders}\r\n\r\n`;
     const response = await sendRawRequest(request);
-    expect(response).toMatch(/HTTP\/1.1 404 Not Found/);
+    expect(response).toMatch(/HTTP\/1.1 400 Bad Request/);
   });
 
   it('rejects huge body POST (over limit)', async () => {
