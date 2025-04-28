@@ -130,10 +130,16 @@ export class HttpRequestParser {
         }
         // BODY
         if (this.state === ParserState.BODY) {
-          if (this.remainingBody > MAX_BODY_BYTES) {
-            this._setError('Request body too large');
-            continue;
-          }
+          this.contentLength = parseInt(this.headers['content-length'], 10);
+            if (isNaN(this.contentLength) || this.contentLength < 0) {
+              this._setError('Invalid Content-Length');
+              continue;
+            }
+            if (this.contentLength > MAX_BODY_BYTES) {
+              this._setError('Request body too large');
+              continue;
+            }
+            this.remainingBody = this.contentLength;
           if (this.buffer.length < this.remainingBody) return null;
           this.bodyChunks.push(this.buffer.subarray(0, this.remainingBody));
           this.buffer = this.buffer.subarray(this.remainingBody);
