@@ -71,7 +71,6 @@ describe('HttpRequestParser', () => {
   });
 
   test('rejects body exceeding MAX_BODY_BYTES', () => {
-    parser = new HttpRequestParser();
     const bigBody = 'A'.repeat(11 * 1024 * 1024); // 11MB
     const req = feedAll(
       parser,
