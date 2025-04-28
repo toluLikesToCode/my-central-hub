@@ -83,6 +83,6 @@ echo -e "${YELLOW}🗑️  Deleting old my-central-hub.xml if it exists...${NC}"
 rm -f my-central-hub.xml
 
 echo -e "${YELLOW}⚙️  Running Repomix on src/... with compression level $COMPRESSION_LEVEL${NC}"
-eval repomix $REPO_OPTIONS -o my-central-hub.xml src
+repomix ${REPO_OPTIONS} -o my-central-hub.xml src
 
 echo -e "${GREEN}✅ my-central-hub.xml has been created and is ready for LLM ingestion.${NC}"
