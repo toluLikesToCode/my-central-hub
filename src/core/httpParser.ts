@@ -83,10 +83,9 @@ export class HttpRequestParser {
           for (const line of lines) {
             if (line.trim() === '') continue;
             if (line.startsWith(' ') || line.startsWith('\t')) {
-              if (lastKey) {
-                this.headers[lastKey] += ' ' + line.trim();
-              }
+              this._setError('Header folding is not supported');
               continue;
+            }
             }
             const colon = line.indexOf(':');
             if (colon === -1) {
