@@ -13,7 +13,7 @@
     "test": "jest",
     "test:stress": "jest \"stress/**/*.test.ts\"",
     "type-check": "tsc --noEmit",
-    "lint:ts": "eslint src tests --ext .ts",
+    "lint:ts": "eslint src tests stress --ext .ts",
     "lint:md": "markdownlint --fix './**/*.md' --ignore node_modules --ignore dist --ignore coverage --ignore public",
     "lint": "npm-run-all lint:ts lint:md"
   },
