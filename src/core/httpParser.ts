@@ -96,8 +96,7 @@ export class HttpRequestParser {
             const value = line.slice(colon + 1).trim();
             lastKey = key;
             this.headers[key] = value;
-            const list = this.headersMap.get(key) ?? [];
-            list.push(value);
+            const list = [...(this.headersMap.get(key) ?? []), value];
             this.headersMap.set(key, list);
             headerCount++;
             if (headerCount > MAX_HEADERS) {
