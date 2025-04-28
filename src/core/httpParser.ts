@@ -103,8 +103,12 @@ export class HttpRequestParser {
             headerCount++;
             if (headerCount > MAX_HEADERS) {
               this._setError('Too many headers');
-              break;
+              return null; // Short-circuit further processing
             }
+          }
+          // Check for error state after processing headers
+          if (this.state === ParserState.ERROR) {
+            return null; // Short-circuit if an error was set
           }
           if (
             this.headers['transfer-encoding'] &&
