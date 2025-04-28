@@ -7,7 +7,7 @@ module.exports = [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    ignores: ['dist/', 'node_modules/', 'coverage/', 'public/'],
+    ignores: ['dist/', 'node_modules/', 'coverage/', 'public/', 'README.md'],
     plugins: {
       prettier: prettier,
       markdown: markdown,
