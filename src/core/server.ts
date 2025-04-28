@@ -77,8 +77,7 @@ export class HttpServer {
         } catch (err) {
           logger.error(`Failed request: ${(err as Error).message}`);
           sendResponse(socket, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
-          socket.destroy();
-        }
+          socket.end();
       });
 
       socket.on('error', (err) => {
