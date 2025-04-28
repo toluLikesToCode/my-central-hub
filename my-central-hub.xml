@@ -837,9 +837,8 @@ export class FileService {
     const stats = statSync(abs);
     const size = stats.size;
 
-    const start = 0;
-    const end = size - 1;
-
+    const stats = statSync(abs);
+    const size = stats.size;
     if (rangeHeader) {
       // Matches bytes=START-END, bytes=START-, bytes=-END
       const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
