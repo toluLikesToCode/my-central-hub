@@ -62,7 +62,6 @@ export class FileService {
 
     if (!existsSync(abs)) {
       sendResponse(socket, 404, { 'Content-Type': 'text/plain' }, '404 Not Found');
-      socket.end();
       return;
     }
 
@@ -98,12 +97,10 @@ export class FileService {
 
         if (start === undefined || end === undefined || start > end || start >= size) {
           sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
-          socket.end();
           return;
         }
       } else {
         sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
-        socket.end();
         return;
       }
     }

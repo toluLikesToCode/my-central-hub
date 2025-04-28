@@ -51,33 +51,37 @@ export class HttpServer {
       socket.on('data', async (chunk: Buffer) => {
         refreshTimeout();
         try {
-          const request = parser.feed(chunk);
-          if (!request) return; // still waiting for complete request
+          // First feed yields the first complete request (or null)
+          let req = parser.feed(chunk);
+          if (!req) return; // need more bytes
 
           clearTimeout(headerTimer);
-          if (request.method === 'POST' || request.method === 'PUT' || request.method === 'PATCH') {
-            refreshBodyTimeout();
-          }
 
-          await router.handle(request, socket);
-          clearTimeout(bodyTimer);
+          // Handle all pipelined requests in buffer
+          do {
+            // If this is a body-bearing method, start body timeout
+            if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+              refreshBodyTimeout();
+            }
 
-          // Persistent connection support
-          const connectionHeader = request.headers['connection'] || '';
-          const isHttp10 = request.httpVersion === 'HTTP/1.0';
-          const isHttp11 = request.httpVersion === 'HTTP/1.1';
-          const conn = connectionHeader.toLowerCase();
+            await router.handle(req, socket);
+            clearTimeout(bodyTimer);
 
-          if ((isHttp10 && conn !== 'keep-alive') || (isHttp11 && conn === 'close')) {
-            socket.end();
+            // now pull the next request from any leftover bytes
+            req = parser.feed(Buffer.alloc(0));
+          } while (req);
+
+          const pending = parser.getPendingBytes();
+          if (pending > 0) {
+            // more pipelined data waiting—keep alive
+            refreshTimeout();
           } else {
-            parser.reset();
-            refreshTimeout(); // reset header timer for next request
+            socket.end();
           }
         } catch (err) {
           logger.error(`Failed request: ${(err as Error).message}`);
           sendResponse(socket, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
-          socket.end();
+        }
       });
 
       socket.on('error', (err) => {
@@ -105,6 +109,13 @@ export class HttpServer {
     await new Promise<void>((resolve, reject) =>
       this.server.close((err) => (err ? reject(err) : resolve())),
     );
+  }
+
+  /**
+   * Public method to destroy all active sockets.
+   */
+  public destroySockets(): void {
+    this.connections.forEach((socket) => socket.destroy());
   }
 
   public start() {

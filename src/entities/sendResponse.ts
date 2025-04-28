@@ -27,16 +27,16 @@ export function sendResponse(
   socket.write(head);
 
   if (!body) {
-    socket.end();
+    // No body: write head only, leave socket open for HttpServer to manage closing
     return;
   }
 
   if (body instanceof Readable) {
-    body.pipe(socket);
-    body.once('error', () => socket.end());
-    body.once('end', () => socket.end());
+    // Stream without closing socket; HttpServer will close when appropriate
+    body.pipe(socket, { end: false });
+    body.once('error', () => socket.destroy());
   } else {
+    // Write body without closing socket
     socket.write(body);
-    socket.end();
   }
 }

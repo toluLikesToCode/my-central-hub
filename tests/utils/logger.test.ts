@@ -28,5 +28,11 @@ describe('Logger', () => {
     logger.debug('Debugging...');
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
+    // restore original NODE_ENV
+    delete process.env.NODE_ENV;
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 });

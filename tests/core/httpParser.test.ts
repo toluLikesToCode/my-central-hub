@@ -118,4 +118,16 @@ describe('HttpRequestParser', () => {
     expect(result).not.toBeNull();
     expect(result?.body?.toString()).toBe('Hello World');
   });
+
+  test('rejects missing Host header in HTTP/1.1', () => {
+    const req = feedAll(parser, 'GET /test HTTP/1.1\r\n\r\n');
+    expect(req).not.toBeNull();
+    expect(req?.invalid).toBeTruthy();
+  });
+
+  test('allows HTTP/1.0 without Host header', () => {
+    const req = feedAll(parser, 'GET /test HTTP/1.0\r\n\r\n');
+    expect(req).not.toBeNull();
+    expect(req?.invalid).toBeFalsy();
+  });
 });

@@ -73,7 +73,7 @@ if [ "$DRY_RUN" = true ]; then
   echo -e "${YELLOW}🧪 Dry Run Mode: Simulating Repomix for my-central-hub...${NC}"
   echo "→ Compression level: $COMPRESSION_LEVEL"
   echo "→ Repomix options: $REPO_OPTIONS"
-  echo "→ Processing folder: src/"
+  echo "→ Processing folders: src/, tests/, stress/"
   echo "→ Output: my-central-hub.xml"
   exit 0
 fi
@@ -82,7 +82,7 @@ fi
 echo -e "${YELLOW}🗑️  Deleting old my-central-hub.xml if it exists...${NC}"
 rm -f my-central-hub.xml
 
-echo -e "${YELLOW}⚙️  Running Repomix on src/... with compression level $COMPRESSION_LEVEL${NC}"
-repomix ${REPO_OPTIONS} -o my-central-hub.xml src
+echo -e "${YELLOW}⚙️  Running Repomix on src/, tests/, and stress/ with compression level $COMPRESSION_LEVEL${NC}"
+repomix ${REPO_OPTIONS} -o my-central-hub.xml src tests stress
 
 echo -e "${GREEN}✅ my-central-hub.xml has been created and is ready for LLM ingestion.${NC}"

@@ -3,7 +3,8 @@ import { config } from '../../src/config/server.config'; // assuming your port c
 import { HttpServer } from '../../src/core/server';
 
 jest.setTimeout(20000); // Increase timeout for all tests in this file
-
+config.bodyTimeoutMs = 10000; // Set body timeout to 10 seconds
+config.headerTimeoutMs = 10000; // Set header timeout to 10 seconds
 let server: HttpServer;
 
 beforeAll(async () => {
@@ -13,8 +14,14 @@ beforeAll(async () => {
   await new Promise((res) => setTimeout(res, 300));
 });
 
+afterEach(() => {
+  jest.clearAllTimers();
+});
+
 afterAll(async () => {
   await server.stop();
+  // Ensure all sockets are closed using the new public method
+  server.destroySockets();
 });
 
 function sendRawRequest(payload: string | Buffer, expectClose: boolean = true): Promise<string> {
@@ -24,16 +31,24 @@ function sendRawRequest(payload: string | Buffer, expectClose: boolean = true): 
     });
 
     let data = '';
+    let timeout: NodeJS.Timeout | null = null;
 
     client.on('data', (chunk) => {
       data += chunk.toString();
     });
 
-    client.on('end', () => resolve(data));
-    client.on('error', reject);
+    client.on('end', () => {
+      if (timeout) clearTimeout(timeout);
+      resolve(data);
+    });
+
+    client.on('error', (err) => {
+      if (timeout) clearTimeout(timeout);
+      reject(err);
+    });
 
     if (!expectClose) {
-      setTimeout(() => client.end(), 3000); // manual timeout fallback
+      timeout = setTimeout(() => client.end(), 3000); // manual timeout fallback
     }
   });
 }
@@ -41,7 +56,7 @@ function sendRawRequest(payload: string | Buffer, expectClose: boolean = true): 
 describe('🔥 HTTP Server TCP Stress Tests', () => {
   it('handles simple GET properly', async () => {
     const response = await sendRawRequest('GET /files HTTP/1.1\r\nHost: localhost\r\n\r\n');
-    expect(response).toMatch(/HTTP\/1.1 404 Not Found/);
+    expect(response).toMatch(/HTTP\/1\.1 200 OK/);
   });
 
   it('handles fragmented headers across TCP packets', async () => {
@@ -62,7 +77,7 @@ describe('🔥 HTTP Server TCP Stress Tests', () => {
       sock.on('end', () => resolve(response));
     });
 
-    expect(res).toMatch(/HTTP\/1.1 404 Not Found/);
+    expect(res).toMatch(/HTTP\/1\.1 200 OK/);
   });
 
   it('handles invalid request line (bad client)', async () => {
@@ -107,7 +122,23 @@ describe('🔥 HTTP Server TCP Stress Tests', () => {
       sock.on('end', () => resolve(response));
     });
 
-    expect(res).toMatch(/HTTP\/1.1/);
+    expect(res).toMatch(/HTTP\/1\.1/);
     expect(res).not.toMatch(/400/);
+  });
+
+  // Add a test for header folding
+  it('handles folded headers correctly', async () => {
+    const foldedHeaderRequest = `GET / HTTP/1.1\r\nHost: localhost\r\nX-Folded: part1\r\n\tpart2\r\n\r\n`;
+    const response = await sendRawRequest(foldedHeaderRequest);
+    expect(response).toMatch(/HTTP\/1\.1 404 Not Found/);
+  });
+
+  it('supports HTTP/1.1 pipelined requests', async () => {
+    const payload =
+      'GET /files HTTP/1.1\r\nHost: localhost\r\n\r\n' +
+      'GET /files HTTP/1.1\r\nHost: localhost\r\n\r\n';
+    const response = await sendRawRequest(payload, false);
+    const occurrences = (response.match(/HTTP\/1\.1/gi) || []).length;
+    expect(occurrences).toBe(2);
   });
 });

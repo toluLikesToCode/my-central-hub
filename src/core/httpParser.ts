@@ -17,9 +17,10 @@ const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIO
 const MAX_HEADER_BYTES = 8192; // 8KB
 const MAX_HEADERS = 100; // Maximum number of headers allowed
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+const CRLF = Buffer.from('\r\n');
 
 export class HttpRequestParser {
-  private buffer = Buffer.alloc(0);
+  protected buffer = Buffer.alloc(0);
   private state = ParserState.REQUEST_LINE;
   private headers: Record<string, string> = {};
   private headersMap = new Map<string, string[]>();
@@ -31,6 +32,14 @@ export class HttpRequestParser {
   private remainingBody = 0;
   private isChunked = false;
   private invalid = false;
+  private lastHeaderKey: string | null = null;
+
+  /**
+   * Returns the number of pending bytes in the parser buffer.
+   */
+  public getPendingBytes(): number {
+    return this.buffer.length;
+  }
 
   feed(data: Buffer): IncomingRequest | null {
     this.buffer = Buffer.concat([this.buffer, data]);
@@ -45,7 +54,7 @@ export class HttpRequestParser {
           const parts = requestLine.split(' ');
           if (parts.length !== 3) {
             this._setError('Invalid request line: ' + requestLine);
-            continue;
+            return this._errorResponse();
           }
           const [method, reqPath, version] = parts;
           if (!ALLOWED_METHODS.includes(method)) {
@@ -68,24 +77,45 @@ export class HttpRequestParser {
         }
         // HEADERS
         if (this.state === ParserState.HEADERS) {
+          // find end-of-headers or handle empty header block
           const idx = this.buffer.indexOf('\r\n\r\n');
+          let headersRaw = '';
           if (idx === -1) {
-            if (this.buffer.length > MAX_HEADER_BYTES) {
-              this._setError('Headers too large');
+            // immediate blank line → zero headers
+            if (this.buffer.subarray(0, 2).equals(CRLF)) {
+              this.buffer = this.buffer.subarray(2);
+            } else {
+              if (this.buffer.length > MAX_HEADER_BYTES) {
+                this._setError('Headers too large');
+                return this._errorResponse();
+              }
+              return null;
             }
-            return null;
+          } else {
+            headersRaw = this.buffer.subarray(0, idx).toString('utf8');
+            this.buffer = this.buffer.subarray(idx + 4);
           }
-          const headersRaw = this.buffer.subarray(0, idx).toString('utf8');
-          this.buffer = this.buffer.subarray(idx + 4);
           const lines = headersRaw.split('\r\n');
-          let lastKey = '';
           let headerCount = 0;
           for (const line of lines) {
             if (line.trim() === '') continue;
+            // support folded headers per RFC7230 §3.2.4
             if (line.startsWith(' ') || line.startsWith('\t')) {
-              this._setError('Header folding is not supported');
-              continue;
-            }
+              if (this.lastHeaderKey) {
+                const prev = this.headers[this.lastHeaderKey];
+                this.headers[this.lastHeaderKey] = prev + ' ' + line.trim();
+                // update map too
+                this.headersMap.set(
+                  this.lastHeaderKey,
+                  (this.headersMap.get(this.lastHeaderKey) || []).concat(
+                    this.headers[this.lastHeaderKey],
+                  ),
+                );
+                continue;
+              } else {
+                this._setError('Invalid header folding');
+                return this._errorResponse();
+              }
             }
             const colon = line.indexOf(':');
             if (colon === -1) {
@@ -94,19 +124,23 @@ export class HttpRequestParser {
             }
             const key = line.slice(0, colon).trim().toLowerCase();
             const value = line.slice(colon + 1).trim();
-            lastKey = key;
             this.headers[key] = value;
-            const list = [...(this.headersMap.get(key) ?? []), value];
-            this.headersMap.set(key, list);
+            this.headersMap.set(key, [...(this.headersMap.get(key) ?? []), value]);
+            this.lastHeaderKey = key;
             headerCount++;
             if (headerCount > MAX_HEADERS) {
               this._setError('Too many headers');
-              return null; // Short-circuit further processing
+              return this._errorResponse();
             }
           }
-          // Check for error state after processing headers
-          if (this.state === ParserState.ERROR) {
-            return null; // Short-circuit if an error was set
+          // Short-circuit on parse errors
+          if (this.invalid) {
+            return this._errorResponse();
+          }
+          // enforce Host header for HTTP/1.1
+          if (this.httpVersion === 'HTTP/1.1' && !this.headers['host']) {
+            this._setError('Missing Host header');
+            return this._errorResponse();
           }
           if (
             this.headers['transfer-encoding'] &&
@@ -129,15 +163,15 @@ export class HttpRequestParser {
         // BODY
         if (this.state === ParserState.BODY) {
           this.contentLength = parseInt(this.headers['content-length'], 10);
-            if (isNaN(this.contentLength) || this.contentLength < 0) {
-              this._setError('Invalid Content-Length');
-              continue;
-            }
-            if (this.contentLength > MAX_BODY_BYTES) {
-              this._setError('Request body too large');
-              continue;
-            }
-            this.remainingBody = this.contentLength;
+          if (isNaN(this.contentLength) || this.contentLength < 0) {
+            this._setError('Invalid Content-Length');
+            continue;
+          }
+          if (this.contentLength > MAX_BODY_BYTES) {
+            this._setError('Request body too large');
+            continue;
+          }
+          this.remainingBody = this.contentLength;
           if (this.buffer.length < this.remainingBody) return null;
           this.bodyChunks.push(this.buffer.subarray(0, this.remainingBody));
           this.buffer = this.buffer.subarray(this.remainingBody);
@@ -173,7 +207,7 @@ export class HttpRequestParser {
           this.bodyChunks.push(chunk);
           this.buffer = this.buffer.subarray(this.remainingBody);
           this.remainingBody = 0;
-          if (this.buffer.length < 2 || this.buffer.subarray(0, 2).toString() !== '\r\n') {
+          if (this.buffer.length < 2 || !this.buffer.subarray(0, 2).equals(CRLF)) {
             this._setError('Missing CRLF after chunk');
             continue;
           }
@@ -182,7 +216,7 @@ export class HttpRequestParser {
         }
         // CHUNK_TRAILER
         if (this.state === ParserState.CHUNK_TRAILER) {
-          if (this.buffer.length === 0 || this.buffer.toString() === '\r\n') {
+          if (this.buffer.length === 0 || this.buffer.equals(CRLF)) {
             this.buffer = Buffer.alloc(0);
             this.state = ParserState.DONE;
             continue;
@@ -194,6 +228,8 @@ export class HttpRequestParser {
         }
         // DONE
         if (this.state === ParserState.DONE) {
+          // capture leftover before reset (for pipelining)
+          const leftover = this.buffer;
           const finalBody = this.bodyChunks.length ? Buffer.concat(this.bodyChunks) : undefined;
           const request = {
             method: this.method,
@@ -209,40 +245,21 @@ export class HttpRequestParser {
             invalid: this.invalid,
           };
           this.reset();
+          this.buffer = leftover; // restore leftover for next request
           return request;
         }
         // ERROR
         if (this.state === ParserState.ERROR) {
+          const errReq = this._errorResponse();
           this.reset();
-          return {
-            method: '',
-            path: '',
-            query: {},
-            headers: {},
-            httpVersion: '',
-            url: new URL('http://invalid'),
-            body: undefined,
-            raw: '',
-            ctx: {},
-            invalid: true,
-          };
+          return errReq;
         }
       }
     } catch (err) {
       this._setError(`Error during parsing: ${(err as Error).message}`);
+      const errReq = this._errorResponse();
       this.reset();
-      return {
-        method: '',
-        path: '',
-        query: {},
-        headers: {},
-        httpVersion: '',
-        url: new URL('http://invalid'),
-        body: undefined,
-        raw: '',
-        ctx: {},
-        invalid: true,
-      };
+      return errReq;
     }
   }
 
@@ -250,6 +267,23 @@ export class HttpRequestParser {
     logger.error(message);
     this.invalid = true;
     this.state = ParserState.ERROR;
+  }
+
+  /** Build a minimal invalid IncomingRequest */
+  private _errorResponse(): IncomingRequest {
+    return {
+      method: '',
+      path: '',
+      query: {},
+      headers: {},
+      headersMap: new Map(),
+      httpVersion: '',
+      url: new URL('http://invalid'),
+      body: undefined,
+      raw: '',
+      ctx: {},
+      invalid: true,
+    };
   }
 
   reset(): void {
@@ -265,5 +299,6 @@ export class HttpRequestParser {
     this.remainingBody = 0;
     this.isChunked = false;
     this.invalid = false;
+    this.lastHeaderKey = null;
   }
 }
