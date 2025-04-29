@@ -19,6 +19,10 @@ export const config = {
   bodyTimeoutMs: process.env.BODY_TIMEOUT_MS
     ? Math.max(parseInt(process.env.BODY_TIMEOUT_MS, 10), 0)
     : 10000,
+  /**
+   * Path to the SQLite database file. Will be created if missing.
+   */
+  dbPath: process.env.DB_PATH ? process.env.DB_PATH : join(process.cwd(), 'data', 'metrics.db'),
 };
 
 logger.info(`Server configuration:`);
@@ -27,3 +31,4 @@ logger.info(`- Public Directory: ${config.publicDir}`);
 logger.info(`- Media Directory: ${config.mediaDir}`);
 logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
 logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
+logger.info(`- Database Path: ${config.dbPath}`);

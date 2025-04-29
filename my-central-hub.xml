@@ -1,4 +1,5 @@
 This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+The content has been processed where empty lines have been removed.
 
 <file_summary>
 This section contains a summary of this file.
@@ -35,6 +36,7 @@ The content is organized as follows:
 - Files matching these patterns are excluded: **/*.log, **/*.json, **/.gitignore, node_modules/**, thumbnails/**, **/dist/**, **/build/**
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
+- Empty lines have been removed from all files
 - Files are sorted by Git change count (files with more changes are at the bottom)
 </notes>
 
@@ -87,10 +89,8 @@ This section contains the contents of the repository's files.
 import dotenv from 'dotenv';
 import { join } from 'path';
 import { logger } from '../utils/logger';
-
 // Load environment variables from .env file
 dotenv.config();
-
 export const config = {
   port: process.env.PORT ? parseInt(process.env.PORT, 10) : 8080,
   publicDir: process.env.PUBLIC_DIR
@@ -106,7 +106,6 @@ export const config = {
     ? Math.max(parseInt(process.env.BODY_TIMEOUT_MS, 10), 0)
     : 10000,
 };
-
 logger.info(`Server configuration:`);
 logger.info(`- Port: ${config.port}`);
 logger.info(`- Public Directory: ${config.publicDir}`);
@@ -119,7 +118,6 @@ logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
 import { IncomingRequest } from '../entities/http';
 import { URL } from 'url';
 import { logger } from '../utils/logger';
-
 enum ParserState {
   REQUEST_LINE,
   HEADERS,
@@ -130,13 +128,11 @@ enum ParserState {
   DONE,
   ERROR,
 }
-
 const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
 const MAX_HEADER_BYTES = 8192; // 8KB
 const MAX_HEADERS = 100; // Maximum number of headers allowed
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
 const CRLF = Buffer.from('\r\n');
-
 export class HttpRequestParser {
   protected buffer = Buffer.alloc(0);
   private state = ParserState.REQUEST_LINE;
@@ -151,14 +147,12 @@ export class HttpRequestParser {
   private isChunked = false;
   private invalid = false;
   private lastHeaderKey: string | null = null;
-
   /**
    * Returns the number of pending bytes in the parser buffer.
    */
   public getPendingBytes(): number {
     return this.buffer.length;
   }
-
   feed(data: Buffer): IncomingRequest | null {
     this.buffer = Buffer.concat([this.buffer, data]);
     try {
@@ -380,13 +374,11 @@ export class HttpRequestParser {
       return errReq;
     }
   }
-
   private _setError(message: string): void {
     logger.error(message);
     this.invalid = true;
     this.state = ParserState.ERROR;
   }
-
   /** Build a minimal invalid IncomingRequest */
   private _errorResponse(): IncomingRequest {
     return {
@@ -403,7 +395,6 @@ export class HttpRequestParser {
       invalid: true,
     };
   }
-
   reset(): void {
     this.buffer = Buffer.alloc(0);
     this.state = ParserState.REQUEST_LINE;
@@ -425,10 +416,8 @@ export class HttpRequestParser {
 <file path="core/parser.ts">
 import { IncomingRequest } from '../entities/http';
 import { URL } from 'url';
-
 const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'] as const;
 const MAX_HEADERS = 1000;
-
 // helper for duplicate headers
 function addHeader(map: Map<string, string[]>, key: string, value: string) {
   const k = key.toLowerCase();
@@ -436,7 +425,6 @@ function addHeader(map: Map<string, string[]>, key: string, value: string) {
   list.push(value);
   map.set(k, list);
 }
-
 export const parser = {
   parse(raw: string): IncomingRequest {
     const dummyUrl = new URL('http://placeholder/');
@@ -452,38 +440,30 @@ export const parser = {
       ctx: {},
       invalid: true,
     });
-
     /* -------- empty buffer guard -------- */
     if (raw.length === 0) return earlyReturn();
-
     const [head = '', bodyString = ''] = raw.split('\r\n\r\n');
     const lines = head.split('\r\n');
-
     /* -------- request-line split -------- */
     const [requestLine, ...headerLines] = lines;
     const parts = requestLine.split(' ');
     if (parts.length < 3) return earlyReturn();
-
     const [method, fullPath, httpVersion] = parts;
     const isOptionsStar = method === 'OPTIONS' && fullPath === '*';
     let invalid =
       !ALLOWED_METHODS.includes(method as (typeof ALLOWED_METHODS)[number]) ||
       (!fullPath.startsWith('/') && !isOptionsStar) ||
       !httpVersion.startsWith('HTTP/');
-
     /* -------- URL + query -------- */
     const url = isOptionsStar
       ? new URL('http://placeholder')
       : new URL(fullPath, 'http://placeholder');
     const query: Record<string, string> = {};
     url.searchParams.forEach((v, k) => (query[k] = v));
-
     /* -------- headers -------- */
     const headers: Record<string, string> = {};
     const headersMap = new Map<string, string[]>();
-
     if (headerLines.length > MAX_HEADERS) invalid = true;
-
     for (const line of headerLines) {
       const idx = line.indexOf(':');
       if (idx === -1) {
@@ -495,9 +475,7 @@ export const parser = {
       headers[key.toLowerCase()] = value;
       addHeader(headersMap, key, value);
     }
-
     const body = bodyString ? Buffer.from(bodyString, 'utf-8') : undefined;
-
     return {
       url,
       path: isOptionsStar ? '*' : decodeURIComponent(url.pathname),
@@ -521,34 +499,27 @@ import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
 import { sendResponse } from '../entities/sendResponse';
 import { logger } from '../utils/logger';
-
 /* ───── Types ─────────────────────────────────────────────────────────── */
-
 export type Handler = (req: IncomingRequest, sock: Socket) => Promise<void> | void;
 export type Middleware = (
   req: IncomingRequest,
   sock: Socket,
   next: () => Promise<void>,
 ) => Promise<void> | void;
-
 interface Route {
   method: string; // 'GET' | 'POST' | 'ANY'
   regex: RegExp; // compiled path matcher
   keys: string[]; // param names (for :id stuff)
   handler: Handler;
 }
-
 /* ───── Router implementation ─────────────────────────────────────────── */
-
 class Router {
   private middlewares: Middleware[] = [];
   private routes: Route[] = [];
-
   /* ---------- Middleware ---------- */
   use(mw: Middleware) {
     this.middlewares.push(mw);
   }
-
   /* ---------- Route registration helpers ---------- */
   add(method: string, path: string, handler: Handler) {
     const { regex, keys } = compilePath(path);
@@ -569,7 +540,6 @@ class Router {
   any(path: string, h: Handler) {
     this.add('ANY', path, h);
   }
-
   /* ---------- Main entry ---------- */
   async handle(req: IncomingRequest, sock: Socket): Promise<void> {
     if (!req.path || typeof req.path !== 'string') {
@@ -586,12 +556,10 @@ class Router {
       }
     };
     await run();
-
     // 2. route lookup
     const matching = this.routes.filter((r) => r.regex.test(req.path));
     const route =
       matching.find((r) => r.method === req.method) ?? matching.find((r) => r.method === 'ANY');
-
     if (!route) {
       // Distinguish 404 vs 405
       if (matching.length) {
@@ -606,7 +574,6 @@ class Router {
       }
       return;
     }
-
     // 3. pull params (/:id etc.) → req.ctx.params
     const match = route.regex.exec(req.path)!;
     const params: Record<string, string> = {};
@@ -614,7 +581,6 @@ class Router {
       params[k] = decodeURIComponent(match[idx + 1]);
     });
     (req.ctx ??= {}).params = params;
-
     // 4. invoke handler
     try {
       await route.handler(req, sock);
@@ -624,7 +590,6 @@ class Router {
     }
   }
 }
-
 /* ───── Path pattern compiler ───────────────────────────────────────────
    /files/:name  ->  ^/files/([^/]+)$           keys=['name']
    /api/*        ->  ^/api/(.*)$                keys=['*']
@@ -642,11 +607,8 @@ function compilePath(pattern: string): { regex: RegExp; keys: string[] } {
     });
   return { regex: new RegExp(`^${regexSrc}$`), keys };
 }
-
 /* ───── Exports ───────────────────────────────────────────────────────── */
-
 export const router = new Router();
-
 // Dynamically load route definitions after router is initialized
 // (avoids circular-import issues with static `import '../routes'`)
 async function loadRoutesSafely() {
@@ -657,10 +619,8 @@ async function loadRoutesSafely() {
     // fallback or no-op if needed
   }
 }
-
 // Immediately trigger loading
 loadRoutesSafely();
-
 export default router;
 </file>
 
@@ -671,26 +631,21 @@ import { router } from './router';
 import { logger } from '../utils/logger';
 import { sendResponse } from '../entities/sendResponse';
 import { config } from '../config/server.config'; // Assuming config is imported from a config file
-
 export class HttpServer {
   private server = createServer();
   private readonly connections = new Set<Socket>();
-
   constructor(private port: number) {
     this.setupServer();
   }
-
   private setupServer() {
     this.server.on('connection', (socket: Socket) => {
       this.connections.add(socket);
       const parser = new HttpRequestParser();
-
       // --- ⏰ Idle Timeout (Protection) ---
       const HEADER_TIMEOUT_MS = config.headerTimeoutMs;
       const BODY_TIMEOUT_MS = config.bodyTimeoutMs;
       let headerTimer: NodeJS.Timeout | undefined;
       let bodyTimer: NodeJS.Timeout | undefined;
-
       const refreshTimeout = () => {
         if (headerTimer) clearTimeout(headerTimer);
         headerTimer = setTimeout(() => {
@@ -698,7 +653,6 @@ export class HttpServer {
           socket.destroy();
         }, HEADER_TIMEOUT_MS);
       };
-
       const refreshBodyTimeout = () => {
         if (bodyTimer) clearTimeout(bodyTimer);
         bodyTimer = setTimeout(() => {
@@ -706,9 +660,7 @@ export class HttpServer {
           socket.destroy();
         }, BODY_TIMEOUT_MS);
       };
-
       refreshTimeout(); // start immediately
-
       socket.once('close', () => {
         this.connections.delete(socket);
         if (headerTimer) clearTimeout(headerTimer);
@@ -718,39 +670,37 @@ export class HttpServer {
       socket.on('data', async (chunk: Buffer) => {
         refreshTimeout();
         try {
-          const request = parser.feed(chunk);
-          if (!request) return; // still waiting for complete request
-
+          // First feed yields the first complete request (or null)
+          let req = parser.feed(chunk);
+          if (!req) return; // need more bytes
           clearTimeout(headerTimer);
-          if (request.method === 'POST' || request.method === 'PUT' || request.method === 'PATCH') {
-            refreshBodyTimeout();
-          }
-
-          await router.handle(request, socket);
-          clearTimeout(bodyTimer);
-
-          // Use the public getter to check pending buffered bytes
+          // Handle all pipelined requests in buffer
+          do {
+            // If this is a body-bearing method, start body timeout
+            if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+              refreshBodyTimeout();
+            }
+            await router.handle(req, socket);
+            clearTimeout(bodyTimer);
+            // now pull the next request from any leftover bytes
+            req = parser.feed(Buffer.alloc(0));
+          } while (req);
           const pending = parser.getPendingBytes();
-
-          // Support HTTP/1.1 pipelining: only close if no pending data in parser buffer
           if (pending > 0) {
-            // More pipelined requests waiting; keep connection alive
+            // more pipelined data waiting—keep alive
             refreshTimeout();
           } else {
-            // No further data, close the socket
             socket.end();
           }
         } catch (err) {
           logger.error(`Failed request: ${(err as Error).message}`);
           sendResponse(socket, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
-        } // Added missing closing brace
-      }); // Correctly closed the socket.on('data') block
-
+        }
+      });
       socket.on('error', (err) => {
         logger.error(`Socket error: ${err.message}`);
       });
     });
-
     this.server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
         this.port += 1; // try the next port
@@ -761,7 +711,6 @@ export class HttpServer {
       }
     });
   }
-
   /**
    * Gracefully shuts down the server and every open TCP socket.
    */
@@ -772,12 +721,16 @@ export class HttpServer {
       this.server.close((err) => (err ? reject(err) : resolve())),
     );
   }
-
+  /**
+   * Public method to destroy all active sockets.
+   */
+  public destroySockets(): void {
+    this.connections.forEach((socket) => socket.destroy());
+  }
   public start() {
     this.server.listen(this.port, () => {
       logger.info(`🚀 Server running at port ${this.port}`);
     });
-
     // graceful shutdown on Ctrl-C / kill
     ['SIGINT', 'SIGTERM'].forEach((sig) =>
       process.on(sig as NodeJS.Signals, () => {
@@ -786,7 +739,6 @@ export class HttpServer {
           .catch(() => process.exit(1));
       }),
     );
-
     // src/core/server.ts  – inside start() after existing SIGINT/SIGTERM hooks
     ['SIGUSR2'].forEach((sig) =>
       process.once(sig as NodeJS.Signals, () => {
@@ -803,7 +755,6 @@ export interface IncomingRequest {
   path: string; // == url.pathname
   query: Record<string, string>; // decoded single-value map
   httpVersion: string; // e.g. "HTTP/1.1"
-
   method: string;
   headers: Record<string, string>;
   headersMap?: Map<string, string[]>;
@@ -817,7 +768,6 @@ export interface IncomingRequest {
 <file path="entities/sendResponse.ts">
 import { Socket } from 'net';
 import { Readable } from 'stream';
-
 const STATUS_TEXT: Record<number, string> = {
   200: 'OK',
   206: 'Partial Content',
@@ -827,7 +777,6 @@ const STATUS_TEXT: Record<number, string> = {
   416: 'Range Not Satisfiable', // ← new
   500: 'Internal Server Error',
 };
-
 export function sendResponse(
   socket: Socket,
   status: number,
@@ -840,14 +789,11 @@ export function sendResponse(
       .map(([k, v]) => `${k}: ${v}`)
       .join('\r\n') +
     '\r\n\r\n';
-
   socket.write(head);
-
   if (!body) {
     // No body: write head only, leave socket open for HttpServer to manage closing
     return;
   }
-
   if (body instanceof Readable) {
     // Stream without closing socket; HttpServer will close when appropriate
     body.pipe(socket, { end: false });
@@ -875,31 +821,24 @@ import { Socket } from 'net';
 import { config } from '../../config/server.config';
 import { getMimeType } from '../../utils/helpers';
 import { sendResponse } from '../../entities/sendResponse';
-
 export class FileService {
   constructor(private readonly rootDir: string) {}
-
   private resolveSafe(relPath: string): string {
     const abs = resolve(this.rootDir, relPath);
     if (!abs.startsWith(this.rootDir)) throw new Error('Path traversal attempt');
     return abs;
   }
-
   /* ---------- modern async API ---------- */
-
   async listFiles(relDir = '.'): Promise<string[]> {
     return await readdir(this.resolveSafe(relDir));
   }
-
   async stat(relPath: string) {
     return await stat(this.resolveSafe(relPath));
   }
-
   async readFile(relPath: string, range?: { start: number; end: number }): Promise<Readable> {
     const abs = this.resolveSafe(relPath);
     return createReadStream(abs, range);
   }
-
   async saveFile(relPath: string, data: AsyncIterable<Buffer>): Promise<void> {
     const abs = this.resolveSafe(relPath);
     await mkdir(resolve(abs, '..'), { recursive: true });
@@ -910,39 +849,30 @@ export class FileService {
       ws.on('error', rej);
     });
   }
-
   /* ---------- legacy static helpers (keep old tests green) ---------- */
-
   static listFiles(): { files: string[] } {
     const dir = config.mediaDir;
     if (!existsSync(dir)) return { files: [] };
     return { files: readdirSync(dir) };
   }
-
   static streamFile(filename: string, rangeHeader: string | undefined, socket: Socket): void {
     const abs = join(config.mediaDir, filename);
-
     if (!existsSync(abs)) {
       sendResponse(socket, 404, { 'Content-Type': 'text/plain' }, '404 Not Found');
       return;
     }
-
     const stats = statSync(abs);
     const size = stats.size;
-
     const start = 0;
     const end = size - 1;
-
     if (rangeHeader) {
       // Matches bytes=START-END, bytes=START-, bytes=-END
       const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
-
       if (m) {
         const startStr = m[1];
         const endStr = m[2];
         let start: number | undefined;
         let end: number | undefined;
-
         if (startStr && endStr) {
           // bytes=START-END
           start = parseInt(startStr, 10);
@@ -956,7 +886,6 @@ export class FileService {
           start = size - parseInt(endStr, 10);
           end = size - 1;
         }
-
         if (start === undefined || end === undefined || start > end || start >= size) {
           sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
           return;
@@ -966,7 +895,6 @@ export class FileService {
         return;
       }
     }
-
     const len = end - start + 1;
     const stream = createReadStream(abs, { start, end });
     const headers = {
@@ -975,9 +903,7 @@ export class FileService {
       'Content-Range': `bytes ${start}-${end}/${size}`,
       'Content-Length': String(len),
     };
-
     sendResponse(socket, 206, headers, stream);
-
     stream.on('error', () => socket.end());
   }
   /* ------------------------------------------------------------------ */
@@ -994,9 +920,7 @@ import { config } from '../../config/server.config';
 import { logger } from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
 import { Readable } from 'stream';
-
 const fileSvc = new FileService(config.mediaDir);
-
 export const fileStreamingController = {
   /** GET /files – returns JSON list of filenames */
   async listFiles(req: IncomingRequest, sock: Socket) {
@@ -1008,7 +932,6 @@ export const fileStreamingController = {
       sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Server error');
     }
   },
-
   /** GET /stream?file=video.mp4 – streams file (supports Range) */
   async handleStream(req: IncomingRequest, sock: Socket) {
     logger.info(
@@ -1024,14 +947,12 @@ export const fileStreamingController = {
       );
       return;
     }
-
     try {
       const rangeHdr = getHeader(req, 'range'); // e.g. "bytes=0-1023"
       let stream: Readable;
       const fileStat = await fileSvc.stat(fileName);
       const size = fileStat.size;
       if (rangeHdr) {
-        // Parse Range header: bytes=START-END, bytes=START-, bytes=-END
         const m = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
         if (!m) {
           sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
@@ -1046,7 +967,6 @@ export const fileStreamingController = {
           start = parseInt(startStr, 10);
           end = endStr ? parseInt(endStr, 10) : size - 1;
         } else {
-          // suffix range
           const suffix = parseInt(endStr, 10);
           start = size - suffix;
           end = size - 1;
@@ -1057,6 +977,13 @@ export const fileStreamingController = {
           return;
         }
         stream = await fileSvc.readFile(fileName, { start, end });
+        if (!stream) {
+          throw new Error('Stream is undefined');
+        }
+        stream.on('error', (err) => {
+          logger.error(`[handleStream] Stream error: ${err.message}`);
+          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
+        });
         const len = end - start + 1;
         sendResponse(
           sock,
@@ -1071,6 +998,13 @@ export const fileStreamingController = {
         );
       } else {
         stream = await fileSvc.readFile(fileName);
+        if (!stream) {
+          throw new Error('Stream is undefined');
+        }
+        stream.on('error', (err) => {
+          logger.error(`[handleStream] Stream error: ${err.message}`);
+          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
+        });
         const mimeType = getMimeType(fileName);
         sendResponse(
           sock,
@@ -1096,7 +1030,6 @@ export { fileStreamingController } from './fileStreamingController';
 // routes/files.routes.ts
 import { router } from '../core/router';
 import { fileStreamingController } from '../modules/file-streamer';
-
 router.get('/files', fileStreamingController.listFiles);
 </file>
 
@@ -1104,7 +1037,6 @@ router.get('/files', fileStreamingController.listFiles);
 // routes/index.ts
 import './stream.routes';
 import './files.routes';
-
 export {}; // side-effect imports run immediately
 </file>
 
@@ -1112,14 +1044,12 @@ export {}; // side-effect imports run immediately
 // routes/stream.routes.ts
 import { router } from '../core/router';
 import { fileStreamingController } from '../modules/file-streamer';
-
 router.get('/stream', fileStreamingController.handleStream);
 </file>
 
 <file path="utils/helpers.ts">
 import { extname } from 'path';
 import { mimeTypes } from './mimeTypes';
-
 export function getMimeType(fileName: string): string {
   const ext = extname(fileName).toLowerCase();
   return mimeTypes[ext] || 'application/octet-stream';
@@ -1129,7 +1059,6 @@ export function getMimeType(fileName: string): string {
 <file path="utils/httpHelpers.ts">
 // Simple header accessor that falls back to legacy Record<string,string>
 import { IncomingRequest } from '../entities/http';
-
 /**
  * Case-insensitive lookup that handles multi-value headers.
  * @param req - The incoming request object.
@@ -1147,15 +1076,12 @@ export function getHeader(req: IncomingRequest, name: string): string | undefine
   }
   return req.headers?.[key];
 }
-
 /** Case-sensitive query lookup that falls back to searchParams */
 export function getQuery(req: IncomingRequest, key: string): string | undefined {
   if (req.invalid || !req.query || !req.url) return undefined;
-
   // ✅ look in the parser-built map first
   const direct = req.query?.[key];
   if (direct !== undefined) return direct;
-
   // fallback (rare) – parse from URL
   return req.url.searchParams.get(key) ?? undefined;
 }
@@ -1163,37 +1089,29 @@ export function getQuery(req: IncomingRequest, key: string): string | undefined 
 
 <file path="utils/logger.ts">
 // src/utils/logger.ts
-
 type LogLevel = 'info' | 'warn' | 'error' | 'debug';
-
 class Logger {
   private getTimestamp(): string {
     return new Date().toISOString();
   }
-
   private formatMessage(level: LogLevel, message: string): string {
     return `[${this.getTimestamp()}] [${level.toUpperCase()}]: ${message}`;
   }
-
   info(message: string): void {
     console.log(this.formatMessage('info', message));
   }
-
   warn(message: string): void {
     console.warn(this.formatMessage('warn', message));
   }
-
   error(message: string): void {
     console.error(this.formatMessage('error', message));
   }
-
   debug(message: string): void {
     if (process.env.NODE_ENV === 'development') {
       console.debug(this.formatMessage('debug', message));
     }
   }
 }
-
 // Export a singleton instance
 export const logger = new Logger();
 </file>
@@ -1229,7 +1147,6 @@ import { HttpServer } from './core/server';
 import { config } from './config/server.config';
 import { logger } from './utils/logger';
 logger.info('routes loaded');
-
 const server = new HttpServer(config.port);
 server.start();
 </file>
@@ -1237,18 +1154,14 @@ server.start();
 <file path="core/httpParser.test.ts">
 import { HttpRequestParser } from '../../src/core/httpParser'; // Ensure this file exists or update the path
 import { IncomingRequest } from '../../src/entities/http'; // Ensure this file exists or update the path
-
 function feedAll(parser: HttpRequestParser, str: string): IncomingRequest | null {
   return parser.feed(Buffer.from(str, 'utf8'));
 }
-
 describe('HttpRequestParser', () => {
   let parser: HttpRequestParser;
-
   beforeEach(() => {
     parser = new HttpRequestParser();
   });
-
   test('parses simple GET request', () => {
     const req = feedAll(parser, 'GET /hello HTTP/1.1\r\nHost: example.com\r\n\r\n');
     expect(req).not.toBeNull();
@@ -1257,7 +1170,6 @@ describe('HttpRequestParser', () => {
     expect(req?.headers['host']).toBe('example.com');
     expect(req?.invalid).toBeFalsy();
   });
-
   test('parses POST with Content-Length', () => {
     const req = feedAll(
       parser,
@@ -1267,7 +1179,6 @@ describe('HttpRequestParser', () => {
     expect(req?.method).toBe('POST');
     expect(req?.body?.toString()).toBe('Hello World');
   });
-
   test('handles chunked transfer-encoding', () => {
     const parts = [
       'POST /upload HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n',
@@ -1287,26 +1198,22 @@ describe('HttpRequestParser', () => {
     expect(result).not.toBeNull();
     expect(result?.body?.toString()).toBe('Hello World');
   });
-
   test('rejects invalid request line', () => {
     const req = feedAll(parser, 'BADREQUEST\r\nHost: test\r\n\r\n');
     expect(req).not.toBeNull();
     expect(req?.invalid).toBeTruthy();
   });
-
   test('rejects unsupported HTTP method', () => {
     const req = feedAll(parser, 'FOO / HTTP/1.1\r\nHost: test\r\n\r\n');
     expect(req).not.toBeNull();
     expect(req?.invalid).toBeTruthy();
   });
-
   test('rejects too many headers', () => {
     const headers = Array(1005).fill('X-Test: 123').join('\r\n');
     const req = feedAll(parser, `GET / HTTP/1.1\r\n${headers}\r\n\r\n`);
     expect(req).not.toBeNull();
     expect(req?.invalid).toBeTruthy();
   });
-
   test('rejects body exceeding MAX_BODY_BYTES', () => {
     const bigBody = 'A'.repeat(11 * 1024 * 1024); // 11MB
     const req = feedAll(
@@ -1316,21 +1223,17 @@ describe('HttpRequestParser', () => {
     expect(req).not.toBeNull();
     expect(req?.invalid).toBeTruthy();
   });
-
   test('parses partial requests across multiple TCP chunks', () => {
     const req1 = parser.feed(Buffer.from('GET /mul', 'utf8'));
     expect(req1).toBeNull();
-
     const req2 = parser.feed(Buffer.from('ti-part HTTP/1.1\r\nHost: te', 'utf8'));
     expect(req2).toBeNull();
-
     const req3 = parser.feed(Buffer.from('st\r\n\r\n', 'utf8'));
     expect(req3).not.toBeNull();
     expect(req3?.method).toBe('GET');
     expect(req3?.path).toBe('/multi-part');
     expect(req3?.headers['host']).toBe('test');
   });
-
   test('parses headers with continuations', () => {
     const req = feedAll(
       parser,
@@ -1339,7 +1242,6 @@ describe('HttpRequestParser', () => {
     expect(req).not.toBeNull();
     expect(req?.headers['x-long-header']).toBe('abc def');
   });
-
   test('ignores trailers after chunked body', () => {
     const parts = [
       'POST /upload HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n',
@@ -1355,13 +1257,11 @@ describe('HttpRequestParser', () => {
     expect(result).not.toBeNull();
     expect(result?.body?.toString()).toBe('Hello World');
   });
-
   test('rejects missing Host header in HTTP/1.1', () => {
     const req = feedAll(parser, 'GET /test HTTP/1.1\r\n\r\n');
     expect(req).not.toBeNull();
     expect(req?.invalid).toBeTruthy();
   });
-
   test('allows HTTP/1.0 without Host header', () => {
     const req = feedAll(parser, 'GET /test HTTP/1.0\r\n\r\n');
     expect(req).not.toBeNull();
@@ -1372,45 +1272,36 @@ describe('HttpRequestParser', () => {
 
 <file path="core/parser.test.ts">
 import { parser } from '../../src/core/parser';
-
 describe('HTTP Parser', () => {
   it('should parse a simple GET request', () => {
     const raw = 'GET /hello HTTP/1.1\r\nHost: localhost\r\nUser-Agent: test\r\n\r\n';
     const parsed = parser.parse(raw);
-
     expect(parsed.method).toBe('GET');
     expect(parsed.path).toBe('/hello');
     expect(parsed.httpVersion).toBe('HTTP/1.1');
     expect(parsed.headers.host).toBe('localhost');
     expect(parsed.headers['user-agent']).toBe('test');
   });
-
   it('should handle missing headers gracefully', () => {
     const raw = 'POST /upload HTTP/1.1\r\n\r\n';
     const parsed = parser.parse(raw);
-
     expect(parsed.method).toBe('POST');
     expect(parsed.path).toBe('/upload');
     expect(parsed.headers).toEqual({});
   });
-
   it('should not crash on completely malformed request', () => {
     const raw = 'INVALID REQUEST';
     const parsed = parser.parse(raw);
-
     expect(parsed.invalid).toBe(true);
     expect(parsed.method).toBeFalsy();
     expect(parsed.path).toBeFalsy();
   });
-
   it('should parse url.pathname and headersMap correctly', () => {
     const raw = 'GET /hello HTTP/1.1\r\nHost: localhost\r\nUser-Agent: test\r\n\r\n';
     const parsed = parser.parse(raw);
-
     expect(parsed.url?.pathname).toBe('/hello');
     expect(parsed.headersMap?.get('host')).toEqual(['localhost']);
   });
-
   it('exposes url, path, and query consistently', () => {
     const raw = 'GET /stream?file=test.mp4 HTTP/1.1\r\nHost: x\r\n\r\n';
     const r = parser.parse(raw);
@@ -1418,23 +1309,19 @@ describe('HTTP Parser', () => {
     expect(r.path).toBe('/stream');
     expect(r.query).toEqual({ file: 'test.mp4' });
   });
-
   it('includes httpVersion', () => {
     const raw = 'GET /test HTTP/1.1\r\nHost: x\r\n\r\n';
     const r = parser.parse(raw);
     expect(r.httpVersion).toBe('HTTP/1.1');
   });
-
   it('should handle completely empty request', () => {
     const raw = '';
     const parsed = parser.parse(raw);
-
     expect(parsed.invalid).toBe(true);
     expect(parsed.method).toBeFalsy();
     expect(parsed.path).toBeFalsy();
     expect(parsed.headers).toEqual({});
   });
-
   it('should correctly parse multiple query parameters', () => {
     const raw = 'GET /search?q=nodejs&sort=desc HTTP/1.1\r\nHost: localhost\r\n\r\n';
     const parsed = parser.parse(raw);
@@ -1444,24 +1331,20 @@ describe('HTTP Parser', () => {
     expect(parsed.headers.host).toBe('localhost');
     expect(parsed.query).toEqual({ q: 'nodejs', sort: 'desc' });
   });
-
   it('should decode percent-encoded paths', () => {
     const raw = 'GET /foo%20bar HTTP/1.1\r\nHost: localhost\r\n\r\n';
     const parsed = parser.parse(raw);
     expect(parsed.path).toBe('/foo bar');
   });
-
   it('should handle OPTIONS * request', () => {
     const raw = 'OPTIONS * HTTP/1.1\r\nHost: localhost\r\n\r\n';
     const parsed = parser.parse(raw);
     expect(parsed.method).toBe('OPTIONS');
     expect(parsed.path).toBe('*');
   });
-
   it('should handle duplicated headers gracefully', () => {
     const raw = `GET / HTTP/1.1\r\nHost: localhost\r\nCookie: a=1\r\nCookie: b=2\r\n\r\n`;
     const parsed = parser.parse(raw);
-
     expect(parsed.headers.host).toBe('localhost');
     expect(parsed.headers['cookie']).toBe('b=2'); // Note: last wins in simple parsing
     expect(parsed.headersMap?.get('cookie')).toEqual(['a=1', 'b=2']);
@@ -1473,17 +1356,25 @@ describe('HTTP Parser', () => {
 import { router } from '../../src/core/router';
 import { IncomingRequest } from '../../src/entities/http';
 import { Socket } from 'net';
-
+// Mock the file-streaming controller so router tests stay focused
+jest.mock('../../src/modules/file-streamer/fileStreamingController', () => ({
+  fileStreamingController: {
+    listFiles: jest.fn(async (_req, sock) => {
+      sock.write('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n');
+    }),
+    handleStream: jest.fn(async (_req, sock) => {
+      sock.write('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n');
+    }),
+  },
+}));
 describe('Router', () => {
   const fakeSocket = {
     write: jest.fn(),
     end: jest.fn(),
   } as unknown as Socket;
-
   beforeEach(() => {
     jest.clearAllMocks();
   });
-
   it('should return 404 for unknown route', async () => {
     const req: IncomingRequest = {
       url: new URL('http://localhost/doesnotexist'),
@@ -1494,14 +1385,11 @@ describe('Router', () => {
       raw: '',
       query: {},
     };
-
     await router.handle(req, fakeSocket);
-
     expect(fakeSocket.write).toHaveBeenCalledWith(
       expect.stringContaining('HTTP/1.1 404 Not Found'),
     );
   });
-
   it('should handle a valid /files GET request', async () => {
     const req: IncomingRequest = {
       url: new URL('http://localhost/files'),
@@ -1512,12 +1400,9 @@ describe('Router', () => {
       raw: '',
       query: {},
     };
-
     await router.handle(req, fakeSocket);
-
     expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('HTTP/1.1 200 OK'));
   });
-
   it('should return 405 Method Not Allowed for wrong method', async () => {
     const req: IncomingRequest = {
       url: new URL('http://localhost/files'),
@@ -1528,14 +1413,11 @@ describe('Router', () => {
       raw: '',
       query: {},
     };
-
     await router.handle(req, fakeSocket);
-
     expect(fakeSocket.write).toHaveBeenCalledWith(
       expect.stringContaining('HTTP/1.1 405 Method Not Allowed'),
     );
   });
-
   it('should handle missing path safely', async () => {
     const req: IncomingRequest = {
       url: new URL('http://localhost/'),
@@ -1546,12 +1428,9 @@ describe('Router', () => {
       raw: '',
       query: {},
     };
-
     await router.handle(req, fakeSocket);
-
     expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('400 Bad Request'));
   });
-
   it('should handle /stream route with file query parameter', async () => {
     const req: IncomingRequest = {
       url: new URL('http://localhost/stream?file=testfile.txt'),
@@ -1562,12 +1441,9 @@ describe('Router', () => {
       raw: '',
       query: { file: 'testfile.txt' },
     };
-
     await router.handle(req, fakeSocket);
-
     expect(fakeSocket.write).toHaveBeenCalled(); // should attempt to stream the requested file
   });
-
   it('should return 500 if handler throws', async () => {
     router.get('/error', async () => {
       throw new Error('fail');
@@ -1582,9 +1458,7 @@ describe('Router', () => {
       query: {},
     };
     const req = { ...validReq, path: '/error' };
-
     await router.handle(req, fakeSocket);
-
     expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('500 Server Error'));
   });
 });
@@ -1594,33 +1468,24 @@ describe('Router', () => {
 import { FileService } from '../../../src/modules/file-streamer/fileService';
 import * as fs from 'fs';
 import { Socket } from 'net';
-
 jest.mock('fs');
-
 describe('FileService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
-
   describe('listFiles', () => {
     it('should list files when media directory exists', () => {
       (fs.existsSync as jest.Mock).mockReturnValue(true);
       (fs.readdirSync as jest.Mock).mockReturnValue(['video.mp4', 'audio.mp3']);
-
       const result = FileService.listFiles();
-
       expect(result.files).toEqual(['video.mp4', 'audio.mp3']);
     });
-
     it("should return empty list if media directory doesn't exist", () => {
       (fs.existsSync as jest.Mock).mockReturnValue(false);
-
       const result = FileService.listFiles();
-
       expect(result.files).toEqual([]);
     });
   });
-
   describe('streamFile', () => {
     const fakeSocket = {
       write: jest.fn(),
@@ -1628,28 +1493,21 @@ describe('FileService', () => {
       on: jest.fn(),
       pipe: jest.fn(),
     } as unknown as Socket;
-
     it('should handle non-existing file gracefully', () => {
       (fs.existsSync as jest.Mock).mockReturnValue(false);
-
       FileService.streamFile('nofile.mp4', undefined, fakeSocket);
-
       expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('404 Not Found'));
-      expect(fakeSocket.end).toHaveBeenCalled();
+      // no socket.end(): persistent connections are managed by the server layer
     });
-
     it('should handle invalid range requests', () => {
       (fs.existsSync as jest.Mock).mockReturnValue(true);
       (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
-
       FileService.streamFile('video.mp4', 'bytes=2000-3000', fakeSocket);
-
       expect(fakeSocket.write).toHaveBeenCalledWith(
         expect.stringContaining('416 Range Not Satisfiable'),
       );
-      expect(fakeSocket.end).toHaveBeenCalled();
+      // no socket.end(): connection closing is up to the server
     });
-
     it('should start a stream for a valid file', () => {
       (fs.existsSync as jest.Mock).mockReturnValue(true);
       (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
@@ -1657,18 +1515,14 @@ describe('FileService', () => {
         pipe: jest.fn(),
         on: jest.fn(),
       });
-
       FileService.streamFile('video.mp4', undefined, fakeSocket);
-
       expect(fakeSocket.write).toHaveBeenCalledWith(
         expect.stringContaining('HTTP/1.1 206 Partial Content'),
       );
     });
-
     it('should handle file stream error', () => {
       (fs.existsSync as jest.Mock).mockReturnValue(true);
       (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
-
       const mockStream = {
         pipe: jest.fn(),
         on: jest.fn((event, handler) => {
@@ -1678,12 +1532,9 @@ describe('FileService', () => {
         }),
       };
       (fs.createReadStream as jest.Mock).mockReturnValue(mockStream);
-
       FileService.streamFile('video.mp4', undefined, fakeSocket);
-
       expect(fakeSocket.end).toHaveBeenCalled();
     });
-
     it('should stream partial content for valid small range', () => {
       (fs.existsSync as jest.Mock).mockReturnValue(true);
       (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
@@ -1691,14 +1542,11 @@ describe('FileService', () => {
         pipe: jest.fn(),
         on: jest.fn(),
       });
-
       FileService.streamFile('video.mp4', 'bytes=0-499', fakeSocket);
-
       expect(fakeSocket.write).toHaveBeenCalledWith(
         expect.stringContaining('HTTP/1.1 206 Partial Content'),
       );
     });
-
     it('should stream partial content for valid range bytes=0-499', () => {
       (fs.existsSync as jest.Mock).mockReturnValue(true);
       (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
@@ -1706,14 +1554,11 @@ describe('FileService', () => {
         pipe: jest.fn(),
         on: jest.fn(),
       });
-
       FileService.streamFile('video.mp4', 'bytes=0-499', fakeSocket);
-
       expect(fakeSocket.write).toHaveBeenCalledWith(
         expect.stringContaining('HTTP/1.1 206 Partial Content'),
       );
     });
-
     it('should handle range with no start (e.g., bytes=-500)', () => {
       (fs.existsSync as jest.Mock).mockReturnValue(true);
       (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
@@ -1721,14 +1566,11 @@ describe('FileService', () => {
         pipe: jest.fn(),
         on: jest.fn(),
       });
-
       FileService.streamFile('video.mp4', 'bytes=-500', fakeSocket);
-
       expect(fakeSocket.write).toHaveBeenCalledWith(
         expect.stringContaining('HTTP/1.1 206 Partial Content'),
       );
     });
-
     it('should handle range with no end (e.g., bytes=500-)', () => {
       (fs.existsSync as jest.Mock).mockReturnValue(true);
       (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
@@ -1736,24 +1578,19 @@ describe('FileService', () => {
         pipe: jest.fn(),
         on: jest.fn(),
       });
-
       FileService.streamFile('video.mp4', 'bytes=500-', fakeSocket);
-
       expect(fakeSocket.write).toHaveBeenCalledWith(
         expect.stringContaining('HTTP/1.1 206 Partial Content'),
       );
     });
-
     it('should return 416 for invalid range format (e.g., bytes=invalid)', () => {
       (fs.existsSync as jest.Mock).mockReturnValue(true);
       (fs.statSync as jest.Mock).mockReturnValue({ size: 1000 });
-
       FileService.streamFile('video.mp4', 'bytes=invalid', fakeSocket);
-
       expect(fakeSocket.write).toHaveBeenCalledWith(
         expect.stringContaining('416 Range Not Satisfiable'),
       );
-      expect(fakeSocket.end).toHaveBeenCalled();
+      // no socket.end(): streaming errors leave connection management to the TCP layer
     });
   });
 });
@@ -1770,16 +1607,13 @@ import { Socket } from 'net';
 import { Readable } from 'stream';
 jest.mock('fs');
 jest.mock('fs/promises');
-
 const fakeStream = new Readable({ read() {} }); // a real Readable stream
-
 // Dynamically load controller after resetting modules and config
 describe('fileStreamingController', () => {
   const fakeSocket = {
     write: jest.fn(),
     end: jest.fn(),
   } as unknown as Socket;
-
   beforeEach(() => {
     jest.resetModules();
     jest.clearAllMocks();
@@ -1797,7 +1631,6 @@ describe('fileStreamingController', () => {
     fileStreamingController =
       require('../../../src/modules/file-streamer/fileStreamingController').fileStreamingController;
   });
-
   it('should respond with 400 if no file param on stream', async () => {
     const req = {
       url: new URL('http://localhost/stream'),
@@ -1816,11 +1649,9 @@ describe('fileStreamingController', () => {
       expect.stringContaining('Missing required "file"'),
     );
   });
-
   it('should respond with 404 if file does not exist', async () => {
     // Simulate missing file by having stat reject
     fsPromises.stat.mockRejectedValueOnce(new Error('File not found'));
-
     const req = {
       url: new URL('http://localhost/stream?file=nonexistent.mp4'),
       method: 'GET',
@@ -1830,13 +1661,11 @@ describe('fileStreamingController', () => {
       raw: '',
       query: { file: 'nonexistent.mp4' },
     } as IncomingRequest;
-
     await fileStreamingController.handleStream(req, fakeSocket);
     expect(fakeSocket.write).toHaveBeenCalledWith(
       expect.stringContaining('HTTP/1.1 404 Not Found'),
     );
   });
-
   it('should list files correctly', async () => {
     const req: IncomingRequest = {
       url: new URL('http://localhost/files'),
@@ -1847,12 +1676,9 @@ describe('fileStreamingController', () => {
       raw: '',
       query: {},
     };
-
     await fileStreamingController.listFiles(req, fakeSocket);
-
     expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('HTTP/1.1 200 OK'));
   });
-
   it('should stream file if it exists', async () => {
     const req = {
       url: new URL('http://localhost/stream?file=video.mp4'),
@@ -1863,9 +1689,7 @@ describe('fileStreamingController', () => {
       raw: '',
       query: { file: 'video.mp4' },
     } as IncomingRequest;
-
     await fileStreamingController.handleStream(req, fakeSocket);
-
     expect(fakeSocket.write).toHaveBeenCalledWith(
       expect.stringContaining('HTTP/1.1 206 Partial Content'),
     );
@@ -1881,20 +1705,16 @@ describe('fileStreamingController', () => {
 
 <file path="utils/helpers.test.ts">
 import { getMimeType } from '../../src/utils/helpers';
-
 describe('Helpers - getMimeType', () => {
   it('should return correct MIME type for mp4', () => {
     expect(getMimeType('movie.mp4')).toBe('video/mp4');
   });
-
   it('should return correct MIME type for jpg', () => {
     expect(getMimeType('image.jpg')).toBe('image/jpeg');
   });
-
   it('should return default MIME type for unknown file extension', () => {
     expect(getMimeType('something.unknownext')).toBe('application/octet-stream');
   });
-
   it('should return default MIME type for file with no extension', () => {
     expect(getMimeType('README')).toBe('application/octet-stream');
   });
@@ -1903,7 +1723,6 @@ describe('Helpers - getMimeType', () => {
 
 <file path="utils/logger.test.ts">
 import { logger } from '../../src/utils/logger';
-
 describe('Logger', () => {
   it('should log info messages', () => {
     const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
@@ -1911,21 +1730,18 @@ describe('Logger', () => {
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
   });
-
   it('should log warning messages', () => {
     const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
     logger.warn('Watch out!');
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
   });
-
   it('should log error messages', () => {
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
     logger.error('This is bad!');
     expect(consoleSpy).toHaveBeenCalled();
     consoleSpy.mockRestore();
   });
-
   it('should conditionally log debug messages', () => {
     process.env.NODE_ENV = 'development';
     const consoleSpy = jest.spyOn(console, 'debug').mockImplementation();
@@ -1935,7 +1751,6 @@ describe('Logger', () => {
     // restore original NODE_ENV
     delete process.env.NODE_ENV;
   });
-
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -1946,90 +1761,84 @@ describe('Logger', () => {
 import { createConnection } from 'net';
 import { config } from '../../src/config/server.config'; // assuming your port config
 import { HttpServer } from '../../src/core/server';
-
 jest.setTimeout(20000); // Increase timeout for all tests in this file
-config.bodyTimeoutMs = 20000; // Set body timeout to 20 seconds
-config.headerTimeoutMs = 20000; // Set header timeout to 20 seconds
+config.bodyTimeoutMs = 10000; // Set body timeout to 10 seconds
+config.headerTimeoutMs = 10000; // Set header timeout to 10 seconds
 let server: HttpServer;
-
 beforeAll(async () => {
   server = new HttpServer(config.port);
   server.start();
   // Wait briefly to ensure server is ready
   await new Promise((res) => setTimeout(res, 300));
 });
-
+afterEach(() => {
+  jest.clearAllTimers();
+});
 afterAll(async () => {
   await server.stop();
+  // Ensure all sockets are closed using the new public method
+  server.destroySockets();
 });
-
 function sendRawRequest(payload: string | Buffer, expectClose: boolean = true): Promise<string> {
   return new Promise((resolve, reject) => {
     const client = createConnection({ port: config.port }, () => {
       client.write(payload);
     });
-
     let data = '';
-
+    let timeout: NodeJS.Timeout | null = null;
     client.on('data', (chunk) => {
       data += chunk.toString();
     });
-
-    client.on('end', () => resolve(data));
-    client.on('error', reject);
-
+    client.on('end', () => {
+      if (timeout) clearTimeout(timeout);
+      resolve(data);
+    });
+    client.on('error', (err) => {
+      if (timeout) clearTimeout(timeout);
+      reject(err);
+    });
     if (!expectClose) {
-      setTimeout(() => client.end(), 3000); // manual timeout fallback
+      timeout = setTimeout(() => client.end(), 3000); // manual timeout fallback
     }
   });
 }
-
 describe('🔥 HTTP Server TCP Stress Tests', () => {
   it('handles simple GET properly', async () => {
     const response = await sendRawRequest('GET /files HTTP/1.1\r\nHost: localhost\r\n\r\n');
-    expect(response).toMatch(/HTTP\/1\.1 500 Internal Server Error/);
+    expect(response).toMatch(/HTTP\/1\.1 200 OK/);
   });
-
   it('handles fragmented headers across TCP packets', async () => {
     const sock = createConnection({ port: config.port });
-
     sock.write('GET /files HT');
     await new Promise((r) => setTimeout(r, 50));
     sock.write('TP/1.1\r\nHo');
     await new Promise((r) => setTimeout(r, 50));
     sock.write('st: localhost\r\n\r\n');
-
     let response = '';
     sock.on('data', (chunk) => {
       response += chunk.toString();
     });
-
     const res = await new Promise<string>((resolve) => {
       sock.on('end', () => resolve(response));
     });
-
-    expect(res).toMatch(/HTTP\/1\.1 500 Internal Server Error/);
+    expect(res).toMatch(/HTTP\/1\.1 200 OK/);
   });
-
   it('handles invalid request line (bad client)', async () => {
     const response = await sendRawRequest('BADREQUEST\r\nHost: localhost\r\n\r\n');
     expect(response).toMatch(/HTTP\/1.1 400 Bad Request/);
   });
-
   it('rejects massive headers flood', async () => {
     const massiveHeaders = Array(1200).fill('X-Flood: yes').join('\r\n');
     const request = `GET / HTTP/1.1\r\n${massiveHeaders}\r\n\r\n`;
     const response = await sendRawRequest(request);
     expect(response).toMatch(/HTTP\/1.1 400 Bad Request/);
   });
-
   it('rejects huge body POST (over limit)', async () => {
     const bigBody = 'A'.repeat(12 * 1024 * 1024); // 12MB
     const request = `POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: ${bigBody.length}\r\n\r\n${bigBody}`;
     const response = await sendRawRequest(request);
     expect(response).toMatch(/HTTP\/1.1 400 Bad Request/);
   });
-
   it('handles chunked upload streamed slowly', async () => {
     const sock = createConnection({ port: config.port });
     const parts = [
@@ -2038,32 +1847,26 @@ describe('🔥 HTTP Server TCP Stress Tests', () => {
       '6\r\n World\r\n',
       '0\r\n\r\n',
     ];
-
     for (const p of parts) {
       sock.write(p);
       await new Promise((r) => setTimeout(r, 100));
     }
-
     let response = '';
     sock.on('data', (chunk) => {
       response += chunk.toString();
     });
-
     const res = await new Promise<string>((resolve) => {
       sock.on('end', () => resolve(response));
     });
-
-    expect(res).toMatch(/HTTP\/1.1/);
+    expect(res).toMatch(/HTTP\/1\.1/);
     expect(res).not.toMatch(/400/);
   });
-
   // Add a test for header folding
   it('handles folded headers correctly', async () => {
     const foldedHeaderRequest = `GET / HTTP/1.1\r\nHost: localhost\r\nX-Folded: part1\r\n\tpart2\r\n\r\n`;
     const response = await sendRawRequest(foldedHeaderRequest);
     expect(response).toMatch(/HTTP\/1\.1 404 Not Found/);
   });
-
   it('supports HTTP/1.1 pipelined requests', async () => {
     const payload =
       'GET /files HTTP/1.1\r\nHost: localhost\r\n\r\n' +

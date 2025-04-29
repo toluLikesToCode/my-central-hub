@@ -54,6 +54,10 @@ class Router {
 
   /* ---------- Main entry ---------- */
   async handle(req: IncomingRequest, sock: Socket): Promise<void> {
+    if (req.method === 'OPTIONS') {
+      sendResponse(sock, 200, { 'Content-Type': 'text/plain' }, 'OK');
+      return;
+    }
     if (!req.path || typeof req.path !== 'string') {
       sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
       return;
