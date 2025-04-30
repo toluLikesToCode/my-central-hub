@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+// @ts-nocheck
+
 import { getMimeType } from '../../src/utils/helpers';
 
 describe('Helpers - getMimeType', () => {

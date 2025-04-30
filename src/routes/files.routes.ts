@@ -1,5 +1,8 @@
 // routes/files.routes.ts
-import { router } from '../core/router';
-import { fileStreamingController } from '../modules/file-streamer';
+// DEPRECATED: This file is now handled by file-hosting.routes.ts for all /api/files endpoints.
+// Please use file-hosting.routes.ts instead.
 
-router.get('/files', fileStreamingController.listFiles);
+import router from '../core/router';
+import { fileHostingController } from '../modules/file-hosting';
+
+router.get('/files', fileHostingController.listFiles);

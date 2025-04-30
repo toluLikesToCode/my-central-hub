@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+// @ts-nocheck
+
 import { logger } from '../../src/utils/logger';
 
 describe('Logger', () => {

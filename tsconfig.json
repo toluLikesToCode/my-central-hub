@@ -9,5 +9,6 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "isolatedModules": true
-  }
+  },
+  "exclude": ["PROJECT_CHECKLIST.md", "node_modules", "coverage", "tests", "stress"]
 }

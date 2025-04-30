@@ -6,7 +6,7 @@ import { logger } from '../utils/logger';
 dotenv.config();
 
 export const config = {
-  port: process.env.PORT ? parseInt(process.env.PORT, 10) : 8080,
+  port: process.env.PORT ? parseInt(process.env.PORT, 10) : 3000,
   publicDir: process.env.PUBLIC_DIR
     ? join(process.cwd(), process.env.PUBLIC_DIR)
     : join(process.cwd(), 'public'),
@@ -23,6 +23,15 @@ export const config = {
    * Path to the SQLite database file. Will be created if missing.
    */
   dbPath: process.env.DB_PATH ? process.env.DB_PATH : join(process.cwd(), 'data', 'metrics.db'),
+  /**
+   * Feature toggles for modularity and configurability
+   */
+  features: {
+    metrics: true,
+    fileHosting: true,
+    fileStreaming: true,
+    // Add more features here as needed
+  },
 };
 
 logger.info(`Server configuration:`);

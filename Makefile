@@ -1,4 +1,19 @@
-.PHONY: compress-central-hub dry-run-central-hub
+.PHONY: compress-central-hub dry-run-central-hub send_request
+
+
+send_request:
+	@if [ -z "$(URL)" ] || [ -z "$(DATA)" ]; then \
+		echo "Usage: make send_request URL=<url> DATA='<json>'"; \
+		exit 1; \
+	fi
+	curl -X POST "$(URL)" \
+	-H "Content-Type: application/json" \
+	-d '$(DATA)'
+
+
+
+
+## Repomix Compression
 
 # Pass compression level
 compress-1:
@@ -22,3 +37,5 @@ dry-run-central-hub-max:
 # Help
 compress-help:
 	./compress-central-hub.sh --help
+
+

@@ -1,27 +1,16 @@
 import { Socket } from 'net';
 import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
-import { FileService } from './fileService';
 import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
 import { logger } from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
 import { Readable } from 'stream';
+import { FileHostingService } from '../file-hosting/fileHostingService';
 
-const fileSvc = new FileService(config.mediaDir);
+const fileSvc = new FileHostingService(config.mediaDir);
 
 export const fileStreamingController = {
-  /** GET /files – returns JSON list of filenames */
-  async listFiles(req: IncomingRequest, sock: Socket) {
-    try {
-      const files = await fileSvc.listFiles();
-      sendResponse(sock, 200, { 'Content-Type': 'application/json' }, JSON.stringify(files));
-    } catch (err) {
-      logger.error(`listFiles: ${(err as Error).message}`);
-      sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Server error');
-    }
-  },
-
   /** GET /stream?file=video.mp4 – streams file (supports Range) */
   async handleStream(req: IncomingRequest, sock: Socket) {
     logger.info(
@@ -37,13 +26,11 @@ export const fileStreamingController = {
       );
       return;
     }
-
     try {
-      const rangeHdr = getHeader(req, 'range'); // e.g. "bytes=0-1023"
+      const rangeHdr = getHeader(req, 'range');
       let stream: Readable;
       const fileStat = await fileSvc.stat(fileName);
       const size = fileStat.size;
-
       if (rangeHdr) {
         const m = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
         if (!m) {
@@ -69,13 +56,7 @@ export const fileStreamingController = {
           return;
         }
         stream = await fileSvc.readFile(fileName, { start, end });
-        if (!stream) {
-          throw new Error('Stream is undefined');
-        }
-        stream.on('error', (err) => {
-          logger.error(`[handleStream] Stream error: ${err.message}`);
-          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
-        });
+        if (!stream) throw new Error('Stream is undefined');
         const len = end - start + 1;
         sendResponse(
           sock,
@@ -90,13 +71,7 @@ export const fileStreamingController = {
         );
       } else {
         stream = await fileSvc.readFile(fileName);
-        if (!stream) {
-          throw new Error('Stream is undefined');
-        }
-        stream.on('error', (err) => {
-          logger.error(`[handleStream] Stream error: ${err.message}`);
-          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
-        });
+        if (!stream) throw new Error('Stream is undefined');
         const mimeType = getMimeType(fileName);
         sendResponse(
           sock,

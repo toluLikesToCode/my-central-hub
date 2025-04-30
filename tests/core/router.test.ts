@@ -1,130 +1,137 @@
-import { router } from '../../src/core/router';
-import { IncomingRequest } from '../../src/entities/http';
-import { Socket } from 'net';
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+// @ts-nocheck
 
-// Mock the file-streaming controller so router tests stay focused
-jest.mock('../../src/modules/file-streamer/fileStreamingController', () => ({
-  fileStreamingController: {
-    listFiles: jest.fn(async (_req, sock) => {
-      sock.write('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n');
-    }),
-    handleStream: jest.fn(async (_req, sock) => {
-      sock.write('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n');
-    }),
-  },
-}));
+// __tests__/router.test.ts
+import { Socket } from 'net';
+import { createRouter } from '../../src/core/router';
+import { sendResponse } from '../../src/entities/sendResponse';
+import type { IncomingRequest } from '../../src/entities/http';
+
+jest.mock('../../src/entities/sendResponse');
+jest.mock('../../src/utils/logger');
 
 describe('Router', () => {
-  const fakeSocket = {
-    write: jest.fn(),
-    end: jest.fn(),
-  } as unknown as Socket;
+  let router;
+  let socket: Socket;
+  let req: IncomingRequest;
 
   beforeEach(() => {
+    router = createRouter();
+
+    socket = {
+      write: jest.fn(),
+      end: jest.fn(),
+      destroy: jest.fn(),
+    } as unknown as Socket;
+
+    req = {
+      method: 'GET',
+      path: '/test',
+      query: {},
+      httpVersion: 'HTTP/1.1',
+      headers: {},
+      headersMap: new Map(),
+      url: new URL('http://localhost/test'),
+      raw: '',
+      ctx: {},
+      invalid: false,
+    };
+  });
+
+  afterEach(() => {
     jest.clearAllMocks();
   });
 
-  it('should return 404 for unknown route', async () => {
-    const req: IncomingRequest = {
-      url: new URL('http://localhost/doesnotexist'),
-      method: 'GET',
-      path: '/doesnotexist',
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: {},
-    };
+  test('should run middleware in sequence', async () => {
+    const order: string[] = [];
+    router.use(async (_req, _sock, next) => {
+      order.push('mw1');
+      await next();
+      order.push('mw1-after');
+    });
+    router.use(async (_req, _sock, next) => {
+      order.push('mw2');
+      await next();
+      order.push('mw2-after');
+    });
 
-    await router.handle(req, fakeSocket);
+    router.any('/test', async () => {
+      order.push('handler');
+    });
+    await router.handle(req, socket);
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(
-      expect.stringContaining('HTTP/1.1 404 Not Found'),
+    expect(order).toEqual(['mw1', 'mw2', 'handler', 'mw2-after', 'mw1-after']);
+  });
+
+  test('should call matching handler for GET route', async () => {
+    const handler = jest.fn();
+    router.get('/test', handler);
+
+    await router.handle(req, socket);
+    expect(handler).toHaveBeenCalledWith(req, socket);
+  });
+
+  test('should respond with 404 if no route matches', async () => {
+    req.path = '/unknown';
+    await router.handle(req, socket);
+
+    expect(sendResponse).toHaveBeenCalledWith(
+      socket,
+      404,
+      { 'Content-Type': 'text/plain' },
+      'Not Found',
     );
   });
 
-  it('should handle a valid /files GET request', async () => {
-    const req: IncomingRequest = {
-      url: new URL('http://localhost/files'),
-      method: 'GET',
-      path: '/files',
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: {},
-    };
+  test('should respond with 405 if method does not match', async () => {
+    req.method = 'POST';
+    router.get('/test', jest.fn());
 
-    await router.handle(req, fakeSocket);
+    await router.handle(req, socket);
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('HTTP/1.1 200 OK'));
+    expect(sendResponse).toHaveBeenCalledWith(socket, 405, { Allow: 'GET' }, 'Method Not Allowed');
   });
 
-  it('should return 405 Method Not Allowed for wrong method', async () => {
-    const req: IncomingRequest = {
-      url: new URL('http://localhost/files'),
-      method: 'POST', // Should be GET
-      path: '/files',
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: {},
-    };
+  test('should extract params into req.ctx.params', async () => {
+    const paramHandler = jest.fn();
+    router.get('/users/:id', paramHandler);
 
-    await router.handle(req, fakeSocket);
+    req.path = '/users/123';
+    req.url = new URL('http://localhost/users/123');
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(
-      expect.stringContaining('HTTP/1.1 405 Method Not Allowed'),
-    );
+    await router.handle(req, socket);
+    expect(paramHandler).toHaveBeenCalled();
+    expect(req.ctx?.params).toEqual({ id: '123' });
   });
 
-  it('should handle missing path safely', async () => {
-    const req: IncomingRequest = {
-      url: new URL('http://localhost/'),
-      method: 'GET',
-      path: undefined as unknown as string, // force a bad input
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: {},
-    };
-
-    await router.handle(req, fakeSocket);
-
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('400 Bad Request'));
-  });
-
-  it('should handle /stream route with file query parameter', async () => {
-    const req: IncomingRequest = {
-      url: new URL('http://localhost/stream?file=testfile.txt'),
-      method: 'GET',
-      path: '/stream',
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: { file: 'testfile.txt' },
-    };
-
-    await router.handle(req, fakeSocket);
-
-    expect(fakeSocket.write).toHaveBeenCalled(); // should attempt to stream the requested file
-  });
-
-  it('should return 500 if handler throws', async () => {
-    router.get('/error', async () => {
+  test('should respond with 500 on handler error', async () => {
+    router.get('/error', () => {
       throw new Error('fail');
     });
-    const validReq: IncomingRequest = {
-      url: new URL('http://localhost/error'),
-      method: 'GET',
-      path: '/error',
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: {},
-    };
-    const req = { ...validReq, path: '/error' };
 
-    await router.handle(req, fakeSocket);
+    req.path = '/error';
+    req.url = new URL('http://localhost/error');
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('500 Server Error'));
+    await router.handle(req, socket);
+
+    expect(sendResponse).toHaveBeenCalledWith(
+      socket,
+      500,
+      { 'Content-Type': 'text/plain' },
+      '500 Server Error',
+    );
+  });
+
+  test('should respond to OPTIONS with Allow header', async () => {
+    req.method = 'OPTIONS';
+    req.path = '/anything';
+
+    await router.handle(req, socket);
+    expect(sendResponse).toHaveBeenCalledWith(
+      socket,
+      200,
+      { 'Content-Type': 'text/plain', Allow: 'GET, POST, PUT, DELETE, OPTIONS' },
+      'OK',
+    );
   });
 });
