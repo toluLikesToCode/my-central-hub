@@ -32,11 +32,15 @@ export function sendResponse(
   }
 
   if (body instanceof Readable) {
-    // Stream without closing socket; HttpServer will close when appropriate
+    console.log('[DEBUG] sendResponse: piping stream');
+    body.once('error', (err) => {
+      console.error('[DEBUG] sendResponse: stream error caught', err.message);
+      if (!socket.destroyed) socket.destroy();
+    });
     body.pipe(socket, { end: false });
-    body.once('error', () => socket.destroy());
-  } else {
-    // Write body without closing socket
-    socket.write(body);
+    return;
   }
+
+  // Write body without closing socket
+  socket.write(body);
 }

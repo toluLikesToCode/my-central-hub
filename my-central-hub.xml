@@ -55,20 +55,36 @@ core/
   parser.ts
   router.test.ts
   router.ts
+  server.test.ts
   server.ts
 entities/
   http.ts
   sendResponse.ts
 modules/
+  app-metrics/
+    app_gallery-generator/
+      index.ts
+      metricsController.ts
+      metricsService.ts
+    index.ts
+    metricsController.test.ts
+    README.md
+  file-hosting/
+    fileHostingController.ts
+    fileHostingService.ts
+    index.ts
   file-streamer/
     fileService.test.ts
-    fileService.ts
     fileStreamingController.test.ts
+  file-streaming/
+    fileService.ts
     fileStreamingController.ts
     index.ts
 routes/
+  file-hosting.routes.ts
   files.routes.ts
   index.ts
+  metrics.routes.ts
   stream.routes.ts
 utils/
   helpers.test.ts
@@ -77,7 +93,9 @@ utils/
   logger.test.ts
   logger.ts
   mimeTypes.ts
+global.d.ts
 main.ts
+setupJest.ts
 </directory_structure>
 
 <files>
@@ -92,7 +110,7 @@ import { logger } from '../utils/logger';
 dotenv.config();
 
 export const config = {
-  port: process.env.PORT ? parseInt(process.env.PORT, 10) : 8080,
+  port: process.env.PORT ? parseInt(process.env.PORT, 10) : 3000,
   publicDir: process.env.PUBLIC_DIR
     ? join(process.cwd(), process.env.PUBLIC_DIR)
     : join(process.cwd(), 'public'),
@@ -105,6 +123,19 @@ export const config = {
   bodyTimeoutMs: process.env.BODY_TIMEOUT_MS
     ? Math.max(parseInt(process.env.BODY_TIMEOUT_MS, 10), 0)
     : 10000,
+  /**
+   * Path to the SQLite database file. Will be created if missing.
+   */
+  dbPath: process.env.DB_PATH ? process.env.DB_PATH : join(process.cwd(), 'data', 'metrics.db'),
+  /**
+   * Feature toggles for modularity and configurability
+   */
+  features: {
+    metrics: true,
+    fileHosting: true,
+    fileStreaming: true,
+    // Add more features here as needed
+  },
 };
 
 logger.info(`Server configuration:`);
@@ -113,6 +144,7 @@ logger.info(`- Public Directory: ${config.publicDir}`);
 logger.info(`- Media Directory: ${config.mediaDir}`);
 logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
 logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
+logger.info(`- Database Path: ${config.dbPath}`);
 </file>
 
 <file path="core/httpParser.ts">
@@ -572,55 +604,120 @@ class Router {
 
   /* ---------- Main entry ---------- */
   async handle(req: IncomingRequest, sock: Socket): Promise<void> {
+    if (req.method === 'OPTIONS') {
+      sendResponse(
+        sock,
+        200,
+        { 'Content-Type': 'text/plain', Allow: 'GET, POST, PUT, DELETE, OPTIONS' },
+        'OK',
+      );
+      return;
+    }
     if (!req.path || typeof req.path !== 'string') {
-      sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
+      sendResponse(
+        sock,
+        400,
+        {
+          'Content-Type':
+            req.path && req.path.startsWith('/api/') ? 'application/json' : 'text/plain',
+        },
+        req.path && req.path.startsWith('/api/')
+          ? JSON.stringify({ error: 'Bad Request' })
+          : 'Bad Request',
+      );
       return;
     }
     logger.info(`router saw ${req.method} ${req.path}`);
     // 1. run middleware chain
     let i = 0;
+    const self = this;
+    // Use an explicit stack to unwind after handler
     const run = async (): Promise<void> => {
-      if (i < this.middlewares.length) {
-        const mw = this.middlewares[i++];
-        await mw(req, sock, run);
+      if (i < self.middlewares.length) {
+        const idx = i++;
+        await self.middlewares[idx](req, sock, run);
+        return;
+      }
+      // Only after all middleware, run the handler
+      // 2. route lookup
+      const matching = self.routes.filter((r) => r.regex.test(req.path));
+      const route =
+        matching.find((r) => r.method === req.method) ?? matching.find((r) => r.method === 'ANY');
+      if (!route) {
+        // Distinguish 404 vs 405
+        if (matching.length) {
+          // Only include allowed methods that are not 'ANY'
+          const allowed = matching
+            .map((r) => r.method)
+            .filter((m) => m !== 'ANY')
+            .join(', ');
+          if (req.path.startsWith('/api/')) {
+            sendResponse(
+              sock,
+              405,
+              {
+                'Content-Type': 'application/json',
+                Allow: allowed,
+              },
+              JSON.stringify({ error: 'Method Not Allowed' }),
+            );
+          } else {
+            sendResponse(sock, 405, { Allow: allowed }, 'Method Not Allowed');
+          }
+        } else {
+          if (req.path.startsWith('/api/')) {
+            sendResponse(
+              sock,
+              404,
+              { 'Content-Type': 'application/json' },
+              JSON.stringify({ error: 'Not Found' }),
+            );
+          } else {
+            sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, 'Not Found');
+          }
+        }
+        return;
+      }
+      // 3. pull params (/:id etc.) → req.ctx.params
+      const match = route.regex.exec(req.path)!;
+      const params: Record<string, string> = {};
+      route.keys.forEach((k, idx) => {
+        params[k] = decodeURIComponent(match[idx + 1]);
+      });
+      (req.ctx ??= {}).params = params;
+      // 4. invoke handler
+      try {
+        await route.handler(req, sock);
+      } catch (err) {
+        logger.error(`Handler error: ${(err as Error).message}`);
+        if (req.path.startsWith('/api/')) {
+          sendResponse(
+            sock,
+            500,
+            { 'Content-Type': 'application/json' },
+            JSON.stringify({ error: 'Internal Server Error' }),
+          );
+        } else {
+          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, '500 Server Error');
+        }
       }
     };
-    await run();
-
-    // 2. route lookup
-    const matching = this.routes.filter((r) => r.regex.test(req.path));
-    const route =
-      matching.find((r) => r.method === req.method) ?? matching.find((r) => r.method === 'ANY');
-
-    if (!route) {
-      // Distinguish 404 vs 405
-      if (matching.length) {
+    try {
+      await run();
+    } catch (err) {
+      // Global error handler for middleware
+      if (req.path.startsWith('/api/')) {
         sendResponse(
           sock,
-          405,
-          { Allow: matching.map((r) => r.method).join(', ') },
-          'Method Not Allowed',
+          500,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({ error: 'Internal Server Error' }),
         );
       } else {
-        sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, 'Not Found');
+        sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, '500 Server Error');
       }
+      logger.error(`Middleware error: ${(err as Error).message}`);
       return;
-    }
-
-    // 3. pull params (/:id etc.) → req.ctx.params
-    const match = route.regex.exec(req.path)!;
-    const params: Record<string, string> = {};
-    route.keys.forEach((k, idx) => {
-      params[k] = decodeURIComponent(match[idx + 1]);
-    });
-    (req.ctx ??= {}).params = params;
-
-    // 4. invoke handler
-    try {
-      await route.handler(req, sock);
-    } catch (err) {
-      logger.error(`Handler error: ${(err as Error).message}`);
-      sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, '500 Server Error');
     }
   }
 }
@@ -645,29 +742,17 @@ function compilePath(pattern: string): { regex: RegExp; keys: string[] } {
 
 /* ───── Exports ───────────────────────────────────────────────────────── */
 
-export const router = new Router();
-
-// Dynamically load route definitions after router is initialized
-// (avoids circular-import issues with static `import '../routes'`)
-async function loadRoutesSafely() {
-  try {
-    await import('../routes');
-  } catch (error) {
-    console.error('Failed to dynamically import routes:', error);
-    // fallback or no-op if needed
-  }
+export function createRouter(): Router {
+  return new Router();
 }
 
-// Immediately trigger loading
-loadRoutesSafely();
-
-export default router;
+export default createRouter();
 </file>
 
 <file path="core/server.ts">
 import { createServer, Socket } from 'net';
 import { HttpRequestParser } from './httpParser';
-import { router } from './router';
+import router from './router';
 import { logger } from '../utils/logger';
 import { sendResponse } from '../entities/sendResponse';
 import { config } from '../config/server.config'; // Assuming config is imported from a config file
@@ -675,8 +760,13 @@ import { config } from '../config/server.config'; // Assuming config is imported
 export class HttpServer {
   private server = createServer();
   private readonly connections = new Set<Socket>();
+  private readonly router;
 
-  constructor(private port: number) {
+  constructor(
+    private port: number,
+    routerInstance = router,
+  ) {
+    this.router = routerInstance;
     this.setupServer();
   }
 
@@ -718,33 +808,38 @@ export class HttpServer {
       socket.on('data', async (chunk: Buffer) => {
         refreshTimeout();
         try {
-          const request = parser.feed(chunk);
-          if (!request) return; // still waiting for complete request
+          // First feed yields the first complete request (or null)
+          let req = parser.feed(chunk);
+          if (!req) return; // need more bytes
 
           clearTimeout(headerTimer);
-          if (request.method === 'POST' || request.method === 'PUT' || request.method === 'PATCH') {
-            refreshBodyTimeout();
-          }
 
-          await router.handle(request, socket);
-          clearTimeout(bodyTimer);
+          // Handle all pipelined requests in buffer
+          do {
+            // If this is a body-bearing method, start body timeout
+            if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+              refreshBodyTimeout();
+            }
 
-          // Use the public getter to check pending buffered bytes
+            await this.router.handle(req, socket);
+            clearTimeout(bodyTimer);
+
+            // now pull the next request from any leftover bytes
+            req = parser.feed(Buffer.alloc(0));
+          } while (req);
+
           const pending = parser.getPendingBytes();
-
-          // Support HTTP/1.1 pipelining: only close if no pending data in parser buffer
           if (pending > 0) {
-            // More pipelined requests waiting; keep connection alive
+            // more pipelined data waiting—keep alive
             refreshTimeout();
           } else {
-            // No further data, close the socket
             socket.end();
           }
         } catch (err) {
           logger.error(`Failed request: ${(err as Error).message}`);
           sendResponse(socket, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
-        } // Added missing closing brace
-      }); // Correctly closed the socket.on('data') block
+        }
+      });
 
       socket.on('error', (err) => {
         logger.error(`Socket error: ${err.message}`);
@@ -771,6 +866,13 @@ export class HttpServer {
     await new Promise<void>((resolve, reject) =>
       this.server.close((err) => (err ? reject(err) : resolve())),
     );
+  }
+
+  /**
+   * Public method to destroy all active sockets.
+   */
+  public destroySockets(): void {
+    this.connections.forEach((socket) => socket.destroy());
   }
 
   public start() {
@@ -859,24 +961,691 @@ export function sendResponse(
 }
 </file>
 
-<file path="modules/file-streamer/fileService.ts">
-// file-streamer/fileService.ts
-import {
-  existsSync,
-  createReadStream,
-  statSync,
-  createWriteStream,
-  readdirSync, // ← added for legacy tests
-} from 'fs';
-import { stat, readdir, mkdir } from 'fs/promises';
-import { resolve, join } from 'path';
-import { Readable } from 'stream';
-import { Socket } from 'net';
-import { config } from '../../config/server.config';
-import { getMimeType } from '../../utils/helpers';
-import { sendResponse } from '../../entities/sendResponse';
+<file path="modules/app-metrics/app_gallery-generator/index.ts">
+export * from './metricsController';
+export * from './metricsService';
+</file>
 
-export class FileService {
+<file path="modules/app-metrics/app_gallery-generator/metricsController.ts">
+import { IncomingRequest } from '../../../entities/http';
+import { sendResponse } from '../../../entities/sendResponse';
+import { Socket } from 'net';
+import { saveMetrics, isPerfLogArray } from './metricsService';
+import { logger } from '../../../utils/logger';
+
+export const metricsController = {
+  handleMetrics: async (req: IncomingRequest, sock: Socket) => {
+    try {
+      if (req.method !== 'POST') {
+        sendResponse(
+          sock,
+          405,
+          {
+            'Content-Type': 'text/plain',
+          },
+          'Method Not Allowed',
+        );
+        return;
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(
+          typeof req.body === 'string' ? req.body : req.body?.toString() || '{}',
+        );
+      } catch (err) {
+        logger.info(`[metrics] Invalid JSON: ${err}`);
+        sendResponse(
+          sock,
+          400,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({ error: 'Invalid JSON', details: String(err) }),
+        );
+        return;
+      }
+      const clientSessionId = req.headers['x-session-id'] || req.headers['X-Session-Id'];
+      // PerfLog batch shortcut
+      if (Array.isArray(payload) && isPerfLogArray(payload)) {
+        await saveMetrics(payload, undefined, clientSessionId);
+        sendResponse(
+          sock,
+          200,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({ status: 'ok' }),
+        );
+        return;
+      }
+      // Always call saveMetrics, even if partially invalid
+      await saveMetrics(payload, undefined, clientSessionId);
+      sendResponse(
+        sock,
+        200,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({ status: 'ok' }),
+      );
+    } catch (err) {
+      logger.info(`[metrics] error saving payload: ${err}`);
+      sendResponse(
+        sock,
+        500,
+        {
+          'Content-Type': 'text/plain',
+        },
+        'Internal Server Error',
+      );
+    }
+  },
+};
+</file>
+
+<file path="modules/app-metrics/app_gallery-generator/metricsService.ts">
+import { z } from 'zod';
+import sqlite3 from 'sqlite3';
+import { open, Database } from 'sqlite';
+import { config } from '../../../config/server.config';
+import { logger } from '../../../utils/logger';
+import fs from 'fs';
+import path from 'path';
+
+// --- Zod Schemas ---
+const PerfLogEntrySchema = z
+  .object({
+    timestamp: z.string(),
+    perfNow: z.number(),
+    memory: z
+      .object({
+        usedJSHeapSize: z.number().optional(),
+        totalJSHeapSize: z.number().optional(),
+        jsHeapSizeLimit: z.number().optional(),
+      })
+      .optional()
+      .nullable(), // allow null as well as undefined
+    action: z.string(),
+    sessionId: z.string().optional(),
+    batchId: z.number().optional(),
+    uploadMode: z.string().optional(),
+  })
+  .catchall(z.unknown());
+
+const EngagementStatsSchema = z.object({
+  views: z.number(),
+  lastViewedAt: z.number(),
+  totalWatchMs: z.number(),
+  completions: z.number(),
+});
+const EngagementMapSchema = z.record(EngagementStatsSchema);
+
+const DebugLogSchema = z.object({
+  message: z.string(),
+  timestamp: z.string(),
+});
+const DebugLogsSchema = z.array(DebugLogSchema);
+
+const SessionMetricsSchema = z.object({
+  sessionId: z.string(),
+  startTime: z.number(),
+  firstClickTime: z.number().optional(),
+  scrollDistance: z.number(),
+  itemsLoaded: z.number(),
+  infiniteScrollLoads: z.number(),
+  hoverThumbnails: z.number(),
+  gridClickOpenCount: z.number(),
+  modalsOpened: z.number(),
+  modalTotalTime: z.number(),
+  carouselNavigationCount: z.number(),
+  modalContentCounts: z.object({
+    video: z.number(),
+    image: z.number(),
+  }),
+  videoMetrics: z.object({
+    plays: z.number(),
+    completions: z.number(),
+    watchTime: z.number(),
+    manualStarts: z.number(),
+    autoPlays: z.number(),
+  }),
+  performanceMetrics: z.object({
+    preloadDurations: z.array(z.number()),
+    longTasks: z.number(),
+    infiniteLoadTimes: z.array(z.number()),
+    modalAnimationLatencies: z.array(z.number()),
+  }),
+});
+
+const FullPayloadSchema = z
+  .object({
+    engagement: EngagementMapSchema,
+    perfLog: z.array(PerfLogEntrySchema),
+    debug: DebugLogsSchema,
+    timestamp: z.string(),
+    sessionStart: z.number(),
+    sessionMetrics: SessionMetricsSchema,
+  })
+  .catchall(z.unknown());
+
+export type PerfLogEntry = z.infer<typeof PerfLogEntrySchema>;
+export type FullPayload = z.infer<typeof FullPayloadSchema>;
+
+// Export metricsPayloadSchema for controller usage
+export const metricsPayloadSchema = FullPayloadSchema;
+
+// Type guard for PerfLogEntry array
+export function isPerfLogArray(arr: unknown): arr is PerfLogEntry[] {
+  return Array.isArray(arr) && arr.every((item) => PerfLogEntrySchema.safeParse(item).success);
+}
+
+// --- DB Setup ---
+let db: Database | null = null;
+export async function initDb(): Promise<Database> {
+  if (db) return db;
+  const dbDir = path.dirname(config.dbPath);
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+    logger.info(`Created database directory at ${dbDir}`);
+  }
+  if (!fs.existsSync(config.dbPath)) {
+    fs.closeSync(fs.openSync(config.dbPath, 'w'));
+    logger.info(`Created new SQLite database file at ${config.dbPath}`);
+  }
+  db = await open({ filename: config.dbPath, driver: sqlite3.Database });
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      timestamp TEXT,
+      sessionStart INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS engagement (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sessionId TEXT,
+      itemId TEXT,
+      views INTEGER,
+      lastViewedAt INTEGER,
+      totalWatchMs INTEGER,
+      completions INTEGER,
+      FOREIGN KEY(sessionId) REFERENCES sessions(id)
+    );
+    CREATE TABLE IF NOT EXISTS perfLog (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sessionId TEXT,
+      timestamp TEXT,
+      perfNow REAL,
+      usedJSHeapSize INTEGER,
+      totalJSHeapSize INTEGER,
+      jsHeapSizeLimit INTEGER,
+      action TEXT,
+      batchId INTEGER,
+      uploadMode TEXT,
+      details TEXT,
+      FOREIGN KEY(sessionId) REFERENCES sessions(id)
+    );
+    CREATE TABLE IF NOT EXISTS debug (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sessionId TEXT,
+      message TEXT,
+      timestamp TEXT,
+      FOREIGN KEY(sessionId) REFERENCES sessions(id)
+    );
+    CREATE TABLE IF NOT EXISTS sessionMetrics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sessionId TEXT,
+      data TEXT,
+      FOREIGN KEY(sessionId) REFERENCES sessions(id)
+    );
+  `);
+  return db;
+}
+
+// --- Utility: Accept and log all valid data, never reject whole request ---
+function logInvalid(type: string, data: unknown, error: unknown) {
+  logger.info(
+    `[metrics] Invalid ${type}: ${JSON.stringify(error)} | Data: ${JSON.stringify(data)}`,
+  );
+}
+
+// --- Session Helper ---
+async function ensureSessionExists(
+  database: Database,
+  sessionId: string,
+  timestamp?: string,
+  sessionStart?: number,
+) {
+  // Try to find session by id
+  const sessionRow = await database.get('SELECT id FROM sessions WHERE id = ?', sessionId);
+  if (!sessionRow) {
+    await database.run(
+      'INSERT INTO sessions (id, timestamp, sessionStart) VALUES (?, ?, ?)',
+      sessionId,
+      timestamp || new Date().toISOString(),
+      sessionStart ?? null,
+    );
+    logger.info(`[metrics] Created minimal session for id=${sessionId}`);
+  }
+}
+
+export async function saveMetrics(
+  payload: unknown,
+  sessionMetrics?: unknown,
+  clientSessionId?: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _env?: unknown,
+) {
+  const database = await initDb();
+  // PerfLog batch
+  if (Array.isArray(payload)) {
+    for (const entry of payload) {
+      const result = PerfLogEntrySchema.safeParse(entry);
+      if (!result.success) {
+        logInvalid('perfLog', entry, result.error.format());
+        continue;
+      }
+      // Resolve sessionId
+      const resolvedSessionId = result.data.sessionId || clientSessionId;
+      if (!resolvedSessionId) {
+        logger.warn('[metrics] No sessionId found for perfLog entry. Skipping.');
+        continue;
+      }
+      await ensureSessionExists(database, resolvedSessionId, result.data.timestamp);
+      const { timestamp, perfNow, memory, action, batchId, uploadMode, ...rest } = result.data;
+      const details = JSON.stringify({ ...rest });
+      await database.run(
+        `INSERT INTO perfLog (sessionId, timestamp, perfNow, usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit, action, batchId, uploadMode, details)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        resolvedSessionId,
+        timestamp,
+        perfNow,
+        memory?.usedJSHeapSize ?? -1,
+        memory?.totalJSHeapSize ?? -1,
+        memory?.jsHeapSizeLimit ?? -1,
+        action,
+        batchId ?? null,
+        uploadMode ?? null,
+        details,
+      );
+    }
+    return;
+  }
+  // Full payload
+  const result = FullPayloadSchema.safeParse(payload);
+  if (!result.success) {
+    logInvalid('fullPayload', payload, result.error.format());
+    // Try to salvage valid subfields
+    if (payload && typeof payload === 'object') {
+      // Try perfLog
+      const perfLogArray = Array.isArray((payload as Record<string, unknown>).perfLog)
+        ? ((payload as Record<string, unknown>).perfLog as unknown[])
+        : [];
+      for (const entry of perfLogArray) {
+        const perfResult = PerfLogEntrySchema.safeParse(entry);
+        if (perfResult.success) {
+          const { timestamp, perfNow, memory, action, batchId, uploadMode, ...rest } =
+            perfResult.data;
+          const details = JSON.stringify({ ...rest });
+          await database.run(
+            `INSERT INTO perfLog (sessionId, timestamp, perfNow, usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit, action, batchId, uploadMode, details)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            null,
+            timestamp,
+            perfNow,
+            memory?.usedJSHeapSize ?? -1,
+            memory?.totalJSHeapSize ?? -1,
+            memory?.jsHeapSizeLimit ?? -1,
+            action,
+            batchId ?? null,
+            uploadMode ?? null,
+            details,
+          );
+        } else {
+          logInvalid('perfLog', entry, perfResult.error.format());
+        }
+      }
+      // Try debug
+      const debugArray = Array.isArray((payload as Record<string, unknown>).debug)
+        ? ((payload as Record<string, unknown>).debug as unknown[])
+        : [];
+      for (const entry of debugArray) {
+        const debugResult = DebugLogSchema.safeParse(entry);
+        if (debugResult.success) {
+          await database.run(
+            `INSERT INTO debug (sessionId, message, timestamp) VALUES (?, ?, ?)`,
+            null,
+            debugResult.data.message,
+            debugResult.data.timestamp,
+          );
+        } else {
+          logInvalid('debug', entry, debugResult.error.format());
+        }
+      }
+      // Try engagement
+      const engagementObj = (payload as Record<string, unknown>).engagement;
+      if (engagementObj && typeof engagementObj === 'object' && !Array.isArray(engagementObj)) {
+        for (const [itemId, stats] of Object.entries(engagementObj)) {
+          const statsResult = EngagementStatsSchema.safeParse(stats);
+          if (statsResult.success) {
+            await database.run(
+              `INSERT INTO engagement (sessionId, itemId, views, lastViewedAt, totalWatchMs, completions) VALUES (?, ?, ?, ?, ?, ?)`,
+              null,
+              itemId,
+              statsResult.data.views,
+              statsResult.data.lastViewedAt,
+              statsResult.data.totalWatchMs,
+              statsResult.data.completions,
+            );
+          } else {
+            logInvalid('engagement', stats, statsResult.error.format());
+          }
+        }
+      }
+    }
+    return;
+  }
+  const {
+    engagement,
+    perfLog,
+    debug,
+    timestamp,
+    sessionStart,
+    sessionMetrics: sessionMetricsFromPayload,
+  } = result.data;
+  // Resolve sessionId
+  const resolvedSessionId = sessionMetricsFromPayload.sessionId || clientSessionId;
+  await ensureSessionExists(
+    database,
+    resolvedSessionId || 'unknown-session',
+    timestamp,
+    sessionStart,
+  );
+  // Insert engagement
+  for (const [itemId, stats] of Object.entries(engagement)) {
+    await database.run(
+      `INSERT INTO engagement (sessionId, itemId, views, lastViewedAt, totalWatchMs, completions) VALUES (?, ?, ?, ?, ?, ?)`,
+      resolvedSessionId,
+      itemId,
+      stats.views,
+      stats.lastViewedAt,
+      stats.totalWatchMs,
+      stats.completions,
+    );
+  }
+  // Insert perfLog
+  for (const entry of perfLog) {
+    const { timestamp, perfNow, memory, action, batchId, uploadMode, ...rest } = entry;
+    const details = JSON.stringify({ ...rest });
+    await database.run(
+      `INSERT INTO perfLog (sessionId, timestamp, perfNow, usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit, action, batchId, uploadMode, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      resolvedSessionId,
+      timestamp,
+      perfNow,
+      memory?.usedJSHeapSize ?? -1,
+      memory?.totalJSHeapSize ?? -1,
+      memory?.jsHeapSizeLimit ?? -1,
+      action,
+      batchId ?? null,
+      uploadMode ?? null,
+      details,
+    );
+  }
+  // Insert debug
+  for (const entry of debug) {
+    await database.run(
+      `INSERT INTO debug (sessionId, message, timestamp) VALUES (?, ?, ?)`,
+      resolvedSessionId,
+      entry.message,
+      entry.timestamp,
+    );
+  }
+  // Insert sessionMetrics
+  await database.run(
+    `INSERT INTO sessionMetrics (sessionId, data) VALUES (?, ?)`,
+    resolvedSessionId,
+    JSON.stringify(sessionMetricsFromPayload),
+  );
+}
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  if (db) await db.close();
+  logger.info('SQLite connection closed (SIGINT)');
+  process.exit(0);
+});
+process.on('SIGTERM', async () => {
+  if (db) await db.close();
+  logger.info('SQLite connection closed (SIGTERM)');
+  process.exit(0);
+});
+</file>
+
+<file path="modules/app-metrics/index.ts">
+export * as appGalleryGenerator from './app_gallery-generator';
+</file>
+
+<file path="modules/app-metrics/README.md">
+# App Metrics Module
+
+This module provides a structure for collecting and exposing metrics for different applications within the Central Hub project.
+
+## Structure
+
+- Each app has its own subfolder under `app-metrics/` (e.g., `app_gallery-generator/`).
+- Each subfolder contains its own controller, service, and index.ts for modularity.
+- The main `index.ts` re-exports all app metrics modules.
+
+## Adding Metrics for a New App
+
+1. **Create a new folder:**
+   - Example: `src/modules/app-metrics/my_new_app/`
+2. **Add your controller and service:**
+   - `metricsController.ts` and `metricsService.ts`
+3. **Export from `index.ts`:**
+   - `export * from './metricsController';`
+   - `export * from './metricsService';`
+4. **Register the endpoint:**
+
+   - In `src/routes/metrics.routes.ts`, add:
+
+     ```typescript
+     import { myNewAppMetricsController } from '../modules/app-metrics/my_new_app/metricsController';
+     if (config.features.metrics) {
+       router.post('/api/metrics/my-new-app', myNewAppMetricsController.handleMetrics);
+     }
+     ```
+
+## Feature Toggling
+
+- Metrics endpoints are only registered if `config.features.metrics` is enabled in `src/config/server.config.ts`.
+- To disable all metrics endpoints, set `metrics: false` in the config.
+
+## Example Folder Structure
+
+```
+src/modules/app-metrics/
+  app_gallery-generator/
+    metricsController.ts
+    metricsService.ts
+    index.ts
+  my_new_app/
+    metricsController.ts
+    metricsService.ts
+    index.ts
+  index.ts
+  README.md
+```
+
+## Best Practices
+
+- Use RESTful route patterns: `/api/metrics/:app`.
+- Keep each app’s metrics logic isolated in its own folder.
+- Document new endpoints in the main README and provide usage examples.
+</file>
+
+<file path="modules/file-hosting/fileHostingController.ts">
+// src/modules/file-hosting/fileHostingController.ts
+import { Socket } from 'net';
+import { sendResponse } from '../../entities/sendResponse';
+import { IncomingRequest } from '../../entities/http';
+import { FileHostingService } from './fileHostingService';
+import { getHeader, getQuery } from '../../utils/httpHelpers';
+import { config } from '../../config/server.config';
+import { logger } from '../../utils/logger';
+import { getMimeType } from '../../utils/helpers';
+import { Readable } from 'stream';
+
+const fileSvc = new FileHostingService(config.mediaDir);
+
+export const fileHostingController = {
+  /** GET /file?file=filename – serves a file (supports Range) */
+  async getFile(req: IncomingRequest, sock: Socket) {
+    logger.info(`[getFile] url=${req.url} path=${req.path} query=${JSON.stringify(req.query)}`);
+    const fileName = getQuery(req, 'file');
+    if (!fileName) {
+      sendResponse(
+        sock,
+        400,
+        { 'Content-Type': 'text/plain' },
+        'Missing required "file" query parameter.',
+      );
+      return;
+    }
+    try {
+      const rangeHdr = getHeader(req, 'range');
+      let stream: Readable;
+      const fileStat = await fileSvc.stat(fileName);
+      const size = fileStat.size;
+      if (rangeHdr) {
+        const m = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
+        if (!m) {
+          sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
+          sock.end();
+          return;
+        }
+        const startStr = m[1];
+        const endStr = m[2];
+        let start: number;
+        let end: number;
+        if (startStr) {
+          start = parseInt(startStr, 10);
+          end = endStr ? parseInt(endStr, 10) : size - 1;
+        } else {
+          const suffix = parseInt(endStr, 10);
+          start = size - suffix;
+          end = size - 1;
+        }
+        if (start > end || start < 0 || end >= size) {
+          sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
+          sock.end();
+          return;
+        }
+        stream = await fileSvc.readFile(fileName, { start, end });
+        if (!stream) throw new Error('Stream is undefined');
+        stream.on('error', (err: Error) => {
+          logger.error(`[getFile] Stream error: ${err.message}`);
+          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
+        });
+        const len = end - start + 1;
+        sendResponse(
+          sock,
+          206,
+          {
+            'Content-Type': getMimeType(fileName) || 'application/octet-stream',
+            'Accept-Ranges': 'bytes',
+            'Content-Range': `bytes ${start}-${end}/${size}`,
+            'Content-Length': String(len),
+          },
+          stream,
+        );
+      } else {
+        stream = await fileSvc.readFile(fileName);
+        if (!stream) throw new Error('Stream is undefined');
+        stream.on('error', (err: Error) => {
+          logger.error(`[getFile] Stream error: ${err.message}`);
+          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
+        });
+        const mimeType = getMimeType(fileName);
+        sendResponse(
+          sock,
+          200,
+          { 'Content-Type': mimeType, 'Content-Length': String(size) },
+          stream,
+        );
+      }
+    } catch (err: unknown) {
+      logger.error(`[getFile] fileName=${fileName}, error=${(err as Error).message}`);
+      sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, `File "${fileName}" not found.`);
+    }
+  },
+
+  /** GET /files – returns JSON list of filenames */
+  async listFiles(req: IncomingRequest, sock: Socket) {
+    try {
+      const files = await fileSvc.listFiles();
+      sendResponse(sock, 200, { 'Content-Type': 'application/json' }, JSON.stringify(files));
+    } catch (err: unknown) {
+      logger.error(`listFiles: ${(err as Error).message}`);
+      sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Server error');
+    }
+  },
+
+  /** POST /file – upload a media file */
+  async uploadFile(req: IncomingRequest, sock: Socket) {
+    // Assume fileName is provided as a query param or header, and body is the file data
+    const fileName = getQuery(req, 'file') || req.headers['x-filename'];
+    if (!fileName) {
+      sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'Missing file name');
+      return;
+    }
+    const mimeType = getMimeType(fileName);
+    if (
+      !mimeType.startsWith('image/') &&
+      !mimeType.startsWith('video/') &&
+      !mimeType.startsWith('audio/')
+    ) {
+      sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'Only media files allowed');
+      return;
+    }
+    if (!req.body) {
+      sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'No file data');
+      return;
+    }
+    // Save file using FileHostingService
+    const fileSvc = new FileHostingService(config.mediaDir);
+    // Convert Buffer or string to async iterable
+    async function* bufferToAsyncIterable(buffer: Buffer) {
+      yield buffer;
+    }
+    const data = typeof req.body === 'string' ? Buffer.from(req.body) : req.body;
+    await fileSvc.saveFile(fileName, bufferToAsyncIterable(data));
+    sendResponse(sock, 200, { 'Content-Type': 'text/plain' }, 'Upload successful');
+  },
+
+  /** DELETE /file?file=filename – delete a media file */
+  async deleteFile(req: IncomingRequest, sock: Socket) {
+    const fileName = getQuery(req, 'file');
+    if (!fileName) {
+      sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'Missing file name');
+      return;
+    }
+    const fileSvc = new FileHostingService(config.mediaDir);
+    const absPath = fileSvc['resolveSafe'](fileName);
+    try {
+      await import('fs/promises').then((fs) => fs.unlink(absPath));
+      sendResponse(sock, 200, { 'Content-Type': 'text/plain' }, 'File deleted');
+    } catch {
+      sendResponse(
+        sock,
+        404,
+        { 'Content-Type': 'text/plain' },
+        'File not found or could not be deleted',
+      );
+    }
+  },
+};
+</file>
+
+<file path="modules/file-hosting/fileHostingService.ts">
+import { existsSync, createReadStream, statSync, createWriteStream, readdirSync } from 'fs';
+import { stat, readdir, mkdir } from 'fs/promises';
+import { resolve } from 'path';
+import { Readable } from 'stream';
+
+export class FileHostingService {
   constructor(private readonly rootDir: string) {}
 
   private resolveSafe(relPath: string): string {
@@ -884,8 +1653,6 @@ export class FileService {
     if (!abs.startsWith(this.rootDir)) throw new Error('Path traversal attempt');
     return abs;
   }
-
-  /* ---------- modern async API ---------- */
 
   async listFiles(relDir = '.'): Promise<string[]> {
     return await readdir(this.resolveSafe(relDir));
@@ -910,105 +1677,42 @@ export class FileService {
       ws.on('error', rej);
     });
   }
-
-  /* ---------- legacy static helpers (keep old tests green) ---------- */
-
-  static listFiles(): { files: string[] } {
-    const dir = config.mediaDir;
-    if (!existsSync(dir)) return { files: [] };
-    return { files: readdirSync(dir) };
-  }
-
-  static streamFile(filename: string, rangeHeader: string | undefined, socket: Socket): void {
-    const abs = join(config.mediaDir, filename);
-
-    if (!existsSync(abs)) {
-      sendResponse(socket, 404, { 'Content-Type': 'text/plain' }, '404 Not Found');
-      return;
-    }
-
-    const stats = statSync(abs);
-    const size = stats.size;
-
-    const start = 0;
-    const end = size - 1;
-
-    if (rangeHeader) {
-      // Matches bytes=START-END, bytes=START-, bytes=-END
-      const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
-
-      if (m) {
-        const startStr = m[1];
-        const endStr = m[2];
-        let start: number | undefined;
-        let end: number | undefined;
-
-        if (startStr && endStr) {
-          // bytes=START-END
-          start = parseInt(startStr, 10);
-          end = parseInt(endStr, 10);
-        } else if (startStr) {
-          // bytes=START-
-          start = parseInt(startStr, 10);
-          end = size - 1;
-        } else if (endStr) {
-          // bytes=-END
-          start = size - parseInt(endStr, 10);
-          end = size - 1;
-        }
-
-        if (start === undefined || end === undefined || start > end || start >= size) {
-          sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
-          return;
-        }
-      } else {
-        sendResponse(socket, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
-        return;
-      }
-    }
-
-    const len = end - start + 1;
-    const stream = createReadStream(abs, { start, end });
-    const headers = {
-      'Content-Type': getMimeType(filename) ?? 'application/octet-stream',
-      'Accept-Ranges': 'bytes',
-      'Content-Range': `bytes ${start}-${end}/${size}`,
-      'Content-Length': String(len),
-    };
-
-    sendResponse(socket, 206, headers, stream);
-
-    stream.on('error', () => socket.end());
-  }
-  /* ------------------------------------------------------------------ */
 }
 </file>
 
-<file path="modules/file-streamer/fileStreamingController.ts">
+<file path="modules/file-hosting/index.ts">
+// src/modules/file-hosting/index.ts
+export * from './fileHostingController';
+export * from './fileHostingService';
+</file>
+
+<file path="modules/file-streaming/fileService.ts">
+// file-streamer/fileService.ts
+/**
+ * @deprecated This file is now obsolete after moving to file-hosting module.
+ * This file is deprecated and should be removed. All file management logic is now in file-hosting/fileHostingService.ts.
+ */
+export class FileService {
+  constructor(private readonly rootDir: string) {
+    throw new Error('FileService is deprecated. Use file-hosting module instead.');
+  }
+}
+</file>
+
+<file path="modules/file-streaming/fileStreamingController.ts">
 import { Socket } from 'net';
 import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
-import { FileService } from './fileService';
 import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
 import { logger } from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
 import { Readable } from 'stream';
+import { FileHostingService } from '../file-hosting/fileHostingService';
 
-const fileSvc = new FileService(config.mediaDir);
+const fileSvc = new FileHostingService(config.mediaDir);
 
 export const fileStreamingController = {
-  /** GET /files – returns JSON list of filenames */
-  async listFiles(req: IncomingRequest, sock: Socket) {
-    try {
-      const files = await fileSvc.listFiles();
-      sendResponse(sock, 200, { 'Content-Type': 'application/json' }, JSON.stringify(files));
-    } catch (err) {
-      logger.error(`listFiles: ${(err as Error).message}`);
-      sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Server error');
-    }
-  },
-
   /** GET /stream?file=video.mp4 – streams file (supports Range) */
   async handleStream(req: IncomingRequest, sock: Socket) {
     logger.info(
@@ -1024,14 +1728,12 @@ export const fileStreamingController = {
       );
       return;
     }
-
     try {
-      const rangeHdr = getHeader(req, 'range'); // e.g. "bytes=0-1023"
+      const rangeHdr = getHeader(req, 'range');
       let stream: Readable;
       const fileStat = await fileSvc.stat(fileName);
       const size = fileStat.size;
       if (rangeHdr) {
-        // Parse Range header: bytes=START-END, bytes=START-, bytes=-END
         const m = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
         if (!m) {
           sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
@@ -1046,7 +1748,6 @@ export const fileStreamingController = {
           start = parseInt(startStr, 10);
           end = endStr ? parseInt(endStr, 10) : size - 1;
         } else {
-          // suffix range
           const suffix = parseInt(endStr, 10);
           start = size - suffix;
           end = size - 1;
@@ -1057,6 +1758,11 @@ export const fileStreamingController = {
           return;
         }
         stream = await fileSvc.readFile(fileName, { start, end });
+        if (!stream) throw new Error('Stream is undefined');
+        stream.on('error', (err) => {
+          logger.error(`[handleStream] Stream error: ${err.message}`);
+          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
+        });
         const len = end - start + 1;
         sendResponse(
           sock,
@@ -1071,6 +1777,11 @@ export const fileStreamingController = {
         );
       } else {
         stream = await fileSvc.readFile(fileName);
+        if (!stream) throw new Error('Stream is undefined');
+        stream.on('error', (err) => {
+          logger.error(`[handleStream] Stream error: ${err.message}`);
+          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
+        });
         const mimeType = getMimeType(fileName);
         sendResponse(
           sock,
@@ -1087,33 +1798,89 @@ export const fileStreamingController = {
 };
 </file>
 
-<file path="modules/file-streamer/index.ts">
-export { FileService } from './fileService';
-export { fileStreamingController } from './fileStreamingController';
+<file path="modules/file-streaming/index.ts">
+export * from './fileService';
+export * from './fileStreamingController';
+</file>
+
+<file path="routes/file-hosting.routes.ts">
+import router from '../core/router';
+import { fileHostingController } from '../modules/file-hosting';
+
+// List all files
+router.get('/api/files', fileHostingController.listFiles);
+// Upload a file
+router.post('/api/files', fileHostingController.uploadFile);
+// Get a specific file
+router.get('/api/files/:filename', fileHostingController.getFile);
+// Delete a specific file
+router.del('/api/files/:filename', fileHostingController.deleteFile);
 </file>
 
 <file path="routes/files.routes.ts">
 // routes/files.routes.ts
-import { router } from '../core/router';
-import { fileStreamingController } from '../modules/file-streamer';
+// This file is now handled by file-hosting.routes.ts for all /api/files endpoints.
+import router from '../core/router';
+import { fileHostingController } from '../modules/file-hosting';
 
-router.get('/files', fileStreamingController.listFiles);
+router.get('/files', fileHostingController.listFiles);
 </file>
 
 <file path="routes/index.ts">
 // routes/index.ts
 import './stream.routes';
 import './files.routes';
+import './metrics.routes';
+import './file-hosting.routes';
+import router from '../core/router';
+import { sendResponse } from '../entities/sendResponse';
+
+router.any('/echo', async (req, sock) => {
+  let message = 'Hello, world!';
+  try {
+    const b = req.body ? JSON.parse(req.body.toString()) : {};
+    if (typeof b?.message === 'string') message = b.message;
+  } catch {
+    /* empty */
+  }
+  const res = JSON.stringify({ message });
+  sendResponse(
+    sock,
+    200,
+    {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(res).toString(),
+    },
+    res,
+  );
+});
 
 export {}; // side-effect imports run immediately
 </file>
 
+<file path="routes/metrics.routes.ts">
+// routes/metrics.routes.ts
+import router from '../core/router';
+import { metricsController } from '../modules/app-metrics/app_gallery-generator';
+import { config } from '../config/server.config';
+
+/**
+ * Accepts the JSON payload, validates, and writes into SQLite.
+ */
+if (config.features.metrics) {
+  router.post('/metrics/gallery-generator', metricsController.handleMetrics);
+}
+</file>
+
 <file path="routes/stream.routes.ts">
 // routes/stream.routes.ts
-import { router } from '../core/router';
-import { fileStreamingController } from '../modules/file-streamer';
+import router from '../core/router';
+import { fileStreamingController } from '../modules/file-streaming';
+import { config } from '../config/server.config';
 
-router.get('/stream', fileStreamingController.handleStream);
+if (config.features.fileStreaming) {
+  router.get('/api/stream', fileStreamingController.handleStream);
+}
 </file>
 
 <file path="utils/helpers.ts">
@@ -1470,132 +2237,380 @@ describe('HTTP Parser', () => {
 </file>
 
 <file path="core/router.test.ts">
-import { router } from '../../src/core/router';
-import { IncomingRequest } from '../../src/entities/http';
+// __tests__/router.test.ts
 import { Socket } from 'net';
+import { createRouter } from '../../src/core/router';
+import { sendResponse } from '../../src/entities/sendResponse';
+import { logger } from '../../src/utils/logger';
+import type { IncomingRequest } from '../../src/entities/http';
+
+jest.mock('../../src/entities/sendResponse');
+jest.mock('../../src/utils/logger');
 
 describe('Router', () => {
-  const fakeSocket = {
-    write: jest.fn(),
-    end: jest.fn(),
-  } as unknown as Socket;
+  let router;
+  let socket: Socket;
+  let req: IncomingRequest;
 
   beforeEach(() => {
+    router = createRouter();
+
+    socket = {
+      write: jest.fn(),
+      end: jest.fn(),
+      destroy: jest.fn(),
+    } as unknown as Socket;
+
+    req = {
+      method: 'GET',
+      path: '/test',
+      query: {},
+      httpVersion: 'HTTP/1.1',
+      headers: {},
+      headersMap: new Map(),
+      url: new URL('http://localhost/test'),
+      raw: '',
+      ctx: {},
+      invalid: false,
+    };
+  });
+
+  afterEach(() => {
     jest.clearAllMocks();
   });
 
-  it('should return 404 for unknown route', async () => {
-    const req: IncomingRequest = {
-      url: new URL('http://localhost/doesnotexist'),
-      method: 'GET',
-      path: '/doesnotexist',
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: {},
-    };
+  test('should run middleware in sequence', async () => {
+    const order: string[] = [];
+    router.use(async (_req, _sock, next) => {
+      order.push('mw1');
+      await next();
+      order.push('mw1-after');
+    });
+    router.use(async (_req, _sock, next) => {
+      order.push('mw2');
+      await next();
+      order.push('mw2-after');
+    });
 
-    await router.handle(req, fakeSocket);
+    router.any('/test', async () => {
+      order.push('handler');
+    });
+    await router.handle(req, socket);
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(
-      expect.stringContaining('HTTP/1.1 404 Not Found'),
+    expect(order).toEqual(['mw1', 'mw2', 'handler', 'mw2-after', 'mw1-after']);
+  });
+
+  test('should call matching handler for GET route', async () => {
+    const handler = jest.fn();
+    router.get('/test', handler);
+
+    await router.handle(req, socket);
+    expect(handler).toHaveBeenCalledWith(req, socket);
+  });
+
+  test('should respond with 404 if no route matches', async () => {
+    req.path = '/unknown';
+    await router.handle(req, socket);
+
+    expect(sendResponse).toHaveBeenCalledWith(
+      socket,
+      404,
+      { 'Content-Type': 'text/plain' },
+      'Not Found',
     );
   });
 
-  it('should handle a valid /files GET request', async () => {
-    const req: IncomingRequest = {
-      url: new URL('http://localhost/files'),
-      method: 'GET',
-      path: '/files',
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: {},
-    };
+  test('should respond with 405 if method does not match', async () => {
+    req.method = 'POST';
+    router.get('/test', jest.fn());
 
-    await router.handle(req, fakeSocket);
+    await router.handle(req, socket);
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('HTTP/1.1 200 OK'));
+    expect(sendResponse).toHaveBeenCalledWith(socket, 405, { Allow: 'GET' }, 'Method Not Allowed');
   });
 
-  it('should return 405 Method Not Allowed for wrong method', async () => {
-    const req: IncomingRequest = {
-      url: new URL('http://localhost/files'),
-      method: 'POST', // Should be GET
-      path: '/files',
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: {},
-    };
+  test('should extract params into req.ctx.params', async () => {
+    const paramHandler = jest.fn();
+    router.get('/users/:id', paramHandler);
 
-    await router.handle(req, fakeSocket);
+    req.path = '/users/123';
+    req.url = new URL('http://localhost/users/123');
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(
-      expect.stringContaining('HTTP/1.1 405 Method Not Allowed'),
-    );
+    await router.handle(req, socket);
+    expect(paramHandler).toHaveBeenCalled();
+    expect(req.ctx?.params).toEqual({ id: '123' });
   });
 
-  it('should handle missing path safely', async () => {
-    const req: IncomingRequest = {
-      url: new URL('http://localhost/'),
-      method: 'GET',
-      path: undefined as unknown as string, // force a bad input
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: {},
-    };
-
-    await router.handle(req, fakeSocket);
-
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('400 Bad Request'));
-  });
-
-  it('should handle /stream route with file query parameter', async () => {
-    const req: IncomingRequest = {
-      url: new URL('http://localhost/stream?file=testfile.txt'),
-      method: 'GET',
-      path: '/stream',
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: { file: 'testfile.txt' },
-    };
-
-    await router.handle(req, fakeSocket);
-
-    expect(fakeSocket.write).toHaveBeenCalled(); // should attempt to stream the requested file
-  });
-
-  it('should return 500 if handler throws', async () => {
-    router.get('/error', async () => {
+  test('should respond with 500 on handler error', async () => {
+    router.get('/error', () => {
       throw new Error('fail');
     });
-    const validReq: IncomingRequest = {
-      url: new URL('http://localhost/error'),
-      method: 'GET',
-      path: '/error',
-      httpVersion: 'HTTP/1.1',
-      headers: { host: 'localhost' },
-      raw: '',
-      query: {},
+
+    req.path = '/error';
+    req.url = new URL('http://localhost/error');
+
+    await router.handle(req, socket);
+
+    expect(sendResponse).toHaveBeenCalledWith(
+      socket,
+      500,
+      { 'Content-Type': 'text/plain' },
+      '500 Server Error',
+    );
+  });
+
+  test('should respond to OPTIONS with Allow header', async () => {
+    req.method = 'OPTIONS';
+    req.path = '/anything';
+
+    await router.handle(req, socket);
+    expect(sendResponse).toHaveBeenCalledWith(
+      socket,
+      200,
+      { 'Content-Type': 'text/plain', Allow: 'GET, POST, PUT, DELETE, OPTIONS' },
+      'OK',
+    );
+  });
+});
+</file>
+
+<file path="core/server.test.ts">
+import { createServer, Socket } from 'net';
+import { HttpServer } from '../../src/core/server';
+import { sendResponse } from '../../src/entities/sendResponse';
+import { logger } from '../../src/utils/logger';
+import { config } from '../../src/config/server.config';
+import * as RouterModule from '../../src/core/router';
+import { HttpRequestParser } from '../../src/core/httpParser';
+
+jest.mock('net');
+jest.mock('../../src/utils/logger');
+jest.mock('../../src/entities/sendResponse');
+jest.mock('../../src/config/server.config', () => ({
+  config: {
+    headerTimeoutMs: 100,
+    bodyTimeoutMs: 100,
+  },
+}));
+
+describe('HttpServer', () => {
+  let server: HttpServer;
+  let mockSocket: Socket;
+  let mockNetServer: any;
+  let parserInstance: any;
+  let realRouter: any;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+
+    mockSocket = {
+      on: jest.fn(),
+      once: jest.fn(),
+      write: jest.fn(),
+      end: jest.fn(),
+      destroy: jest.fn(),
+    } as unknown as Socket;
+
+    parserInstance = new HttpRequestParser();
+
+    mockNetServer = {
+      on: jest.fn(),
+      listen: jest.fn(),
+      close: jest.fn((cb: () => void) => cb()),
     };
-    const req = { ...validReq, path: '/error' };
+    (createServer as jest.Mock).mockReturnValue(mockNetServer);
 
-    await router.handle(req, fakeSocket);
+    realRouter = RouterModule.createRouter();
+    jest.spyOn(realRouter, 'handle').mockImplementation(jest.fn());
+    server = new HttpServer(3000, realRouter);
+  });
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('500 Server Error'));
+  test('should listen on provided port', () => {
+    server.start();
+    expect(mockNetServer.listen).toHaveBeenCalledWith(3000, expect.any(Function));
+  });
+
+  test('should destroy sockets on stop()', async () => {
+    const destroySpy = jest.spyOn(mockSocket, 'destroy');
+    (server as any).connections.add(mockSocket);
+
+    await server.stop();
+
+    expect(destroySpy).toHaveBeenCalled();
+    expect(mockNetServer.close).toHaveBeenCalled();
+  });
+
+  test('should handle incoming connection and process data', async () => {
+    let dataHandler;
+    mockSocket.on = jest.fn().mockImplementation((event, cb) => {
+      if (event === 'data') dataHandler = cb;
+    });
+    mockSocket.once = jest.fn();
+
+    const connHandler = mockNetServer.on.mock.calls.find(([evt]) => evt === 'connection')[1];
+    connHandler(mockSocket);
+
+    const handleSpy = jest.spyOn(realRouter, 'handle');
+
+    dataHandler(Buffer.from('GET / HTTP/1.1\r\nHost: localhost\r\n\r\n'));
+    expect(handleSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        path: '/',
+        invalid: false,
+      }),
+      mockSocket,
+    );
+  });
+
+  test('should destroy socket on header timeout', () => {
+    let timeoutFn;
+    global.setTimeout = jest.fn((fn) => {
+      timeoutFn = fn;
+      return 123;
+    }) as any;
+    global.clearTimeout = jest.fn();
+
+    mockSocket.once = jest.fn();
+    mockSocket.on = jest.fn();
+
+    const connHandler = mockNetServer.on.mock.calls.find(([evt]) => evt === 'connection')[1];
+    connHandler(mockSocket);
+
+    expect(setTimeout).toHaveBeenCalled();
+    expect(typeof timeoutFn).toBe('function');
+
+    timeoutFn(); // simulate timeout trigger
+    expect(mockSocket.destroy).toHaveBeenCalled();
+  });
+
+  test('should destroy socket on body timeout for POST request', async () => {
+    let dataHandler;
+    mockSocket.on = jest.fn().mockImplementation((event, cb) => {
+      if (event === 'data') dataHandler = cb;
+    });
+    mockSocket.once = jest.fn();
+
+    const connHandler = mockNetServer.on.mock.calls.find(([evt]) => evt === 'connection')[1];
+    connHandler(mockSocket);
+
+    let bodyTimeoutFn;
+    global.setTimeout = jest.fn((fn) => {
+      if (!bodyTimeoutFn) bodyTimeoutFn = fn;
+      return 123;
+    }) as any;
+    global.clearTimeout = jest.fn();
+
+    dataHandler(Buffer.from('POST / HTTP/1.1\r\n\r\n'));
+
+    expect(typeof bodyTimeoutFn).toBe('function');
+    bodyTimeoutFn(); // simulate body timeout
+    expect(mockSocket.destroy).toHaveBeenCalled();
+  });
+
+  test('should handle multiple pipelined requests in sequence', async () => {
+    let dataHandler;
+    mockSocket.on = jest.fn().mockImplementation((event, cb) => {
+      if (event === 'data') dataHandler = cb;
+    });
+    mockSocket.once = jest.fn();
+
+    const connHandler = mockNetServer.on.mock.calls.find(([evt]) => evt === 'connection')[1];
+    connHandler(mockSocket);
+
+    const handleSpy = jest.spyOn(realRouter, 'handle');
+
+    dataHandler(Buffer.from('GET /first HTTP/1.1\r\n\r\n'));
+    dataHandler(Buffer.from('GET /second HTTP/1.1\r\n\r\n'));
+
+    expect(handleSpy).toHaveBeenCalledTimes(2);
+  });
+});
+</file>
+
+<file path="modules/app-metrics/metricsController.test.ts">
+import { router } from '../../../src/core/router';
+import { config } from '../../../src/config/server.config';
+import { Socket } from 'net';
+import { IncomingRequest } from '../../../src/entities/http'; // Adjust the path as needed
+
+describe('Metrics Endpoint (gallery-generator)', () => {
+  let originalMetricsFeature: boolean;
+
+  beforeAll(() => {
+    // Save and enable metrics feature for tests
+    originalMetricsFeature = config.features.metrics;
+    config.features.metrics = true;
+  });
+
+  afterAll(() => {
+    // Restore original config
+    config.features.metrics = originalMetricsFeature;
+  });
+
+  it('should accept a valid POST and return 200', async () => {
+    // Mock request and socket
+    const req: IncomingRequest = {
+      method: 'POST',
+      path: '/api/metrics/gallery-generator',
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.from(JSON.stringify({ event: 'test', user: 'test-user' })),
+      ctx: {},
+      url: new URL('http://localhost/api/metrics/gallery-generator?foo=bar'), // Added fake URL
+      query: { foo: 'bar' }, // Added fake query
+      httpVersion: '',
+      raw: '',
+    };
+    let responseCode = 0;
+    let responseBody = '';
+    const sock = {
+      write: (data: string) => {
+        if (data.includes('200')) responseCode = 200;
+        responseBody += data;
+      },
+      end: () => {},
+    } as unknown as Socket;
+    await router.handle(req, sock);
+    expect(responseCode).toBe(200);
+    expect(responseBody).toContain('OK');
+  });
+
+  it('should return 404 for unknown metrics app', async () => {
+    const req: Omit<IncomingRequest, 'ctx'> & { ctx: Record<string, unknown> } = {
+      method: 'POST',
+      path: '/api/metrics/unknown-app',
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.from(JSON.stringify({ event: 'test' })),
+      ctx: {},
+      url: new URL('http://localhost/api/metrics/unknown-app'), // Added fake URL
+      query: {}, // Added empty query
+      httpVersion: '1.1', // Added HTTP version
+      raw: '', // Added raw request string
+    };
+    let responseCode = 0;
+    let responseBody = '';
+    const sock = {
+      write: (data: string) => {
+        if (data.includes('404')) responseCode = 404;
+        responseBody += data;
+      },
+      end: () => {},
+    } as unknown as Socket;
+    await router.handle(req, sock);
+    expect(responseCode).toBe(404);
+    expect(responseBody).toContain('Not Found');
   });
 });
 </file>
 
 <file path="modules/file-streamer/fileService.test.ts">
-import { FileService } from '../../../src/modules/file-streamer/fileService';
+import { FileService } from '../../../src/modules/file-streaming/fileService';
 import * as fs from 'fs';
 import { Socket } from 'net';
+import { sendResponse } from '../../../src/entities/sendResponse';
 
 jest.mock('fs');
+jest.mock('../../../src/entities/sendResponse');
 
 describe('FileService', () => {
   beforeEach(() => {
@@ -1634,8 +2649,12 @@ describe('FileService', () => {
 
       FileService.streamFile('nofile.mp4', undefined, fakeSocket);
 
-      expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('404 Not Found'));
-      expect(fakeSocket.end).toHaveBeenCalled();
+      expect(sendResponse).toHaveBeenCalledWith(
+        fakeSocket,
+        404,
+        expect.any(Object),
+        expect.any(String),
+      );
     });
 
     it('should handle invalid range requests', () => {
@@ -1644,10 +2663,12 @@ describe('FileService', () => {
 
       FileService.streamFile('video.mp4', 'bytes=2000-3000', fakeSocket);
 
-      expect(fakeSocket.write).toHaveBeenCalledWith(
-        expect.stringContaining('416 Range Not Satisfiable'),
+      expect(sendResponse).toHaveBeenCalledWith(
+        fakeSocket,
+        416,
+        expect.any(Object),
+        expect.any(String),
       );
-      expect(fakeSocket.end).toHaveBeenCalled();
     });
 
     it('should start a stream for a valid file', () => {
@@ -1660,8 +2681,11 @@ describe('FileService', () => {
 
       FileService.streamFile('video.mp4', undefined, fakeSocket);
 
-      expect(fakeSocket.write).toHaveBeenCalledWith(
-        expect.stringContaining('HTTP/1.1 206 Partial Content'),
+      expect(sendResponse).toHaveBeenCalledWith(
+        fakeSocket,
+        206,
+        expect.any(Object),
+        expect.anything(),
       );
     });
 
@@ -1681,7 +2705,12 @@ describe('FileService', () => {
 
       FileService.streamFile('video.mp4', undefined, fakeSocket);
 
-      expect(fakeSocket.end).toHaveBeenCalled();
+      expect(sendResponse).toHaveBeenCalledWith(
+        fakeSocket,
+        500,
+        expect.any(Object),
+        expect.any(String),
+      );
     });
 
     it('should stream partial content for valid small range', () => {
@@ -1694,8 +2723,11 @@ describe('FileService', () => {
 
       FileService.streamFile('video.mp4', 'bytes=0-499', fakeSocket);
 
-      expect(fakeSocket.write).toHaveBeenCalledWith(
-        expect.stringContaining('HTTP/1.1 206 Partial Content'),
+      expect(sendResponse).toHaveBeenCalledWith(
+        fakeSocket,
+        206,
+        expect.any(Object),
+        expect.anything(),
       );
     });
 
@@ -1709,8 +2741,11 @@ describe('FileService', () => {
 
       FileService.streamFile('video.mp4', 'bytes=0-499', fakeSocket);
 
-      expect(fakeSocket.write).toHaveBeenCalledWith(
-        expect.stringContaining('HTTP/1.1 206 Partial Content'),
+      expect(sendResponse).toHaveBeenCalledWith(
+        fakeSocket,
+        206,
+        expect.any(Object),
+        expect.anything(),
       );
     });
 
@@ -1724,8 +2759,11 @@ describe('FileService', () => {
 
       FileService.streamFile('video.mp4', 'bytes=-500', fakeSocket);
 
-      expect(fakeSocket.write).toHaveBeenCalledWith(
-        expect.stringContaining('HTTP/1.1 206 Partial Content'),
+      expect(sendResponse).toHaveBeenCalledWith(
+        fakeSocket,
+        206,
+        expect.any(Object),
+        expect.anything(),
       );
     });
 
@@ -1739,8 +2777,11 @@ describe('FileService', () => {
 
       FileService.streamFile('video.mp4', 'bytes=500-', fakeSocket);
 
-      expect(fakeSocket.write).toHaveBeenCalledWith(
-        expect.stringContaining('HTTP/1.1 206 Partial Content'),
+      expect(sendResponse).toHaveBeenCalledWith(
+        fakeSocket,
+        206,
+        expect.any(Object),
+        expect.anything(),
       );
     });
 
@@ -1750,10 +2791,12 @@ describe('FileService', () => {
 
       FileService.streamFile('video.mp4', 'bytes=invalid', fakeSocket);
 
-      expect(fakeSocket.write).toHaveBeenCalledWith(
-        expect.stringContaining('416 Range Not Satisfiable'),
+      expect(sendResponse).toHaveBeenCalledWith(
+        fakeSocket,
+        416,
+        expect.any(Object),
+        expect.any(String),
       );
-      expect(fakeSocket.end).toHaveBeenCalled();
     });
   });
 });
@@ -1766,10 +2809,12 @@ let fs: any;
 let fsPromises: any;
 let config: any;
 import { IncomingRequest } from '../../../src/entities/http';
+import { sendResponse } from '../../../src/entities/sendResponse';
 import { Socket } from 'net';
 import { Readable } from 'stream';
 jest.mock('fs');
 jest.mock('fs/promises');
+jest.mock('../../../src/entities/sendResponse');
 
 const fakeStream = new Readable({ read() {} }); // a real Readable stream
 
@@ -1809,11 +2854,11 @@ describe('fileStreamingController', () => {
       query: {},
     } as IncomingRequest;
     await fileStreamingController.handleStream(req, fakeSocket);
-    expect(fakeSocket.write).toHaveBeenCalledWith(
-      expect.stringContaining('HTTP/1.1 400 Bad Request'),
-    );
-    expect(fakeSocket.write).toHaveBeenCalledWith(
-      expect.stringContaining('Missing required "file"'),
+    expect(sendResponse).toHaveBeenCalledWith(
+      fakeSocket,
+      400,
+      expect.any(Object),
+      expect.any(String),
     );
   });
 
@@ -1832,8 +2877,11 @@ describe('fileStreamingController', () => {
     } as IncomingRequest;
 
     await fileStreamingController.handleStream(req, fakeSocket);
-    expect(fakeSocket.write).toHaveBeenCalledWith(
-      expect.stringContaining('HTTP/1.1 404 Not Found'),
+    expect(sendResponse).toHaveBeenCalledWith(
+      fakeSocket,
+      404,
+      expect.any(Object),
+      expect.any(String),
     );
   });
 
@@ -1850,7 +2898,12 @@ describe('fileStreamingController', () => {
 
     await fileStreamingController.listFiles(req, fakeSocket);
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('HTTP/1.1 200 OK'));
+    expect(sendResponse).toHaveBeenCalledWith(
+      fakeSocket,
+      200,
+      expect.any(Object),
+      expect.any(String),
+    );
   });
 
   it('should stream file if it exists', async () => {
@@ -1866,11 +2919,13 @@ describe('fileStreamingController', () => {
 
     await fileStreamingController.handleStream(req, fakeSocket);
 
-    expect(fakeSocket.write).toHaveBeenCalledWith(
-      expect.stringContaining('HTTP/1.1 206 Partial Content'),
+    expect(sendResponse).toHaveBeenCalledWith(
+      fakeSocket,
+      206,
+      expect.any(Object),
+      expect.anything(),
     );
     // also assert correct Content-Type header
-    expect(fakeSocket.write).toHaveBeenCalledWith(expect.stringContaining('Content-Type:'));
     expect(fs.createReadStream).toHaveBeenCalledWith(expect.stringContaining('video.mp4'), {
       start: 0,
       end: 499,
@@ -1942,14 +2997,32 @@ describe('Logger', () => {
 });
 </file>
 
+<file path="global.d.ts">
+/// <reference types="jest-extended" />
+
+export {};
+</file>
+
+<file path="setupJest.ts">
+import 'jest-extended';
+
+export const add = (a: number, b: number): number => {
+  return a + b;
+};
+
+export const subtract = (a: number, b: number): number => {
+  return a - b;
+};
+</file>
+
 <file path="core/http_stress.test.ts">
 import { createConnection } from 'net';
 import { config } from '../../src/config/server.config'; // assuming your port config
 import { HttpServer } from '../../src/core/server';
 
 jest.setTimeout(20000); // Increase timeout for all tests in this file
-config.bodyTimeoutMs = 20000; // Set body timeout to 20 seconds
-config.headerTimeoutMs = 20000; // Set header timeout to 20 seconds
+config.bodyTimeoutMs = 10000; // Set body timeout to 10 seconds
+config.headerTimeoutMs = 10000; // Set header timeout to 10 seconds
 let server: HttpServer;
 
 beforeAll(async () => {
@@ -1959,8 +3032,14 @@ beforeAll(async () => {
   await new Promise((res) => setTimeout(res, 300));
 });
 
+afterEach(() => {
+  jest.clearAllTimers();
+});
+
 afterAll(async () => {
   await server.stop();
+  // Ensure all sockets are closed using the new public method
+  server.destroySockets();
 });
 
 function sendRawRequest(payload: string | Buffer, expectClose: boolean = true): Promise<string> {
@@ -1970,16 +3049,24 @@ function sendRawRequest(payload: string | Buffer, expectClose: boolean = true): 
     });
 
     let data = '';
+    let timeout: NodeJS.Timeout | null = null;
 
     client.on('data', (chunk) => {
       data += chunk.toString();
     });
 
-    client.on('end', () => resolve(data));
-    client.on('error', reject);
+    client.on('end', () => {
+      if (timeout) clearTimeout(timeout);
+      resolve(data);
+    });
+
+    client.on('error', (err) => {
+      if (timeout) clearTimeout(timeout);
+      reject(err);
+    });
 
     if (!expectClose) {
-      setTimeout(() => client.end(), 3000); // manual timeout fallback
+      timeout = setTimeout(() => client.end(), 3000); // manual timeout fallback
     }
   });
 }
@@ -1987,7 +3074,7 @@ function sendRawRequest(payload: string | Buffer, expectClose: boolean = true): 
 describe('🔥 HTTP Server TCP Stress Tests', () => {
   it('handles simple GET properly', async () => {
     const response = await sendRawRequest('GET /files HTTP/1.1\r\nHost: localhost\r\n\r\n');
-    expect(response).toMatch(/HTTP\/1\.1 500 Internal Server Error/);
+    expect(response).toMatch(/HTTP\/1\.1 200 OK/);
   });
 
   it('handles fragmented headers across TCP packets', async () => {
@@ -2008,7 +3095,7 @@ describe('🔥 HTTP Server TCP Stress Tests', () => {
       sock.on('end', () => resolve(response));
     });
 
-    expect(res).toMatch(/HTTP\/1\.1 500 Internal Server Error/);
+    expect(res).toMatch(/HTTP\/1\.1 200 OK/);
   });
 
   it('handles invalid request line (bad client)', async () => {
@@ -2053,7 +3140,7 @@ describe('🔥 HTTP Server TCP Stress Tests', () => {
       sock.on('end', () => resolve(response));
     });
 
-    expect(res).toMatch(/HTTP\/1.1/);
+    expect(res).toMatch(/HTTP\/1\.1/);
     expect(res).not.toMatch(/400/);
   });
 

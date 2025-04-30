@@ -1,6 +1,6 @@
 import { createServer, Socket } from 'net';
 import { HttpRequestParser } from './httpParser';
-import { router } from './router';
+import router from './router';
 import { logger } from '../utils/logger';
 import { sendResponse } from '../entities/sendResponse';
 import { config } from '../config/server.config'; // Assuming config is imported from a config file
@@ -8,8 +8,13 @@ import { config } from '../config/server.config'; // Assuming config is imported
 export class HttpServer {
   private server = createServer();
   private readonly connections = new Set<Socket>();
+  private readonly router;
 
-  constructor(private port: number) {
+  constructor(
+    private port: number,
+    routerInstance = router,
+  ) {
+    this.router = routerInstance;
     this.setupServer();
   }
 
@@ -64,7 +69,7 @@ export class HttpServer {
               refreshBodyTimeout();
             }
 
-            await router.handle(req, socket);
+            await this.router.handle(req, socket);
             clearTimeout(bodyTimer);
 
             // now pull the next request from any leftover bytes

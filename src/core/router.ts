@@ -54,55 +54,119 @@ class Router {
 
   /* ---------- Main entry ---------- */
   async handle(req: IncomingRequest, sock: Socket): Promise<void> {
+    if (req.method === 'OPTIONS') {
+      sendResponse(
+        sock,
+        200,
+        { 'Content-Type': 'text/plain', Allow: 'GET, POST, PUT, DELETE, OPTIONS' },
+        'OK',
+      );
+      return;
+    }
     if (!req.path || typeof req.path !== 'string') {
-      sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'Bad Request');
+      sendResponse(
+        sock,
+        400,
+        {
+          'Content-Type':
+            req.path && req.path.startsWith('/api/') ? 'application/json' : 'text/plain',
+        },
+        req.path && req.path.startsWith('/api/')
+          ? JSON.stringify({ error: 'Bad Request' })
+          : 'Bad Request',
+      );
       return;
     }
     logger.info(`router saw ${req.method} ${req.path}`);
     // 1. run middleware chain
     let i = 0;
+    // Use an explicit stack to unwind after handler
     const run = async (): Promise<void> => {
       if (i < this.middlewares.length) {
-        const mw = this.middlewares[i++];
-        await mw(req, sock, run);
+        const idx = i++;
+        await this.middlewares[idx](req, sock, run);
+        return;
+      }
+      // Only after all middleware, run the handler
+      // 2. route lookup
+      const matching = this.routes.filter((r) => r.regex.test(req.path));
+      const route =
+        matching.find((r) => r.method === req.method) ?? matching.find((r) => r.method === 'ANY');
+      if (!route) {
+        // Distinguish 404 vs 405
+        if (matching.length) {
+          // Only include allowed methods that are not 'ANY'
+          const allowed = matching
+            .map((r) => r.method)
+            .filter((m) => m !== 'ANY')
+            .join(', ');
+          if (req.path.startsWith('/api/')) {
+            sendResponse(
+              sock,
+              405,
+              {
+                'Content-Type': 'application/json',
+                Allow: allowed,
+              },
+              JSON.stringify({ error: 'Method Not Allowed' }),
+            );
+          } else {
+            sendResponse(sock, 405, { Allow: allowed }, 'Method Not Allowed');
+          }
+        } else {
+          if (req.path.startsWith('/api/')) {
+            sendResponse(
+              sock,
+              404,
+              { 'Content-Type': 'application/json' },
+              JSON.stringify({ error: 'Not Found' }),
+            );
+          } else {
+            sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, 'Not Found');
+          }
+        }
+        return;
+      }
+      // 3. pull params (/:id etc.) → req.ctx.params
+      const match = route.regex.exec(req.path)!;
+      const params: Record<string, string> = {};
+      route.keys.forEach((k, idx) => {
+        params[k] = decodeURIComponent(match[idx + 1]);
+      });
+      (req.ctx ??= {}).params = params;
+      // 4. invoke handler
+      try {
+        await route.handler(req, sock);
+      } catch (err) {
+        logger.error(`Handler error: ${(err as Error).message}`);
+        if (req.path.startsWith('/api/')) {
+          sendResponse(
+            sock,
+            500,
+            { 'Content-Type': 'application/json' },
+            JSON.stringify({ error: 'Internal Server Error' }),
+          );
+        } else {
+          sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, '500 Server Error');
+        }
       }
     };
-    await run();
-
-    // 2. route lookup
-    const matching = this.routes.filter((r) => r.regex.test(req.path));
-    const route =
-      matching.find((r) => r.method === req.method) ?? matching.find((r) => r.method === 'ANY');
-
-    if (!route) {
-      // Distinguish 404 vs 405
-      if (matching.length) {
+    try {
+      await run();
+    } catch (err) {
+      // Global error handler for middleware
+      if (req.path.startsWith('/api/')) {
         sendResponse(
           sock,
-          405,
-          { Allow: matching.map((r) => r.method).join(', ') },
-          'Method Not Allowed',
+          500,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({ error: 'Internal Server Error' }),
         );
       } else {
-        sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, 'Not Found');
+        sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, '500 Server Error');
       }
+      logger.error(`Middleware error: ${(err as Error).message}`);
       return;
-    }
-
-    // 3. pull params (/:id etc.) → req.ctx.params
-    const match = route.regex.exec(req.path)!;
-    const params: Record<string, string> = {};
-    route.keys.forEach((k, idx) => {
-      params[k] = decodeURIComponent(match[idx + 1]);
-    });
-    (req.ctx ??= {}).params = params;
-
-    // 4. invoke handler
-    try {
-      await route.handler(req, sock);
-    } catch (err) {
-      logger.error(`Handler error: ${(err as Error).message}`);
-      sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, '500 Server Error');
     }
   }
 }
@@ -127,20 +191,8 @@ function compilePath(pattern: string): { regex: RegExp; keys: string[] } {
 
 /* ───── Exports ───────────────────────────────────────────────────────── */
 
-export const router = new Router();
-
-// Dynamically load route definitions after router is initialized
-// (avoids circular-import issues with static `import '../routes'`)
-async function loadRoutesSafely() {
-  try {
-    await import('../routes');
-  } catch (error) {
-    console.error('Failed to dynamically import routes:', error);
-    // fallback or no-op if needed
-  }
+export function createRouter(): Router {
+  return new Router();
 }
 
-// Immediately trigger loading
-loadRoutesSafely();
-
-export default router;
+export default createRouter();

@@ -42,3 +42,8 @@ pnpm-lock.yaml
 
 # Public files
 public/
+
+data/
+
+# Ignore project planning/checklist files
+PROJECT_CHECKLIST.md

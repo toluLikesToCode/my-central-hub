@@ -113,6 +113,76 @@ HEADER_TIMEOUT_MS=5000
 BODY_TIMEOUT_MS=10000
 ```
 
+## Modular Architecture & Feature Toggling
+
+The project is organized into feature modules under `src/modules/`. Each feature (e.g., file hosting, streaming, metrics) is isolated for clarity and extensibility.
+
+- **Feature toggling**: Enable or disable features in `src/config/server.config.ts`:
+
+  ```ts
+  export const config = {
+    // ...existing config...
+    features: {
+      metrics: true,
+      fileHosting: true,
+      fileStreaming: true,
+      // Add more features here
+    },
+  };
+  ```
+
+- Routes for a feature are only registered if enabled in config.
+
+## RESTful API Conventions
+
+- All API endpoints are grouped under `/api/`.
+- Use plural nouns for collections (e.g., `/api/files`).
+- Use route parameters for single resources (e.g., `/api/files/:filename`).
+- Metrics endpoints follow `/api/metrics/:app` (e.g., `/api/metrics/gallery-generator`).
+
+## Example Endpoints & Usage
+
+### List Files
+
+```sh
+curl http://localhost:8080/api/files
+```
+
+### Upload a File
+
+```sh
+curl -F 'file=@/path/to/file.jpg' http://localhost:8080/api/files
+```
+
+### Get a File
+
+```sh
+curl http://localhost:8080/api/files/filename.jpg -o filename.jpg
+```
+
+### Delete a File
+
+```sh
+curl -X DELETE http://localhost:8080/api/files/filename.jpg
+```
+
+### Submit Metrics (Gallery Generator)
+
+```sh
+curl -X POST http://localhost:8080/api/metrics/gallery-generator \
+  -H 'Content-Type: application/json' \
+  -d '{"event":"view","user":"alice"}'
+```
+
+## Extending the Project
+
+To add a new feature module (e.g., metrics for a new app):
+
+1. Create a new folder under `src/modules/` (or `src/modules/app-metrics/` for metrics).
+2. Add your controller, service, and index.ts.
+3. Register your routes in the appropriate file in `src/routes/`, checking the config feature toggle.
+4. Document your new endpoints in this README.
+
 ## About This Project
 
 This project, My Central Hub, is a personal endeavor to deepen my understanding of networking and server-side development. It serves as a learning platform to explore concepts such as HTTP protocols, media streaming, and efficient file handling.

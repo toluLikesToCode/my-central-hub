@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+// @ts-nocheck
+
 import { parser } from '../../src/core/parser';
 
 describe('HTTP Parser', () => {

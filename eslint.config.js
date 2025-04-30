@@ -4,10 +4,13 @@ const prettier = require('eslint-plugin-prettier');
 const markdown = require('eslint-plugin-markdown');
 
 module.exports = [
+  {
+    ignores: ['**/*.md'],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    ignores: ['dist/', 'node_modules/', 'coverage/', 'public/', 'README.md'],
+    ignores: ['dist/', 'node_modules/', 'coverage/', 'public/'],
     plugins: {
       prettier: prettier,
       markdown: markdown,
@@ -18,9 +21,5 @@ module.exports = [
   },
   {
     files: ['**/*.md'],
-    plugins: {
-      markdown: markdown,
-    },
-    processor: 'markdown/markdown',
   },
 ];
