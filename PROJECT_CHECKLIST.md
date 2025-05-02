@@ -117,3 +117,61 @@
 ---
 
 _This document is for project planning and should be excluded from builds, linting, and type checks._
+
+---
+
+# 📋 Description
+
+> Add CLIP embedding service with Python integration, batching, and API routes
+
+This PR introduces a new embedding service that integrates with Python CLIP models for image and video frame analysis. The service includes batching capabilities for performance optimization, schema validation for data integrity, and dedicated API routes.
+
+---
+
+## 🛠 Changes Made
+
+- Add embedding service with persistent Python process management
+- Implement batching and queueing system for efficient embedding generation
+- Add metadata extraction for images and video frames
+- Create API endpoints for embedding requests, status checks, and service shutdown
+- Add schema validation for embedding results
+- Implement Python helper with advanced CLIP embedding functionality
+- Add Docker support for containerized deployment
+- Update logging for better observability and debugging
+
+---
+
+## ✅ Testing
+
+- [x] Ran all unit tests successfully
+- [x] Manual validation of embedding generation with various media types
+- [x] Linted and type-checked cleanly
+- [x] Verified functionality locally
+- [x] Tested batching performance and error handling
+
+---
+
+## 🔥 Risk Level
+
+| Risk      | Reason                                                        |
+| :-------- | :------------------------------------------------------------ |
+| 🟠 Medium | Introduces new module(s) and integrates with Python processes |
+
+---
+
+## 📣 Notes for Reviewers
+
+- The embedding service is designed to be fault-tolerant with automatic Python process restarts
+- Video frame sampling is configurable via the API
+- The service includes a shutdown endpoint for clean termination
+- Check the embedding_service.log and embeddings.log for detailed operation logs
+- Cache schema validation ensures consistent embedding format
+
+---
+
+## 🎯 Related Issues / Tickets
+
+- Implements feature request for media content analysis
+- Enables future work on content-based recommendations and search
+
+---
