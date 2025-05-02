@@ -12,8 +12,9 @@ dist
 .env
 
 # Ignore other unnecessary files
-Dockerfile
-.dockerignore
+# Dockerfile and .dockerignore are needed for multi-stage builds
+# Dockerfile
+# .dockerignore
 
 
 # .dockerignore
