@@ -6,7 +6,7 @@
 import { createServer, Socket } from 'net';
 import { HttpServer } from '../../src/core/server';
 import { sendResponse } from '../../src/entities/sendResponse';
-import { logger } from '../../src/utils/logger';
+import logger from '../../src/utils/logger';
 import { config } from '../../src/config/server.config';
 import * as RouterModule from '../../src/core/router';
 import { HttpRequestParser } from '../../src/core/httpParser';

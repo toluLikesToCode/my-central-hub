@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ClipCache",
+  "description": "Schema for the shared cache containing CLIP embeddings and related media metadata.",
+  "type": "object",
+  "patternProperties": {
+    "^.*$": {
+      "$ref": "#/definitions/ClipCacheEntry"
+    }
+  },
+  "additionalProperties": false,
+
+  "definitions": {
+    "ClipCacheEntry": {
+      "title": "ClipCacheEntry",
+      "description": "An entry in the CLIP cache, associated with a specific file path.",
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "description": "Version of the schema this entry conforms to.",
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "filePath": {
+          "description": "Absolute path of the original media file (redundant if key is path, but can be useful).",
+          "type": "string"
+        },
+        "mediaType": {
+          "description": "Type of the media file.",
+          "type": "string",
+          "enum": ["image", "video"]
+        },
+        "mtime": {
+          "description": "Modification timestamp (Unix epoch milliseconds) of the source file when the embedding was generated.",
+          "type": "number"
+        },
+        "fileSize": {
+          "description": "Size of the source file in bytes.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "dimensions": {
+          "description": "Dimensions of the media.",
+          "type": "object",
+          "properties": {
+            "width": { "type": "integer", "minimum": 1 },
+            "height": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["width", "height"],
+          "additionalProperties": false
+        },
+        "duration": {
+          "description": "Duration of the video in seconds (null for images).",
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "embedding": {
+          "description": "The CLIP embedding vector.",
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "embeddingModel": {
+          "description": "Identifier for the CLIP model used (e.g., 'openai/clip-vit-base-patch32').",
+          "type": "string"
+        },
+        "embeddingConfig": {
+          "description": "Configuration used during embedding generation.",
+          "type": "object",
+          "properties": {
+            "numFrames": {
+              "description": "Number of frames used for video embedding (null for images).",
+              "type": ["integer", "null"],
+              "minimum": 1
+            },
+            "augmentation": {
+              "description": "Whether data augmentation was applied.",
+              "type": "boolean"
+            },
+            "samplingMethod": {
+              "description": "Method used for sampling video frames (e.g., 'uniform', 'advanced').",
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "processingTimestamp": {
+          "description": "ISO 8601 timestamp when the embedding was generated.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "debugMetadata": {
+          "description": "Optional debug information from the embedding process.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "error": {
+          "description": "Optional error message if embedding generation failed.",
+          "type": "string"
+        },
+        "detail": {
+          "description": "Optional detailed error information.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "filePath",
+        "mediaType",
+        "mtime",
+        "fileSize",
+        "dimensions",
+        "embedding",
+        "embeddingModel",
+        "embeddingConfig",
+        "processingTimestamp"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

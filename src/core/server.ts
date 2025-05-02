@@ -1,7 +1,7 @@
 import { createServer, Socket } from 'net';
 import { HttpRequestParser } from './httpParser';
 import router from './router';
-import { logger } from '../utils/logger';
+import logger from '../utils/logger';
 import { sendResponse } from '../entities/sendResponse';
 import { config } from '../config/server.config'; // Assuming config is imported from a config file
 
@@ -95,13 +95,14 @@ export class HttpServer {
     });
 
     this.server.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        this.port += 1; // try the next port
-        logger.warn(`Port busy, retrying on ${this.port}`);
-        this.server.listen(this.port);
-      } else {
-        logger.error(`Server error: ${err.message}`);
-      }
+      logger.error(`Server error:`, [err, err.code, err.message]);
+      // if (err.code === 'EADDRINUSE') {
+      //   this.port += 1; // try the next port
+      //   logger.warn(`Port busy, retrying on ${this.port}`);
+      //   this.server.listen(this.port);
+      // } else {
+      //   logger.error(`Server error: ${err.message}`);
+      // }
     });
   }
 

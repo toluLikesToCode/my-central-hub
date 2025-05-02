@@ -6,7 +6,7 @@
 import { fileStreamingController } from '../../../src/modules/file-streaming/fileStreamingController';
 import { sendResponse } from '../../../src/entities/sendResponse';
 import { FileHostingService } from '../../../src/modules/file-hosting/fileHostingService';
-import { logger } from '../../../src/utils/logger';
+import logger from '../../../src/utils/logger';
 import { Readable } from 'stream';
 
 jest.mock('../../../src/entities/sendResponse');

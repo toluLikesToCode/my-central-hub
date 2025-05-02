@@ -5,7 +5,7 @@ import { IncomingRequest } from '../../entities/http';
 import { FileHostingService } from './fileHostingService';
 import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
-import { logger } from '../../utils/logger';
+import logger from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
 import { Readable } from 'stream';
 

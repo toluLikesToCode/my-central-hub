@@ -16,4 +16,7 @@ module.exports = {
       },
     ],
   },
+  transformIgnorePatterns: [
+    '/node_modules/(?!(boxen|chalk|ansi-styles|supports-color|has-flag|color-convert|color-name)/)',
+  ],
 };

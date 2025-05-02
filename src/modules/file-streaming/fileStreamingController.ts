@@ -3,7 +3,7 @@ import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
 import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
-import { logger } from '../../utils/logger';
+import logger from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
 import { Readable } from 'stream';
 import { FileHostingService } from '../file-hosting/fileHostingService';

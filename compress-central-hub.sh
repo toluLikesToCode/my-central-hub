@@ -8,7 +8,7 @@ NC='\033[0m' # No Color
 
 show_help() {
   echo -e "${YELLOW}Usage:${NC}"
-  echo "  ./compress-central-hub.sh [compression-level] [--dry-run]"
+  echo "  ./compress-central-hub.sh [compression-level] [--dry-run] [--no-tests]"
   echo
   echo "Arguments:"
   echo "  compression-level   1 to 5:"
@@ -19,70 +19,51 @@ show_help() {
   echo "    5 = Maximum compression (compress + remove comments + remove empty lines)"
   echo
   echo "  --dry-run            Simulate without generating the output file"
+  echo "  --no-tests           Exclude tests/ and stress/ directories from output"
   echo "  -h, --help           Show this help message"
 }
 
 # Default values
 COMPRESSION_LEVEL=2
 DRY_RUN=false
+EXCLUDE_TESTS=false
 
 # Parse arguments
 for arg in "$@"; do
   case $arg in
-    -h|--help)
-      show_help
-      exit 0
-      ;;
-    --dry-run)
-      DRY_RUN=true
-      ;;
-    [1-5])
-      COMPRESSION_LEVEL=$arg
-      ;;
-    *)
-      echo -e "${RED}❌ Unknown argument: $arg${NC}"
-      show_help
-      exit 1
-      ;;
+    -h|--help) show_help; exit 0 ;;
+    --dry-run) DRY_RUN=true ;;
+    --no-tests) EXCLUDE_TESTS=true ;;
+    [1-5]) COMPRESSION_LEVEL=$arg ;;
+    *) echo -e "${RED}❌ Unknown argument: $arg${NC}"; show_help; exit 1 ;;
   esac
 done
 
-# Setup Repomix options based on compression level
 REPO_OPTIONS="--style xml -i **/*.log,**/*.json,**/.gitignore,node_modules/**,thumbnails/**,**/dist/**,**/build/** --token-count-encoding o200k_base"
 
 case $COMPRESSION_LEVEL in
-  1)
-    # No compression
-    ;;
-  2)
-    REPO_OPTIONS="--remove-empty-lines $REPO_OPTIONS"
-    ;;
-  3)
-    REPO_OPTIONS="--remove-empty-lines --remove-comments $REPO_OPTIONS"
-    ;;
-  4)
-    REPO_OPTIONS="--compress $REPO_OPTIONS"
-    ;;
-  5)
-    REPO_OPTIONS="--compress --remove-empty-lines --remove-comments $REPO_OPTIONS"
-    ;;
+  2) REPO_OPTIONS="--remove-empty-lines $REPO_OPTIONS" ;;
+  3) REPO_OPTIONS="--remove-empty-lines --remove-comments $REPO_OPTIONS" ;;
+  4) REPO_OPTIONS="--compress $REPO_OPTIONS" ;;
+  5) REPO_OPTIONS="--compress --remove-empty-lines --remove-comments $REPO_OPTIONS" ;;
 esac
 
-# Dry-run mode
+TARGET_PATHS="src python"
+[ "$EXCLUDE_TESTS" = false ] && TARGET_PATHS="$TARGET_PATHS tests stress"
+
 if [ "$DRY_RUN" = true ]; then
-  echo -e "${YELLOW}🧪 Dry Run Mode: Simulating Repomix for my-central-hub...${NC}"
+  echo -e "${YELLOW}🧪 Dry Run Mode: Simulating Repomix...${NC}"
   echo "→ Compression level: $COMPRESSION_LEVEL"
   echo "→ Repomix options: $REPO_OPTIONS"
-  echo "→ Processing folders: src/, tests/, stress/"
+  echo "→ Processing: $TARGET_PATHS"
   echo "→ Output: my-central-hub.xml"
   exit 0
 fi
 
-# Real execution
-echo -e "${YELLOW}🗑️  Deleting old my-central-hub.xml if it exists...${NC}"
+echo -e "${YELLOW}🗑️  Deleting previous my-central-hub.xml...${NC}"
 rm -f my-central-hub.xml
 
-echo -e "${YELLOW}⚙️  Running Repomix on src/, tests/, and stress/ with compression level $COMPRESSION_LEVEL${NC}"
-repomix ${REPO_OPTIONS} -o my-central-hub.xml src tests stress
+echo -e "${YELLOW}⚙️  Running Repomix...${NC}"
+repomix $REPO_OPTIONS -o my-central-hub.xml $TARGET_PATHS
 
 echo -e "${GREEN}✅ my-central-hub.xml has been created and is ready for LLM ingestion.${NC}"

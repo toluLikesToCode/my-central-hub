@@ -2,7 +2,23 @@
 import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
 import { sendResponse } from '../entities/sendResponse';
-import { logger } from '../utils/logger';
+import { Logger, ConsoleTransport, FileTransport, PrettyFormatter } from '../utils/logger';
+
+const logger = new Logger({
+  transports: [
+    new ConsoleTransport({
+      formatter: new PrettyFormatter(),
+      level: 'info',
+    }),
+    new FileTransport({
+      filename: '/Users/toluadegbehingbe/my-central-hub/src/core/._router.log',
+      formatter: new PrettyFormatter(),
+      level: 'debug',
+    }),
+  ],
+  level: 'info',
+  exitOnError: false,
+});
 
 /* ───── Types ─────────────────────────────────────────────────────────── */
 

@@ -1,6 +1,6 @@
 import { IncomingRequest } from '../entities/http';
 import { URL } from 'url';
-import { logger } from '../utils/logger';
+import logger from '../utils/logger';
 
 enum ParserState {
   REQUEST_LINE,

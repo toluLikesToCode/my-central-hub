@@ -94,12 +94,12 @@
 
 ## 9. Optional: Advanced Features
 
-- [ ] Route Patterns & Wildcards
+- [x] Route Patterns & Wildcards
 
-  - [ ] Support for `/api/*` or `/files/:filename*` if needed.
+  - [x] Support for `/api/*` or `/files/:filename*` if needed.
 
 - [ ] Modular Service Loading
-  - [ ] Dynamically load/enable modules based on config.
+  - [x] Dynamically load/enable modules based on config.
 
 ---
 
