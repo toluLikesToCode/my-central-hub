@@ -2,9 +2,24 @@ import { z } from 'zod';
 import sqlite3 from 'sqlite3';
 import { open, Database } from 'sqlite';
 import { config } from '../../../config/server.config';
-import { logger } from '../../../utils/logger';
+import { Logger, FileTransport, ConsoleTransport, PrettyFormatter } from '../../../utils/logger';
 import fs from 'fs';
 import path from 'path';
+
+const logger = new Logger({
+  transports: [
+    new ConsoleTransport({
+      formatter: new PrettyFormatter(),
+      level: 'info',
+    }),
+    new FileTransport({
+      filename:
+        '/Users/toluadegbehingbe/my-central-hub/src/modules/app-metrics/app_gallery-generator/._metricsService.log',
+      formatter: new PrettyFormatter(),
+      level: 'debug',
+    }),
+  ],
+});
 
 // --- Zod Schemas ---
 const PerfLogEntrySchema = z

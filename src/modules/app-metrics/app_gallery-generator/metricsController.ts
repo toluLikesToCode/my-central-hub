@@ -2,7 +2,7 @@ import { IncomingRequest } from '../../../entities/http';
 import { sendResponse } from '../../../entities/sendResponse';
 import { Socket } from 'net';
 import { saveMetrics, isPerfLogArray } from './metricsService';
-import { logger } from '../../../utils/logger';
+import logger from '../../../utils/logger';
 
 export const metricsController = {
   handleMetrics: async (req: IncomingRequest, sock: Socket) => {

@@ -2,7 +2,28 @@
 import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
 import { sendResponse } from '../entities/sendResponse';
-import { logger } from '../utils/logger';
+import { Logger, ConsoleTransport, FileTransport, PrettyFormatter } from '../utils/logger';
+import path from 'path';
+import { config } from '../config/server.config';
+
+const logger = new Logger({
+  transports: [
+    new ConsoleTransport({
+      formatter: new PrettyFormatter(),
+      level: 'info',
+    }),
+    new FileTransport({
+      filename: path.join(
+        (config.logging && config.logging.logDir) || path.join(process.cwd(), 'logs'),
+        'router.log',
+      ),
+      formatter: new PrettyFormatter(),
+      level: 'debug',
+    }),
+  ],
+  level: 'info',
+  exitOnError: false,
+});
 
 /* ───── Types ─────────────────────────────────────────────────────────── */
 

@@ -31,6 +31,8 @@
   "homepage": "https://github.com/toluLikesToCode/my-central-hub#readme",
   "devDependencies": {
     "@eslint/js": "^9.25.1",
+    "@types/boxen": "^2.1.0",
+    "@types/image-size": "^0.7.0",
     "@types/jest": "^29.5.14",
     "@typescript-eslint/eslint-plugin": "^8.31.0",
     "@typescript-eslint/parser": "^8.31.0",
@@ -50,8 +52,13 @@
     "typescript-eslint": "^8.31.0"
   },
   "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "boxen": "^5.1.2",
+    "chalk": "^4.1.2",
     "dotenv": "^16.5.0",
     "i": "^0.3.7",
+    "image-size": "^2.0.2",
     "npm": "^11.3.0",
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",

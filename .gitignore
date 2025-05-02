@@ -39,6 +39,9 @@ pnpm-lock.yaml
 # Miscellaneous
 .eslintcache
 *.config
+*.db
+*.venv
+
 
 # Public files
 public/
@@ -47,3 +50,5 @@ data/
 
 # Ignore project planning/checklist files
 PROJECT_CHECKLIST.md
+compress-central-hub.sh
+my-central-hub.xml

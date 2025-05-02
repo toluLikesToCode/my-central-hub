@@ -8,7 +8,18 @@ import { sendResponse } from '../../src/entities/sendResponse';
 import type { IncomingRequest } from '../../src/entities/http';
 
 jest.mock('../../src/entities/sendResponse');
-jest.mock('../../src/utils/logger');
+jest.mock('../../src/utils/logger', () => {
+  return {
+    Logger: jest.fn().mockImplementation(() => ({
+      info: jest.fn(),
+      error: jest.fn(),
+      warn: jest.fn(),
+    })),
+    ConsoleTransport: jest.fn(),
+    FileTransport: jest.fn(),
+    PrettyFormatter: jest.fn(),
+  };
+});
 
 describe('Router', () => {
   let router;

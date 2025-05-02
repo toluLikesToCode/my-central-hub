@@ -3,12 +3,14 @@
     "target": "ES2020",
     "module": "commonjs",
     "outDir": "dist",
-    "rootDir": ".",
+    "rootDir": "src",
     "strict": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "resolveJsonModule": true
   },
-  "exclude": ["PROJECT_CHECKLIST.md", "node_modules", "coverage", "tests", "stress"]
+  "exclude": ["PROJECT_CHECKLIST.md", "node_modules", "coverage", "tests", "stress"],
+  "include": ["src/**/*"]
 }
