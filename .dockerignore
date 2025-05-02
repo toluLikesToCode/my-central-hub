@@ -47,7 +47,6 @@ Thumbs.db
 #Ignore local data/media if they exist in the repo structure (use volumes instead)
 media/
 data/
-public/
 # (Uncomment if these contain large files you don't want in the image)
 
 

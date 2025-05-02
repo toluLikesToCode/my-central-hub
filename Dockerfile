@@ -12,12 +12,24 @@ WORKDIR /app
 # - ffmpeg for video processing (used by embedding service)
 # - git (sometimes needed by pip packages)
 # Clean up apt-get cache afterwards to keep image size down
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    ffmpeg \
-    git \
+RUN rm -rf /var/lib/apt/lists/* \
+    && apt-get update --fix-missing \
+    && apt-get install -y --no-install-recommends \
+       python3 \
+       python3-pip \
+       ffmpeg \
+       git \
+       --fix-missing \
     && rm -rf /var/lib/apt/lists/*
+
+# Ensure 'python' points to Python 3 for scripts expecting 'python'
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+# Expose ffprobe if referenced explicitly
+ENV PATH="/usr/bin:$PATH"
+
+# Set environment for production and unbuffered Python output
+ENV NODE_ENV=production PYTHONUNBUFFERED=1
 
 # Copy package.json and package-lock.json (or yarn.lock)
 # This leverages Docker layer caching: if these files don't change,
@@ -25,13 +37,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY package*.json ./
 
 # Install Node.js dependencies
-RUN npm install
+RUN npm ci --only=production --frozen-lockfile
 # If you use yarn, replace the above with:
 # COPY yarn.lock ./
 # RUN yarn install --frozen-lockfile
 
 # Copy Python requirements file
-COPY requirements.txt ./
+COPY python/requirements.txt ./requirements.txt
 
 # Install Python dependencies
 # --no-cache-dir reduces image size

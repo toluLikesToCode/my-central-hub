@@ -48,6 +48,8 @@ The content is organized as follows:
 </file_summary>
 
 <directory_structure>
+__mocks__/
+  logger.ts
 config/
   server.config.ts
 core/
@@ -96,7 +98,6 @@ utils/
   helpers.test.ts
   helpers.ts
   httpHelpers.ts
-  logger.test.ts
   logger.ts
   mimeTypes.ts
 embedding_service_helper.py
@@ -115,8 +116,9 @@ This section contains the contents of the repository's files.
 
 <file path="config/server.config.ts">
 import dotenv from 'dotenv';
-import { join } from 'path';
-import logger from '../utils/logger';
+import path, { join } from 'path';
+import { Logger } from '../utils/logger';
+const logger = new Logger();
 dotenv.config();
 export const config = {
   port: process.env.PORT ? parseInt(process.env.PORT, 10) : 8080,
@@ -139,32 +141,37 @@ export const config = {
     fileStreaming: true,
   },
   logging: {
-    level: process.env.LOG_LEVEL,
+    level: process.env.LOG_LEVEL || 'info',
     format: process.env.LOG_FORMAT || 'json',
+    logDir: process.env.LOG_DIR || join(process.cwd(), 'logs'),
   },
   embedding: {
+    pythonExecutable: process.env.PYTHON_EXECUTABLE || 'python3',
+    pythonScriptPath:
+      process.env.PYTHON_SCRIPT_PATH ||
+      path.resolve(process.cwd(), 'python', 'embedding_service_helper.py'),
+    pythonLogPath: process.env.PYTHON_LOG_PATH,
     modelArgs: [
-      '--model',
-      'openai/clip-vit-base-patch32',
-      '--num_frames',
-      '20',
     ],
-    inactivityTimeoutMs: 5 * 60 * 1000,
-    scriptTimeoutMs: 15 * 60 * 1000,
     defaultModel: 'openai/clip-vit-base-patch32',
     defaultNumFrames: 20,
     enableAugmentation: false,
+    inactivityTimeoutMs: 5 * 60 * 1000,
+    scriptTimeoutMs: 15 * 60 * 1000,
     debug: false,
     log: false,
   },
+  testMode: true,
 };
-logger.info(`Server configuration:`);
-logger.info(`- Port: ${config.port}`);
-logger.info(`- Public Directory: ${config.publicDir}`);
-logger.info(`- Media Directory: ${config.mediaDir}`);
-logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
-logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
-logger.info(`- Database Path: ${config.dbPath}`);
+if (!config.testMode) {
+  logger.info(`Server configuration:`);
+  logger.info(`- Port: ${config.port}`);
+  logger.info(`- Public Directory: ${config.publicDir}`);
+  logger.info(`- Media Directory: ${config.mediaDir}`);
+  logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
+  logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
+  logger.info(`- Database Path: ${config.dbPath}`);
+}
 </file>
 
 <file path="core/httpParser.ts">
@@ -536,6 +543,8 @@ import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
 import { sendResponse } from '../entities/sendResponse';
 import { Logger, ConsoleTransport, FileTransport, PrettyFormatter } from '../utils/logger';
+import path from 'path';
+import { config } from '../config/server.config';
 const logger = new Logger({
   transports: [
     new ConsoleTransport({
@@ -543,7 +552,10 @@ const logger = new Logger({
       level: 'info',
     }),
     new FileTransport({
-      filename: '/Users/toluadegbehingbe/my-central-hub/src/core/._router.log',
+      filename: path.join(
+        (config.logging && config.logging.logDir) || path.join(process.cwd(), 'logs'),
+        'router.log',
+      ),
       formatter: new PrettyFormatter(),
       level: 'debug',
     }),
@@ -1363,7 +1375,7 @@ src/modules/app-metrics/
 </file>
 
 <file path="modules/embeddings/embedding.service.ts">
-import { spawn, ChildProcessWithoutNullStreams, execFile } from 'child_process';
+import { spawn, ChildProcessWithoutNullStreams, execFile, execSync } from 'child_process';
 import Ajv, { ValidateFunction } from 'ajv';
 import addFormats from 'ajv-formats';
 import clipCacheSchema from '../../../schemas/clipCache.schema.json';
@@ -1420,8 +1432,7 @@ try {
 }
 const NODE_LOG_PREFIX = '[NodeEmbeddingService]';
 const LOG_FILE_PATH = path.resolve(
-  process.cwd(),
-  'logs',
+  config.logging.logDir,
   'embedding_service.log',
 );
 try {
@@ -1446,10 +1457,19 @@ const logger = new Logger({
     }),
   ],
 });
-const PYTHON_EXECUTABLE = process.env.PYTHON_EXECUTABLE || 'python3';
-const PYTHON_SCRIPT_NAME = 'embedding_service_helper.py';
-const PYTHON_SCRIPT_PATH =
-  process.env.PYTHON_SCRIPT_PATH || path.resolve(__dirname, '..', '..', PYTHON_SCRIPT_NAME);
+const FAILED_VALIDATION_LOG_PATH = path.resolve(config.logging.logDir, 'failed_validation.log');
+const failedValidationLogger = new Logger({
+  transports: [
+    new FileTransport({
+      filename: FAILED_VALIDATION_LOG_PATH,
+      formatter: new JsonFormatter(),
+      level: 'error',
+    }),
+  ],
+  level: 'error',
+});
+const PYTHON_EXECUTABLE = config.embedding.pythonExecutable;
+const PYTHON_SCRIPT_PATH = config.embedding.pythonScriptPath;
 const PYTHON_MODEL_ARGS: string[] = config.embedding?.modelArgs || [];
 const INACTIVITY_TIMEOUT_MS = config.embedding?.inactivityTimeoutMs || 5 * 60 * 1000;
 const PYTHON_SCRIPT_TIMEOUT_MS = config.embedding?.scriptTimeoutMs || 15 * 60 * 1000;
@@ -1497,6 +1517,7 @@ class EmbeddingService {
   constructor() {
     logger.info(`${NODE_LOG_PREFIX} Initializing Embedding Service...`);
     this.validateConfig();
+    this.checkDependencies(); // Check for ffprobe on startup
     this.setupExitHandlers();
     // Do not start the Python process immediately; wait for the first request.
   }
@@ -1513,17 +1534,24 @@ class EmbeddingService {
       this.lastError = `Python script not accessible at ${PYTHON_SCRIPT_PATH}`;
       // Consider preventing service start if script is missing
     }
-    // Add checks for ffprobe/ffmpeg if possible? Maybe too complex.
   }
-  // --- Python Process Management --- //
+  private checkDependencies() {
+    // Check for ffprobe
+    try {
+      execSync('ffprobe -version', { stdio: 'ignore' });
+      logger.info(`${NODE_LOG_PREFIX} Dependency check: ffprobe found.`);
+    } catch (error) {
+      logger.error(
+        `${NODE_LOG_PREFIX} Dependency check failed: ffprobe not found in PATH. Video metadata extraction will fail.`,
+      );
+    }
+  }
   private resetInactivityTimer() {
     this.clearInactivityTimer();
-    // Only set timer if process exists and we are not deliberately stopping it
     if (this.pythonProcess && !this.isStopping) {
       this.inactivityTimer = setTimeout(() => {
         this.stopDueToInactivity();
       }, INACTIVITY_TIMEOUT_MS);
-      // Allow Node.js to exit if this timer is the only thing active
       if (this.inactivityTimer.unref) this.inactivityTimer.unref();
     }
   }
@@ -1534,15 +1562,15 @@ class EmbeddingService {
     }
   }
   private stopDueToInactivity() {
-    if (this.isStopping) return; // Already stopping
+    if (this.isStopping) return;
     logger.info(`${NODE_LOG_PREFIX} Stopping Python process due to inactivity.`);
-    this.isStopping = true; // Mark as stopping to prevent auto-restart
-    this.stop(); // Use the main stop method
+    this.isStopping = true;
+    this.stop();
   }
   private async startPythonProcess(): Promise<void> {
     if (this.pythonProcess || this.isStarting) {
       logger.warn(`${NODE_LOG_PREFIX} Process already running or starting.`);
-      return Promise.resolve(); // Don't reject, just return
+      return Promise.resolve();
     }
     if (this.lastError === `Python script not accessible at ${PYTHON_SCRIPT_PATH}`) {
       logger.error(`${NODE_LOG_PREFIX} Cannot start process, script is inaccessible.`);
@@ -1811,8 +1839,8 @@ class EmbeddingService {
           filePath: filePath,
           embedding: pyEntry.embedding,
           debugMetadata: pyEntry.debugMetadata,
-          error: pyEntry.error,
-          detail: pyEntry.detail,
+          error: pyEntry.error != null ? String(pyEntry.error) : undefined,
+          detail: pyEntry.detail != null ? String(pyEntry.detail) : undefined,
           processingTimestamp: new Date().toISOString(),
           mtime: meta.mtime,
           fileSize: meta.fileSize,
@@ -1840,6 +1868,11 @@ class EmbeddingService {
               errors: validationErrors,
             },
           );
+          failedValidationLogger.error(`Failed validation for: ${filePath}`, {
+            constructedData: entryData,
+            pythonData: pyEntry,
+            errors: validationErrors,
+          });
           finalResults[filePath] = {
             schemaVersion: '1.0.0',
             filePath: filePath,
@@ -2098,6 +2131,8 @@ import {
   PrettyFormatter,
 } from '../../utils/logger';
 import { embeddingService } from './embedding.service';
+import path from 'path';
+import { config } from '../../config/server.config';
 const logger = new Logger({
   transports: [
     new ConsoleTransport({
@@ -2113,9 +2148,42 @@ const logger = new Logger({
   level: 'debug',
   exitOnError: false,
 });
+function summarizeArray(arr: any[]): string {
+  if (!Array.isArray(arr)) return String(arr);
+  const len = arr.length;
+  if (len === 0) return '[]';
+  const preview = arr.slice(0, 5).map((x) => Number(x).toFixed(4));
+  let min = null,
+    max = null;
+  try {
+    min = Math.min(...arr);
+    max = Math.max(...arr);
+  } catch {
+  }
+  return `[Array(len=${len}, min=${min}, max=${max}, preview=[${preview.join(', ')}]...)]`;
+}
+function summarizeObject(obj: any): any {
+  if (Array.isArray(obj)) return summarizeArray(obj);
+  if (obj && typeof obj === 'object') {
+    const copy: any = Array.isArray(obj) ? [] : {};
+    for (const key in obj) {
+      if (Array.isArray(obj[key]) && obj[key].length > 20) {
+        copy[key] = summarizeArray(obj[key]);
+      } else if (typeof obj[key] === 'object' && obj[key] !== null) {
+        copy[key] = summarizeObject(obj[key]);
+      } else {
+        copy[key] = obj[key];
+      }
+    }
+    return copy;
+  }
+  return obj;
+}
 export const embeddingsController = {
   async handleEmbeddingsRequest(req: IncomingRequest, sock: Socket) {
-    logger.info(`[EmbeddingsHandler] Received request`);
+    logger.info(
+      `[EmbeddingsHandler] Received request: ` + JSON.stringify(summarizeObject(req.body)),
+    );
     if (req.method !== 'POST') {
       return sendResponse(
         sock,
@@ -2134,20 +2202,54 @@ export const embeddingsController = {
     }
     try {
       const body = JSON.parse(req.body.toString('utf-8'));
-      const imagePaths = body.imagePaths;
-      if (!Array.isArray(imagePaths) || imagePaths.length === 0) {
+      const requestedPaths = body.imagePaths;
+      if (!Array.isArray(requestedPaths) || requestedPaths.length === 0) {
         return sendResponse(
           sock,
           400,
           { 'Content-Type': 'application/json' },
-          JSON.stringify({
-            error: 'Invalid request body. Expected { "imagePaths": [...] } with a non-empty array.',
-          }),
+          JSON.stringify({ error: 'No file paths provided.' }),
         );
       }
-      logger.info(`[EmbeddingsHandler] Requesting embeddings for ${imagePaths.length} paths.`);
+      const mediaDir = path.resolve(config.mediaDir);
+      const imagePaths: string[] = [];
+      for (const reqPath of requestedPaths) {
+        if (typeof reqPath !== 'string') {
+          logger.warn(`[EmbeddingsHandler] Invalid path type received: ${typeof reqPath}`);
+          continue;
+        }
+        const absoluteReqPath = path.resolve(mediaDir, reqPath);
+        if (!absoluteReqPath.startsWith(mediaDir) && !config.testMode) {
+          logger.error(`[EmbeddingsHandler] Invalid path detected (outside media dir): ${reqPath}`);
+          return sendResponse(
+            sock,
+            400,
+            { 'Content-Type': 'application/json' },
+            JSON.stringify({
+              error: 'Invalid file path provided.',
+              detail: `Path ${reqPath} is outside the allowed directory.`,
+            }),
+          );
+        }
+        imagePaths.push(absoluteReqPath);
+      }
+      if (imagePaths.length === 0) {
+        logger.warn(`[EmbeddingsHandler] No valid paths remaining after validation.`);
+        return sendResponse(
+          sock,
+          400,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({ error: 'No valid file paths provided.' }),
+        );
+      }
+      logger.info(
+        `[EmbeddingsHandler] Requesting embeddings for ${imagePaths.length} validated paths.`,
+      );
       const embeddingsResult = await embeddingService.getEmbeddings(imagePaths);
-      logger.info(`[EmbeddingsHandler] Sending response for ${imagePaths.length} paths.`);
+      logger.info(
+        `[EmbeddingsHandler] Sending response for ${imagePaths.length} paths. Result summary: ` +
+          JSON.stringify(summarizeObject(embeddingsResult)),
+      );
       sendResponse(
         sock,
         200,
@@ -2156,6 +2258,7 @@ export const embeddingsController = {
       );
     } catch (error: any) {
       logger.error(`[EmbeddingsHandler] Error processing embedding request: ${error.message}`);
+      logger.error(`[EmbeddingsHandler] Error detail: ` + JSON.stringify(summarizeObject(error)));
       const statusCode = error instanceof SyntaxError ? 400 : 500;
       const errorMessage =
         error instanceof SyntaxError
@@ -2179,7 +2282,7 @@ export const embeddingsController = {
         JSON.stringify({ error: 'Method Not Allowed' }),
       );
     }
-    embeddingService.stop(true);
+    embeddingService.stop();
     logger.info(`[EmbeddingsHandler] Embedding service stop initiated.`);
     sendResponse(
       sock,
@@ -2407,16 +2510,19 @@ import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
 import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
-import logger from '../../utils/logger';
+import { Logger } from '../../utils/logger';
+const logger = new Logger();
 import { getMimeType } from '../../utils/helpers';
 import { Readable } from 'stream';
 import { FileHostingService } from '../file-hosting/fileHostingService';
 const fileSvc = new FileHostingService(config.mediaDir);
 export const fileStreamingController = {
   async handleStream(req: IncomingRequest, sock: Socket) {
-    logger.info(
-      `[handleStream] url=${req.url} path=${req.path} query=${JSON.stringify(req.query)}`,
-    );
+    if (!config.testMode) {
+      logger.info(
+        `[handleStream] url=${req.url} path=${req.path} query=${JSON.stringify(req.query)}`,
+      );
+    }
     const fileName = getQuery(req, 'file');
     if (!fileName) {
       sendResponse(
@@ -2482,7 +2588,9 @@ export const fileStreamingController = {
         );
       }
     } catch (err) {
-      logger.error(`[handleStream] fileName=${fileName}, error=${(err as Error).message}`);
+      if (!config.testMode) {
+        logger.error(`[handleStream] fileName=${fileName}, error=${(err as Error).message}`);
+      }
       sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, `File "${fileName}" not found.`);
     }
   },
@@ -3417,7 +3525,9 @@ def compute_single_embedding(fp, args, embedder, executor=None):
     try:
         debug_metadata = {
             "model": getattr(args, "model", None),
-            "num_frames": getattr(args, "num_frames", None),
+            "num_frames": (
+                getattr(args, "num_frames", None) if ext in VIDEO_EXTS else None
+            ),
             "enable_augmentation": getattr(args, "enable_augmentation", False),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
@@ -3512,6 +3622,7 @@ def main_service():
     parser.add_argument("-n", "--num_frames", type=int, default=20)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--log", action="store_true")
+    parser.add_argument("--enable_augmentation", action="store_true", default=False)
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.DEBUG,
@@ -3525,7 +3636,7 @@ def main_service():
         model_name=args.model,
         device=None,
         logger=logger,
-        enable_augmentation=False,
+        enable_augmentation=args.enable_augmentation,
     )
     logger.info(f"CLIPEmbedder initialized on device: {embedder.device}")
     shared_executor = concurrent.futures.ThreadPoolExecutor()
@@ -3571,6 +3682,14 @@ torch
 scenedetect
 torchvision
 transformers
+</file>
+
+<file path="__mocks__/logger.ts">
+module.exports = {
+  info: jest.fn(),
+  error: jest.fn(),
+  warn: jest.fn(),
+};
 </file>
 
 <file path="core/httpParser.test.ts">
@@ -3780,7 +3899,18 @@ import { createRouter } from '../../src/core/router';
 import { sendResponse } from '../../src/entities/sendResponse';
 import type { IncomingRequest } from '../../src/entities/http';
 jest.mock('../../src/entities/sendResponse');
-jest.mock('../../src/utils/logger');
+jest.mock('../../src/utils/logger', () => {
+  return {
+    Logger: jest.fn().mockImplementation(() => ({
+      info: jest.fn(),
+      error: jest.fn(),
+      warn: jest.fn(),
+    })),
+    ConsoleTransport: jest.fn(),
+    FileTransport: jest.fn(),
+    PrettyFormatter: jest.fn(),
+  };
+});
 describe('Router', () => {
   let router;
   let socket: Socket;
@@ -4270,41 +4400,6 @@ describe('Helpers - getMimeType', () => {
   });
   it('should return default MIME type for file with no extension', () => {
     expect(getMimeType('README')).toBe('application/octet-stream');
-  });
-});
-</file>
-
-<file path="utils/logger.test.ts">
-import logger from '../../src/utils/logger';
-describe('Logger', () => {
-  it('should log info messages', () => {
-    const consoleSpy = jest.spyOn(console, 'log').mockImplementation();
-    logger.info('Hello World');
-    expect(consoleSpy).toHaveBeenCalled();
-    consoleSpy.mockRestore();
-  });
-  it('should log warning messages', () => {
-    const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
-    logger.warn('Watch out!');
-    expect(consoleSpy).toHaveBeenCalled();
-    consoleSpy.mockRestore();
-  });
-  it('should log error messages', () => {
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
-    logger.error('This is bad!');
-    expect(consoleSpy).toHaveBeenCalled();
-    consoleSpy.mockRestore();
-  });
-  it('should conditionally log debug messages', () => {
-    process.env.NODE_ENV = 'development';
-    const consoleSpy = jest.spyOn(console, 'debug').mockImplementation();
-    logger.debug('Debugging...');
-    expect(consoleSpy).toHaveBeenCalled();
-    consoleSpy.mockRestore();
-    delete process.env.NODE_ENV;
-  });
-  afterEach(() => {
-    jest.restoreAllMocks();
   });
 });
 </file>

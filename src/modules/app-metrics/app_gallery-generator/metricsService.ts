@@ -13,8 +13,7 @@ const logger = new Logger({
       level: 'info',
     }),
     new FileTransport({
-      filename:
-        '/Users/toluadegbehingbe/my-central-hub/src/modules/app-metrics/app_gallery-generator/._metricsService.log',
+      filename: path.join(config.logging.logDir, 'metricsService.log'),
       formatter: new PrettyFormatter(),
       level: 'debug',
     }),
