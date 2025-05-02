@@ -64,6 +64,9 @@ echo -e "${YELLOW}🗑️  Deleting previous my-central-hub.xml...${NC}"
 rm -f my-central-hub.xml
 
 echo -e "${YELLOW}⚙️  Running Repomix...${NC}"
-repomix $REPO_OPTIONS -o my-central-hub.xml $TARGET_PATHS
+if ! repomix $REPO_OPTIONS -o my-central-hub.xml $TARGET_PATHS; then
+  echo -e "${RED}❌ Repomix command failed${NC}"
+  exit 1
+fi
 
 echo -e "${GREEN}✅ my-central-hub.xml has been created and is ready for LLM ingestion.${NC}"
