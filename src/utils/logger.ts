@@ -361,13 +361,15 @@ export class FileTransport implements Transport {
     });
   }
 
-  close(): void {
+  async close(): Promise<void> {
     // Promisify stream end for cleaner shutdown
-    new Promise<void>((resolve) => {
-      this.stream.end(() => resolve());
-    }).catch((err) => {
+    try {
+      await new Promise<void>((resolve) => {
+        this.stream.end(() => resolve());
+      });
+    } catch (err) {
       console.error(`Error closing log stream ${this.filename}:`, err);
-    });
+    }
   }
 }
 
