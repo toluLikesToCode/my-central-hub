@@ -3,7 +3,9 @@ import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
 import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
-import logger from '../../utils/logger';
+import { Logger } from '../../utils/logger';
+// Instantiate logger (default mock lacked info/error in tests)
+const logger = new Logger();
 import { getMimeType } from '../../utils/helpers';
 import { Readable } from 'stream';
 import { FileHostingService } from '../file-hosting/fileHostingService';
@@ -13,9 +15,11 @@ const fileSvc = new FileHostingService(config.mediaDir);
 export const fileStreamingController = {
   /** GET /stream?file=video.mp4 – streams file (supports Range) */
   async handleStream(req: IncomingRequest, sock: Socket) {
-    logger.info(
-      `[handleStream] url=${req.url} path=${req.path} query=${JSON.stringify(req.query)}`,
-    );
+    if (!config.testMode) {
+      logger.info(
+        `[handleStream] url=${req.url} path=${req.path} query=${JSON.stringify(req.query)}`,
+      );
+    }
     const fileName = getQuery(req, 'file');
     if (!fileName) {
       sendResponse(
@@ -81,7 +85,9 @@ export const fileStreamingController = {
         );
       }
     } catch (err) {
-      logger.error(`[handleStream] fileName=${fileName}, error=${(err as Error).message}`);
+      if (!config.testMode) {
+        logger.error(`[handleStream] fileName=${fileName}, error=${(err as Error).message}`);
+      }
       sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, `File "${fileName}" not found.`);
     }
   },

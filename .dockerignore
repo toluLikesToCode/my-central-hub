@@ -14,3 +14,40 @@ dist
 # Ignore other unnecessary files
 Dockerfile
 .dockerignore
+
+
+# .dockerignore
+
+# Ignore Git directory
+.git
+.gitignore
+
+# Ignore Node dependencies (they are installed inside the container)
+node_modules
+
+# Ignore build output (it's generated inside the container)
+dist
+build
+
+# Ignore Docker files
+Dockerfile
+.dockerignore
+
+# Ignore environment files (these are passed during runtime)
+.env*
+
+# Ignore log files and directories
+*.log
+logs/
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+#Ignore local data/media if they exist in the repo structure (use volumes instead)
+media/
+data/
+public/
+# (Uncomment if these contain large files you don't want in the image)
+
+

@@ -3,6 +3,8 @@ import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
 import { sendResponse } from '../entities/sendResponse';
 import { Logger, ConsoleTransport, FileTransport, PrettyFormatter } from '../utils/logger';
+import path from 'path';
+import { config } from '../config/server.config';
 
 const logger = new Logger({
   transports: [
@@ -11,7 +13,10 @@ const logger = new Logger({
       level: 'info',
     }),
     new FileTransport({
-      filename: '/Users/toluadegbehingbe/my-central-hub/src/core/._router.log',
+      filename: path.join(
+        (config.logging && config.logging.logDir) || path.join(process.cwd(), 'logs'),
+        'router.log',
+      ),
       formatter: new PrettyFormatter(),
       level: 'debug',
     }),

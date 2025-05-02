@@ -1,6 +1,9 @@
 import dotenv from 'dotenv';
 import path, { join } from 'path';
-import logger from '../utils/logger';
+import { Logger } from '../utils/logger';
+
+// Instantiate logger using Logger class (default export mock was missing methods in tests)
+const logger = new Logger();
 
 // Load environment variables from .env file
 dotenv.config();
@@ -66,10 +69,13 @@ export const config = {
   testMode: true, // Set to true for testing purposes
 };
 
-logger.info(`Server configuration:`);
-logger.info(`- Port: ${config.port}`);
-logger.info(`- Public Directory: ${config.publicDir}`);
-logger.info(`- Media Directory: ${config.mediaDir}`);
-logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
-logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
-logger.info(`- Database Path: ${config.dbPath}`);
+// Log configuration only when not running tests
+if (!config.testMode) {
+  logger.info(`Server configuration:`);
+  logger.info(`- Port: ${config.port}`);
+  logger.info(`- Public Directory: ${config.publicDir}`);
+  logger.info(`- Media Directory: ${config.mediaDir}`);
+  logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
+  logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
+  logger.info(`- Database Path: ${config.dbPath}`);
+}
