@@ -39,8 +39,8 @@ pnpm-lock.yaml
 # Miscellaneous
 .eslintcache
 *.config
-.db
-.venv
+*.db
+*.venv
 
 
 # Public files
