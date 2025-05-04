@@ -14,7 +14,16 @@ const logger = new Logger({
     }),
     new FileTransport({
       filename: path.join(config.logging.logDir, 'metricsService.log'),
-      formatter: new PrettyFormatter(),
+      formatter: new PrettyFormatter({
+        useBoxes: false,
+        useColors: false,
+        showTimestamp: true,
+        indent: 3,
+        arrayLengthLimit: 15,
+        objectKeysLimit: 10,
+        maxDepth: 4,
+        stringLengthLimit: 300,
+      }),
       level: 'debug',
     }),
   ],
@@ -111,10 +120,10 @@ export function isPerfLogArray(arr: unknown): arr is PerfLogEntry[] {
 let db: Database | null = null;
 export async function initDb(): Promise<Database> {
   if (db) return db;
+  // Compute the directory that should contain the .db file:
   const dbDir = path.dirname(config.dbPath);
   if (!fs.existsSync(dbDir)) {
     fs.mkdirSync(dbDir, { recursive: true });
-    logger.info(`Created database directory at ${dbDir}`);
   }
   if (!fs.existsSync(config.dbPath)) {
     fs.closeSync(fs.openSync(config.dbPath, 'w'));
@@ -170,9 +179,7 @@ export async function initDb(): Promise<Database> {
 
 // --- Utility: Accept and log all valid data, never reject whole request ---
 function logInvalid(type: string, data: unknown, error: unknown) {
-  logger.info(
-    `[metrics] Invalid ${type}: ${JSON.stringify(error)} | Data: ${JSON.stringify(data)}`,
-  );
+  logger.info(`[metrics] Invalid Entry`, [type, data, error]);
 }
 
 // --- Session Helper ---
@@ -201,9 +208,14 @@ export async function saveMetrics(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _env?: unknown,
 ) {
+  logger.info('[metrics] saveMetrics called', {
+    clientSessionId,
+    payloadType: Array.isArray(payload) ? 'PerfLogBatch' : typeof payload,
+  });
   const database = await initDb();
   // PerfLog batch
   if (Array.isArray(payload)) {
+    logger.debug('[metrics] Processing PerfLog batch', { batchSize: payload.length });
     for (const entry of payload) {
       const result = PerfLogEntrySchema.safeParse(entry);
       if (!result.success) {
@@ -213,12 +225,14 @@ export async function saveMetrics(
       // Resolve sessionId
       const resolvedSessionId = result.data.sessionId || clientSessionId;
       if (!resolvedSessionId) {
-        logger.warn('[metrics] No sessionId found for perfLog entry. Skipping.');
+        logger.warn('[metrics] No sessionId found for perfLog entry. Skipping.', entry);
         continue;
       }
+      logger.debug('[metrics] Inserting PerfLog entry', { resolvedSessionId, entry });
       await ensureSessionExists(database, resolvedSessionId, result.data.timestamp);
       const { timestamp, perfNow, memory, action, batchId, uploadMode, ...rest } = result.data;
       const details = JSON.stringify({ ...rest });
+      logger.debug('[metrics] Inserting PerfLog entry', result);
       await database.run(
         `INSERT INTO perfLog (sessionId, timestamp, perfNow, usedJSHeapSize, totalJSHeapSize, jsHeapSizeLimit, action, batchId, uploadMode, details)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -234,6 +248,7 @@ export async function saveMetrics(
         details,
       );
     }
+    logger.info('[metrics] Finished processing PerfLog batch', { batchSize: payload.length });
     return;
   }
   // Full payload
@@ -246,6 +261,9 @@ export async function saveMetrics(
       const perfLogArray = Array.isArray((payload as Record<string, unknown>).perfLog)
         ? ((payload as Record<string, unknown>).perfLog as unknown[])
         : [];
+      logger.debug('[metrics] Salvaging perfLog from invalid fullPayload', {
+        perfLogCount: perfLogArray.length,
+      });
       for (const entry of perfLogArray) {
         const perfResult = PerfLogEntrySchema.safeParse(entry);
         if (perfResult.success) {
@@ -274,6 +292,9 @@ export async function saveMetrics(
       const debugArray = Array.isArray((payload as Record<string, unknown>).debug)
         ? ((payload as Record<string, unknown>).debug as unknown[])
         : [];
+      logger.debug('[metrics] Salvaging debug logs from invalid fullPayload', {
+        debugCount: debugArray.length,
+      });
       for (const entry of debugArray) {
         const debugResult = DebugLogSchema.safeParse(entry);
         if (debugResult.success) {
@@ -290,6 +311,9 @@ export async function saveMetrics(
       // Try engagement
       const engagementObj = (payload as Record<string, unknown>).engagement;
       if (engagementObj && typeof engagementObj === 'object' && !Array.isArray(engagementObj)) {
+        logger.debug('[metrics] Salvaging engagement from invalid fullPayload', {
+          engagementKeys: Object.keys(engagementObj),
+        });
         for (const [itemId, stats] of Object.entries(engagementObj)) {
           const statsResult = EngagementStatsSchema.safeParse(stats);
           if (statsResult.success) {
@@ -320,6 +344,12 @@ export async function saveMetrics(
   } = result.data;
   // Resolve sessionId
   const resolvedSessionId = sessionMetricsFromPayload.sessionId || clientSessionId;
+  logger.info('[metrics] Inserting full payload', {
+    resolvedSessionId,
+    engagementCount: Object.keys(engagement).length,
+    perfLogCount: perfLog.length,
+    debugCount: debug.length,
+  });
   await ensureSessionExists(
     database,
     resolvedSessionId || 'unknown-session',
@@ -328,6 +358,7 @@ export async function saveMetrics(
   );
   // Insert engagement
   for (const [itemId, stats] of Object.entries(engagement)) {
+    logger.debug('[metrics] Inserting engagement', { resolvedSessionId, itemId, stats });
     await database.run(
       `INSERT INTO engagement (sessionId, itemId, views, lastViewedAt, totalWatchMs, completions) VALUES (?, ?, ?, ?, ?, ?)`,
       resolvedSessionId,
@@ -340,6 +371,7 @@ export async function saveMetrics(
   }
   // Insert perfLog
   for (const entry of perfLog) {
+    logger.debug('[metrics] Inserting perfLog', { resolvedSessionId, entry });
     const { timestamp, perfNow, memory, action, batchId, uploadMode, ...rest } = entry;
     const details = JSON.stringify({ ...rest });
     await database.run(
@@ -358,6 +390,7 @@ export async function saveMetrics(
   }
   // Insert debug
   for (const entry of debug) {
+    logger.debug('[metrics] Inserting debug log', { resolvedSessionId, entry });
     await database.run(
       `INSERT INTO debug (sessionId, message, timestamp) VALUES (?, ?, ?)`,
       resolvedSessionId,
@@ -366,6 +399,10 @@ export async function saveMetrics(
     );
   }
   // Insert sessionMetrics
+  logger.debug('[metrics] Inserting sessionMetrics', {
+    resolvedSessionId,
+    sessionMetrics: sessionMetricsFromPayload,
+  });
   await database.run(
     `INSERT INTO sessionMetrics (sessionId, data) VALUES (?, ?)`,
     resolvedSessionId,
@@ -375,12 +412,52 @@ export async function saveMetrics(
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-  if (db) await db.close();
-  logger.info('SQLite connection closed (SIGINT)');
+  logger.info(`[shutdown] SIGINT received. Initiating graceful shutdown.`, {
+    pid: process.pid,
+    time: new Date().toISOString(),
+  });
+  if (db) {
+    logger.debug(
+      '[shutdown] Database connection detected. Attempting to close SQLite connection.',
+      { hasDb: true },
+    );
+    try {
+      await db.close();
+      logger.info(`SQLite connection closed successfully (SIGINT)`, {
+        event: 'SIGINT',
+        closed: true,
+      });
+    } catch (err) {
+      logger.error(`Error closing SQLite connection (SIGINT)`, { error: err, event: 'SIGINT' });
+    }
+  } else {
+    logger.warn('No database connection found during SIGINT shutdown.', { hasDb: false });
+  }
+  logger.info(`Exiting process (SIGINT).`, { pid: process.pid });
   process.exit(0);
 });
 process.on('SIGTERM', async () => {
-  if (db) await db.close();
-  logger.info('SQLite connection closed (SIGTERM)');
+  logger.info(`[shutdown] SIGTERM received. Initiating graceful shutdown.`, {
+    pid: process.pid,
+    time: new Date().toISOString(),
+  });
+  if (db) {
+    logger.debug(
+      '[shutdown] Database connection detected. Attempting to close SQLite connection.',
+      { hasDb: true },
+    );
+    try {
+      await db.close();
+      logger.info(`SQLite connection closed successfully (SIGTERM)`, {
+        event: 'SIGTERM',
+        closed: true,
+      });
+    } catch (err) {
+      logger.error(`Error closing SQLite connection (SIGTERM)`, { error: err, event: 'SIGTERM' });
+    }
+  } else {
+    logger.warn('No database connection found during SIGTERM shutdown.', { hasDb: false });
+  }
+  logger.info(`Exiting process (SIGTERM).`, { pid: process.pid });
   process.exit(0);
 });

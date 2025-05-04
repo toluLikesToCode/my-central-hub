@@ -1,3 +1,8 @@
+/**
+ * src/entities/http.ts
+ * This file contains the interface definitions for HTTP requests.
+ */
+
 export interface IncomingRequest {
   url: URL; // canonical URL (always present)
   path: string; // == url.pathname

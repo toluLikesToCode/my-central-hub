@@ -9,15 +9,27 @@ import type { IncomingRequest } from '../../src/entities/http';
 
 jest.mock('../../src/entities/sendResponse');
 jest.mock('../../src/utils/logger', () => {
-  return {
-    Logger: jest.fn().mockImplementation(() => ({
+  const mockLogger = {
+    info: jest.fn(),
+    error: jest.fn(),
+    warn: jest.fn(),
+    debug: jest.fn(),
+    child: jest.fn().mockReturnValue({
       info: jest.fn(),
       error: jest.fn(),
       warn: jest.fn(),
-    })),
+      debug: jest.fn(),
+    }),
+  };
+
+  return {
+    __esModule: true,
+    default: mockLogger,
+    Logger: jest.fn().mockImplementation(() => mockLogger),
     ConsoleTransport: jest.fn(),
     FileTransport: jest.fn(),
     PrettyFormatter: jest.fn(),
+    JsonFormatter: jest.fn(),
   };
 });
 
@@ -141,7 +153,13 @@ describe('Router', () => {
     expect(sendResponse).toHaveBeenCalledWith(
       socket,
       200,
-      { 'Content-Type': 'text/plain', Allow: 'GET, POST, PUT, DELETE, OPTIONS' },
+      {
+        'Content-Type': 'text/plain',
+        Allow: 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      },
       'OK',
     );
   });

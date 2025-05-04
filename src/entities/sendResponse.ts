@@ -1,3 +1,7 @@
+/**
+ * src/entities/sendResponse.ts
+ * This file handles the HTTP response sending logic.
+ */
 import { Socket } from 'net';
 import { Readable } from 'stream';
 

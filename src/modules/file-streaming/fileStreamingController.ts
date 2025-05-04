@@ -1,7 +1,7 @@
 import { Socket } from 'net';
 import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
-import { getHeader, getQuery } from '../../utils/httpHelpers';
+import { getHeader } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
 import { Logger } from '../../utils/logger';
 // Instantiate logger (default mock lacked info/error in tests)
@@ -20,7 +20,7 @@ export const fileStreamingController = {
         `[handleStream] url=${req.url} path=${req.path} query=${JSON.stringify(req.query)}`,
       );
     }
-    const fileName = getQuery(req, 'file');
+    const fileName = req.query.file as string | undefined;
     if (!fileName) {
       sendResponse(
         sock,

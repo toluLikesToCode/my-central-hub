@@ -56,27 +56,74 @@ export class JsonFormatter implements Formatter {
       level: entry.level,
       message: entry.message,
       timestamp: entry.timestamp.toISOString(),
-      ...entry.meta,
     };
+    let metaBlock = '';
+    if (entry.meta && Object.keys(entry.meta).length > 0) {
+      metaBlock = '\nMeta: \n' + JSON.stringify(entry.meta, null, 4);
+    }
     try {
       // Handle potential circular references and BigInts
-      return JSON.stringify(logObject, (key, value) =>
-        typeof value === 'bigint' ? value.toString() : value,
+      return (
+        JSON.stringify(logObject, (key, value) =>
+          typeof value === 'bigint' ? value.toString() : value,
+        ) + metaBlock
       );
     } catch (error) {
       // Fallback for stringification errors (e.g., circular refs)
-      return JSON.stringify({
-        level: entry.level,
-        message: `[Unserializable Object: ${
-          error instanceof Error ? error.message : String(error)
-        }]`,
-        timestamp: entry.timestamp.toISOString(),
-        ...entry.meta,
-      });
+      return (
+        JSON.stringify({
+          level: entry.level,
+          message: `[Unserializable Object: ${
+            error instanceof Error ? error.message : String(error)
+          }]`,
+          timestamp: entry.timestamp.toISOString(),
+        }) + metaBlock
+      );
     }
   }
 }
 
+/**
+ * PrettyFormatter formats log entries into a human-readable, colored and optionally boxed output.
+ * It supports:
+ *  - Customizable options for colors, boxing, nesting depth, and truncation limits.
+ *  - Semantic highlighting for file paths, error keywords, numbers, and log level names.
+ *  - Flexible indenting and line-wrapping for complex objects and arrays.
+ *
+ * @example
+ * // Basic usage with default settings:
+ * const formatter = new PrettyFormatter();
+ * const output = formatter.format({
+ *   level: 'info',
+ *   message: 'User logged in',
+ *   meta: { userId: 'abc123', role: 'admin' },
+ *   timestamp: new Date(),
+ * });
+ * console.log(output);
+ *
+ * @example
+ * // Enable boxes and timestamps:
+ * const formatter = new PrettyFormatter({ useBoxes: true, showTimestamp: true });
+ * console.log(formatter.format({ level: 'error', message: 'Fatal exception', meta: {}, timestamp: new Date() }));
+ *
+ * @example
+ * // Limit array and object key expansion:
+ * const formatter = new PrettyFormatter({ arrayLengthLimit: 3, objectKeysLimit: 2, maxDepth: 2 });
+ *
+ * @remarks
+ * The options object may include:
+ *  - useColors: toggle ANSI colors (default true)
+ *  - useBoxes: wrap output in a box (default false)
+ *  - maxDepth: maximum recursive depth when inspecting nested data (default 3)
+ *  - indent: number of spaces per indent level (default 2)
+ *  - stringLengthLimit: length threshold for truncating long strings (default 150)
+ *  - arrayLengthLimit: number of array items to display before truncation (default 5)
+ *  - objectKeysLimit: number of object properties to display before truncation (default 5)
+ *  - showTimestamp: include timestamp prefix in formatted output (default false)
+ *
+ * Internally, PrettyFormatter applies semantic regex-based highlights and uses chalk
+ * for coloring and boxen for boxing when enabled.
+ */
 export class PrettyFormatter implements Formatter {
   private readonly options: {
     useColors: boolean;
@@ -115,7 +162,7 @@ export class PrettyFormatter implements Formatter {
   constructor(options: Partial<PrettyFormatter['options']> = {}) {
     this.options = {
       useColors: options.useColors ?? true,
-      useBoxes: options.useBoxes ?? false,
+      useBoxes: options.useBoxes ?? false, // Disabled by default
       maxDepth: options.maxDepth ?? 3, // Increased default depth slightly
       indent: options.indent ?? 2,
       stringLengthLimit: options.stringLengthLimit ?? 150, // Increased limit slightly
@@ -265,21 +312,15 @@ export class PrettyFormatter implements Formatter {
   format(entry: LogEntry): string {
     const { level, message, meta, timestamp } = entry;
     const style = PrettyFormatter.LEVEL_STYLES[level] || PrettyFormatter.LEVEL_STYLES.default;
-    // When using boxes, do not color the inner message at all
     let formattedMessage = typeof message === 'string' ? message : JSON.stringify(message);
-    let formattedMeta = '';
+    let metaBlock = '';
     if (meta && Object.keys(meta).length > 0 && meta !== message) {
-      formattedMeta = typeof meta === 'string' ? meta : JSON.stringify(meta);
-    }
-    let combinedOutput = formattedMessage;
-    if (formattedMeta && formattedMeta !== '{}') {
-      combinedOutput += `\nMeta: ${formattedMeta}`;
+      metaBlock = '\nMeta: \n' + JSON.stringify(meta, null, 4);
     }
     const timestampStr = this.options.showTimestamp ? `[${timestamp.toISOString()}] ` : '';
     const levelStr = `${style.icon} ${level.toUpperCase()} `;
-    let finalMessage = `${timestampStr}${levelStr}${combinedOutput}`;
+    let finalMessage = `${timestampStr}${levelStr}${formattedMessage}${metaBlock}`;
     if (this.options.useBoxes && this.options.useColors) {
-      // Only color the box, not the content
       return boxen(finalMessage, {
         padding: 1,
         margin: { top: 0, bottom: 1, left: 0, right: 0 },
@@ -381,6 +422,22 @@ export interface LoggerOptions {
   exitOnError?: boolean;
 }
 
+/**
+ * Logger provides structured, level-based logging with support for multiple transports,
+ * standard and custom log levels, and scoped child loggers.
+ *
+ * @remarks
+ * - Methods for each log level (error, warn, info, debug, success, etc.) are dynamically defined.
+ * - Child loggers inherit configuration and add metadata: `const child = logger.child({module: 'auth'});`
+ *
+ * @example
+ * ```ts
+ * const log = new Logger({ level: 'debug' });
+ * log.info('Server started', { port: 3000 });
+ * const authLog = log.child({ module: 'auth' });
+ * authLog.error('Invalid credentials', { userId });
+ * ```
+ */
 export class Logger {
   private options: Required<Omit<LoggerOptions, 'levels'>>; // Omit levels as it's merged into this.levels
   private levels: Record<string, number>;
@@ -399,6 +456,41 @@ export class Logger {
   success!: (message: string | object, meta?: Record<string, any>) => void; // Include success if it's commonly used
   // --- End TypeScript Fix ---
 
+  /**
+   * Creates a new Logger instance with configurable levels, transports, and metadata.
+   *
+   * @param options - Configuration options for this logger.
+   * @param options.level - Minimum level to log (default: 'info'). Only messages at this level or more severe are emitted.
+   * @param options.levels - Optional map of custom level names to numeric severity. Merged with standard levels.
+   * @param options.transports - Array of Transport instances (console, file, etc.). Defaults to a console transport using PrettyFormatter.
+   * @param options.metadata - Global metadata injected into every log entry.
+   * @param options.exitOnError - If true, process.exit() will be called after an 'error' level log.
+   *
+   * @remarks
+   * Standard log levels (severity 0–6): error, warn, info, http, verbose, debug, silly.
+   * The 'success' level is provided as an alias for info.
+   * Custom levels defined via `options.levels` override or extend these defaults.
+   * Transports can specify their own level threshold to filter messages independently.
+   *
+   * @example
+   * // Default logger (console output only)
+   * const log = new Logger();
+   * log.info('Server started', { port: 3000 });
+   *
+   * @example
+   * // Custom transports and metadata
+   * import { FileTransport } from './utils/logger';
+   * const log = new Logger({
+   *   level: 'debug',
+   *   levels: { critical: 0 },
+   *   transports: [
+   *     new ConsoleTransport({ level: 'warn' }),
+   *     new FileTransport({ filename: 'app.log', level: 'debug' })
+   *   ],
+   *   metadata: { service: 'user-service' }
+   * });
+   * log.critical('Database unreachable');
+   */
   constructor(options: LoggerOptions = {}) {
     // Define levels, merging standard and custom. Ensure 'success' is present if used.
     this.levels = {
@@ -410,6 +502,10 @@ export class Logger {
     const defaultTransports = options.transports ?? [
       new ConsoleTransport({
         formatter: new PrettyFormatter({ useColors: true }),
+      }),
+      new FileTransport({
+        filename: path.join(process.cwd(), process.env.LOG_DIR || 'logs', '/app.log'),
+        formatter: new JsonFormatter(),
       }),
     ];
 
@@ -432,6 +528,33 @@ export class Logger {
     });
   }
 
+  /**
+   * Emits a log entry at the given level, subject to logger and transport thresholds.
+   *
+   * @param level - The log level name (e.g. 'error', 'warn', 'info', 'debug', etc.).
+   *   Must match a configured level; unknown levels are ignored.
+   * @param message - The main log content; can be a string or an object (auto-stringified).
+   * @param meta - Optional, per-entry metadata to merge with global logger metadata.
+   *
+   * @remarks
+   * - The entry is only output if `level` is at or above the logger's own `options.level`.
+   * - Each Transport may further filter by its own `transport.level` setting.
+   * - The final output is formatted via the Transport's `formatter` (e.g. JSON or pretty text).
+   * - Dynamic shorthand methods (`logger.info()`, `logger.error()`, etc.) delegate here.
+   *
+   * @example
+   * // Direct use
+   * logger.log('info', 'Server started', { port: 8080 });
+   *
+   * @example
+   * // Using shorthand dynamic methods
+   * logger.info('User login', { userId: 'abc123' });
+   *
+   * @example
+   * // Logging an Error object
+   * const error = new Error('Failed DB query');
+   * logger.error('Database error', { error });
+   */
   log(level: string, message: string | object, meta?: Record<string, any>): void {
     const levelValue = this.levels[level as string] ?? -1;
     const configuredLevelValue = this.levels[this.options.level as string] ?? this.levels.info;
@@ -471,6 +594,12 @@ export class Logger {
     });
   }
 
+  /**
+   * Creates a child logger that inherits all settings and merges additional metadata.
+   *
+   * @param metadata - Metadata to merge into child logger entries
+   * @returns A new Logger instance with inherited configuration
+   */
   child(metadata: Record<string, any>): Logger {
     // Create a new instance, inheriting options but merging metadata
     const childOptions: LoggerOptions = {
@@ -483,6 +612,9 @@ export class Logger {
     return new Logger(childOptions);
   }
 
+  /**
+   * Flushes and closes all transports, ensuring streams are ended gracefully.
+   */
   close(): void {
     // Use Promise.all to wait for all streams to close
     Promise.all(
@@ -515,7 +647,7 @@ const defaultLogger = new Logger({
   transports: [
     new ConsoleTransport({
       formatter: new PrettyFormatter({
-        useColors: true,
+        useColors: false,
         useBoxes: true, // Keep boxes for default console
         showTimestamp: false,
       }),
@@ -527,6 +659,11 @@ const defaultLogger = new Logger({
         useColors: false,
         useBoxes: false, // No boxes for file transport
         showTimestamp: true,
+        maxDepth: 4,
+        stringLengthLimit: 300,
+        arrayLengthLimit: 15,
+        objectKeysLimit: 10,
+        indent: 2,
       }), // Default file transport to JSON
       level: (process.env.FILE_LOG_LEVEL as LogLevel) || undefined,
     }),

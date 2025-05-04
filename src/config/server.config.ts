@@ -1,9 +1,14 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+/**
+ * src/config/server.config.ts
+ * This file contains the server configuration settings.
+ */
 import dotenv from 'dotenv';
 import path, { join } from 'path';
-import { Logger } from '../utils/logger';
+import logger from '../utils/logger';
+import process from 'process';
 
-// Instantiate logger using Logger class (default export mock was missing methods in tests)
-const logger = new Logger();
+// Using default logger instance imported above
 
 // Load environment variables from .env file
 dotenv.config();
@@ -18,10 +23,10 @@ export const config = {
     : join(process.cwd(), 'media'),
   headerTimeoutMs: process.env.HEADER_TIMEOUT_MS
     ? Math.max(parseInt(process.env.HEADER_TIMEOUT_MS, 10), 0)
-    : 5000,
+    : 10000,
   bodyTimeoutMs: process.env.BODY_TIMEOUT_MS
     ? Math.max(parseInt(process.env.BODY_TIMEOUT_MS, 10), 0)
-    : 10000,
+    : 15000,
   /**
    * Path to the SQLite database file. Will be created if missing.
    */
@@ -33,6 +38,7 @@ export const config = {
     metrics: true,
     fileHosting: true,
     fileStreaming: true,
+    embeddingService: true,
     // Add more features here as needed
   },
   /**
@@ -55,27 +61,44 @@ export const config = {
     pythonLogPath: process.env.PYTHON_LOG_PATH, // Optional: Path for python script's own log, defaults to alongside script if not set
     // Model/Processing Args passed to Python script
     modelArgs: [
+      '--enable_augmentation',
+      '--log',
+      '--debug',
+      '-n',
+      '30',
       // Example: '--model', 'openai/clip-vit-base-patch32' is now expected to be set here
     ],
     defaultModel: 'openai/clip-vit-base-patch32', // Default model if not in args
-    defaultNumFrames: 20,
+    defaultNumFrames: 15,
     enableAugmentation: false, // Default augmentation flag for python script
     // Service behavior
-    inactivityTimeoutMs: 5 * 60 * 1000,
-    scriptTimeoutMs: 15 * 60 * 1000,
-    debug: false,
-    log: false,
+    inactivityTimeoutMs: 10 * 60 * 1000,
+    scriptTimeoutMs: 30 * 60 * 1000,
+    debug: true,
+    log: true,
+    inputDir: process.env.EMBED_DIR,
   },
   testMode: true, // Set to true for testing purposes
 };
 
-// Log configuration only when not running tests
-if (!config.testMode) {
+// Log configuration
+if (config.testMode) {
   logger.info(`Server configuration:`);
   logger.info(`- Port: ${config.port}`);
   logger.info(`- Public Directory: ${config.publicDir}`);
   logger.info(`- Media Directory: ${config.mediaDir}`);
   logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
   logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
-  logger.info(`- Database Path: ${config.dbPath}`);
+  logger.info(`- SQLite DB path: ${config.dbPath}`);
+  logger.info(`- Active Features:`, {
+    features: Object.entries(config.features)
+      .filter(([_, enabled]) => enabled)
+      .map(([feature]) => feature),
+  });
+  logger.info(`- Log Level: ${config.logging.level}`);
+  logger.info(`- Python Executable: ${config.embedding.pythonExecutable}`);
+  logger.info(`- Python Script Path: ${config.embedding.pythonScriptPath}`);
+  logger.info(`- Embedding Inactivity Timeout: ${config.embedding.inactivityTimeoutMs}ms`);
+  logger.info(`- Embedding Script Timeout: ${config.embedding.scriptTimeoutMs}ms`);
+  logger.info(`- Active Model Args: ${config.embedding.modelArgs.join(', ')}`);
 }
