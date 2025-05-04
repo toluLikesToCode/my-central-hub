@@ -7,8 +7,7 @@ import dotenv from 'dotenv';
 import path, { join } from 'path';
 import logger from '../utils/logger';
 import process from 'process';
-
-// Using default logger instance imported above
+import { DateTimeConfig } from '../utils/dateFormatter';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -50,6 +49,12 @@ export const config = {
     logDir: process.env.LOG_DIR || join(process.cwd(), 'logs'), // Centralized log directory
   },
   /**
+   * Date and time formatting configuration
+   * Now using DateTimeConfig imported from dateFormatter.ts
+   */
+  dateTime: DateTimeConfig,
+
+  /**
    * Embedder configuration
    */
   embedding: {
@@ -81,24 +86,32 @@ export const config = {
   testMode: true, // Set to true for testing purposes
 };
 
-// Log configuration
-if (config.testMode) {
-  logger.info(`Server configuration:`);
-  logger.info(`- Port: ${config.port}`);
-  logger.info(`- Public Directory: ${config.publicDir}`);
-  logger.info(`- Media Directory: ${config.mediaDir}`);
-  logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
-  logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
-  logger.info(`- SQLite DB path: ${config.dbPath}`);
-  logger.info(`- Active Features:`, {
-    features: Object.entries(config.features)
-      .filter(([_, enabled]) => enabled)
-      .map(([feature]) => feature),
-  });
-  logger.info(`- Log Level: ${config.logging.level}`);
-  logger.info(`- Python Executable: ${config.embedding.pythonExecutable}`);
-  logger.info(`- Python Script Path: ${config.embedding.pythonScriptPath}`);
-  logger.info(`- Embedding Inactivity Timeout: ${config.embedding.inactivityTimeoutMs}ms`);
-  logger.info(`- Embedding Script Timeout: ${config.embedding.scriptTimeoutMs}ms`);
-  logger.info(`- Active Model Args: ${config.embedding.modelArgs.join(', ')}`);
+// Only log configuration if logger is defined and we're in test mode
+if (logger && config.testMode) {
+  // Wrap in try/catch to avoid potential startup issues
+  try {
+    logger.info(`Server configuration:`);
+    logger.info(`- Port: ${config.port}`);
+    logger.info(`- Public Directory: ${config.publicDir}`);
+    logger.info(`- Media Directory: ${config.mediaDir}`);
+    logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
+    logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
+    logger.info(`- SQLite DB path: ${config.dbPath}`);
+    logger.info(`- Active Features:`, {
+      features: Object.entries(config.features)
+        .filter(([_, enabled]) => enabled)
+        .map(([feature]) => feature),
+    });
+    logger.info(`- Log Level: ${config.logging.level}`);
+    logger.info(`- Python Executable: ${config.embedding.pythonExecutable}`);
+    logger.info(`- Python Script Path: ${config.embedding.pythonScriptPath}`);
+    logger.info(`- Embedding Inactivity Timeout: ${config.embedding.inactivityTimeoutMs}ms`);
+    logger.info(`- Embedding Script Timeout: ${config.embedding.scriptTimeoutMs}ms`);
+    logger.info(`- Active Model Args: ${config.embedding.modelArgs.join(', ')}`);
+    logger.info(`- Timezone: ${config.dateTime.timezone}`);
+    logger.info(`- Date Format: ${config.dateTime.format}`);
+  } catch (error) {
+    // In case of any logging error during startup, log to console instead
+    console.warn('Error logging configuration:', error);
+  }
 }

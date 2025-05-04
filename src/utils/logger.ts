@@ -9,6 +9,7 @@ import path from 'path';
 import chalk from 'chalk'; // Dependency for PrettyFormatter
 import boxen from 'boxen'; // Dependency for PrettyFormatter
 import { Writable } from 'stream';
+import { formatDate } from './dateFormatter'; // Import our new date formatter
 
 // --- Configuration ---
 
@@ -55,7 +56,7 @@ export class JsonFormatter implements Formatter {
     const logObject = {
       level: entry.level,
       message: entry.message,
-      timestamp: entry.timestamp.toISOString(),
+      timestamp: formatDate(entry.timestamp), // Use our new human-readable format
     };
     let metaBlock = '';
     if (entry.meta && Object.keys(entry.meta).length > 0) {
@@ -76,7 +77,7 @@ export class JsonFormatter implements Formatter {
           message: `[Unserializable Object: ${
             error instanceof Error ? error.message : String(error)
           }]`,
-          timestamp: entry.timestamp.toISOString(),
+          timestamp: formatDate(entry.timestamp), // Use our new human-readable format
         }) + metaBlock
       );
     }
@@ -250,7 +251,7 @@ export class PrettyFormatter implements Formatter {
     if (typeof value === 'function')
       return colorize ? chalk.blueBright('[Function]') : '[Function]';
     if (value instanceof Date)
-      return colorize ? chalk.greenBright(value.toISOString()) : value.toISOString();
+      return colorize ? chalk.greenBright(formatDate(value)) : formatDate(value); // Use our new human-readable format instead of ISO
     if (value instanceof Error) {
       const stack = value.stack ? `\n${value.stack.split('\n').slice(1).join('\n')}` : ''; // Show stack excluding first line
       const formattedError = `${value.name}: ${value.message}${stack}`;
@@ -317,7 +318,7 @@ export class PrettyFormatter implements Formatter {
     if (meta && Object.keys(meta).length > 0 && meta !== message) {
       metaBlock = '\nMeta: \n' + JSON.stringify(meta, null, 4);
     }
-    const timestampStr = this.options.showTimestamp ? `[${timestamp.toISOString()}] ` : '';
+    const timestampStr = this.options.showTimestamp ? `[${formatDate(timestamp)}] ` : ''; // Use our new human-readable format
     const levelStr = `${style.icon} ${level.toUpperCase()} `;
     let finalMessage = `${timestampStr}${levelStr}${formattedMessage}${metaBlock}`;
     if (this.options.useBoxes && this.options.useColors) {

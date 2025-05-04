@@ -3,6 +3,47 @@
  * This file contains the interface definitions for HTTP requests.
  */
 
+export interface SecurityContext {
+  /**
+   * Indicates if the request has been authenticated
+   */
+  authenticated?: boolean;
+
+  /**
+   * Client IP address for security logging and rate limiting
+   */
+  clientIp?: string;
+
+  /**
+   * Security validation timestamp
+   */
+  validatedAt?: Date;
+
+  /**
+   * Request origin for CORS validation
+   */
+  origin?: string;
+
+  /**
+   * Authentication token or session ID if available
+   */
+  token?: string;
+
+  /**
+   * Custom security flags and values
+   */
+  flags?: Record<string, boolean>;
+
+  /**
+   * Rate limiting data
+   */
+  rateLimit?: {
+    remaining: number;
+    limit: number;
+    reset: number;
+  };
+}
+
 export interface IncomingRequest {
   url: URL; // canonical URL (always present)
   path: string; // == url.pathname
@@ -16,4 +57,25 @@ export interface IncomingRequest {
   raw: string;
   ctx?: Record<string, unknown>;
   invalid?: boolean;
+
+  /**
+   * Security context for tracking authentication status,
+   * rate limiting, and other security features
+   */
+  security?: SecurityContext;
+
+  /**
+   * Request validation errors
+   */
+  validationErrors?: string[];
+
+  /**
+   * Request timing information (for monitoring/performance tracking)
+   */
+  timing?: {
+    startedAt: number;
+    parsedAt?: number;
+    routedAt?: number;
+    respondedAt?: number;
+  };
 }

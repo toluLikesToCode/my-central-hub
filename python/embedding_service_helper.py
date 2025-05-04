@@ -420,7 +420,7 @@ class VideoProcessor:
                 len(candidate_times)
                 < self.num_frames  # fewer scene midpoints than needed frames
                 or len(scene_list) < (self.num_frames // 2)  # too few distinct scenes
-                or self.duration
+                or float(self.duration)
                 < (self.num_frames * 2)  # video too short for advanced sampling
             ):
                 self._log_warning(
