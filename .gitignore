@@ -52,3 +52,7 @@ data/
 PROJECT_CHECKLIST.md
 compress-central-hub.sh
 my-central-hub.xml
+Makefile
+my-central-hub.xml
+data/metrics.db
+.gitignore

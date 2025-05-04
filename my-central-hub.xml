@@ -1,5 +1,5 @@
 This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
-The content has been processed where empty lines have been removed.
+The content has been processed where comments have been removed, empty lines have been removed.
 
 <file_summary>
 This section contains a summary of this file.
@@ -36,6 +36,7 @@ The content is organized as follows:
 - Files matching these patterns are excluded: **/*.log, **/*.json, **/.gitignore, node_modules/**, thumbnails/**, **/dist/**, **/build/**
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
+- Code comments have been removed from supported file types
 - Empty lines have been removed from all files
 - Files are sorted by Git change count (files with more changes are at the bottom)
 </notes>
@@ -47,15 +48,22 @@ The content is organized as follows:
 </file_summary>
 
 <directory_structure>
+__mocks__/
+  logger.ts
 config/
   server.config.ts
 core/
+  httpParser.test.ts
   httpParser.ts
+  parser.test.ts
   parser.ts
+  router.test.ts
   router.ts
+  server.test.ts
   server.ts
 entities/
   http.ts
+  sendResponse.test.ts
   sendResponse.ts
 modules/
   app-metrics/
@@ -64,16 +72,19 @@ modules/
       metricsController.ts
       metricsService.ts
     index.ts
+    metricsController.test.ts
     README.md
   embeddings/
     embedding.service.ts
     embeddings.handler.ts
   file-hosting/
     fileHostingController.ts
+    fileHostingService.test.ts
     fileHostingService.ts
     index.ts
   file-streaming/
     fileService.ts
+    fileStreamingController.test.ts
     fileStreamingController.ts
     index.ts
 routes/
@@ -84,13 +95,20 @@ routes/
   metrics.routes.ts
   stream.routes.ts
 utils/
+  helpers.test.ts
   helpers.ts
   httpHelpers.ts
   logger.ts
   mimeTypes.ts
 embedding_service_helper.py
+fileHosting.stress.test.ts
+fileStreaming.stress.test.ts
+global.d.ts
 main.ts
 requirements.txt
+router.stress.test.ts
+server.stress.test.ts
+setupJest.ts
 </directory_structure>
 
 <files>
@@ -100,9 +118,8 @@ This section contains the contents of the repository's files.
 import dotenv from 'dotenv';
 import path, { join } from 'path';
 import { Logger } from '../utils/logger';
-// Instantiate logger using Logger class (default export mock was missing methods in tests)
+import { features } from 'process';
 const logger = new Logger();
-// Load environment variables from .env file
 dotenv.config();
 export const config = {
   port: process.env.PORT ? parseInt(process.env.PORT, 10) : 8080,
@@ -118,54 +135,41 @@ export const config = {
   bodyTimeoutMs: process.env.BODY_TIMEOUT_MS
     ? Math.max(parseInt(process.env.BODY_TIMEOUT_MS, 10), 0)
     : 10000,
-  /**
-   * Path to the SQLite database file. Will be created if missing.
-   */
   dbPath: process.env.DB_PATH ? process.env.DB_PATH : join(process.cwd(), 'data', 'metrics.db'),
-  /**
-   * Feature toggles for modularity and configurability
-   */
   features: {
     metrics: true,
     fileHosting: true,
     fileStreaming: true,
-    // Add more features here as needed
+    embeddingService: true,
   },
-  /**
-   * Logging configuration
-   */
   logging: {
-    level: process.env.LOG_LEVEL || 'info', // Default log level
-    format: process.env.LOG_FORMAT || 'json', // Default log format
-    logDir: process.env.LOG_DIR || join(process.cwd(), 'logs'), // Centralized log directory
+    level: process.env.LOG_LEVEL || 'info',
+    format: process.env.LOG_FORMAT || 'json',
+    logDir: process.env.LOG_DIR || join(process.cwd(), 'logs'),
   },
-  /**
-   * Embedder configuration
-   */
   embedding: {
-    // Python process settings
     pythonExecutable: process.env.PYTHON_EXECUTABLE || 'python3',
     pythonScriptPath:
       process.env.PYTHON_SCRIPT_PATH ||
-      path.resolve(process.cwd(), 'python', 'embedding_service_helper.py'), // Path relative to project root
-    pythonLogPath: process.env.PYTHON_LOG_PATH, // Optional: Path for python script's own log, defaults to alongside script if not set
-    // Model/Processing Args passed to Python script
+      path.resolve(process.cwd(), 'python', 'embedding_service_helper.py'),
+    pythonLogPath: process.env.PYTHON_LOG_PATH,
     modelArgs: [
-      // Example: '--model', 'openai/clip-vit-base-patch32' is now expected to be set here
+      '--enable_augmentation',
+      '--log',
+      '--debug',
     ],
-    defaultModel: 'openai/clip-vit-base-patch32', // Default model if not in args
-    defaultNumFrames: 20,
-    enableAugmentation: false, // Default augmentation flag for python script
-    // Service behavior
+    defaultModel: 'openai/clip-vit-base-patch32',
+    defaultNumFrames: 15,
+    enableAugmentation: false,
     inactivityTimeoutMs: 5 * 60 * 1000,
     scriptTimeoutMs: 15 * 60 * 1000,
-    debug: false,
-    log: false,
+    debug: true,
+    log: true,
+    inputDir: process.env.EMBED_DIR,
   },
-  testMode: true, // Set to true for testing purposes
+  testMode: true,
 };
-// Log configuration only when not running tests
-if (!config.testMode) {
+if (config.testMode) {
   logger.info(`Server configuration:`);
   logger.info(`- Port: ${config.port}`);
   logger.info(`- Public Directory: ${config.publicDir}`);
@@ -173,6 +177,17 @@ if (!config.testMode) {
   logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
   logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
   logger.info(`- Database Path: ${config.dbPath}`);
+  logger.info(`- Active Features:`, {
+    features: Object.entries(config.features)
+      .filter(([_, enabled]) => enabled)
+      .map(([feature]) => feature),
+  });
+  logger.info(`- Log Level: ${config.logging.level}`);
+  logger.info(`- Python Executable: ${config.embedding.pythonExecutable}`);
+  logger.info(`- Python Script Path: ${config.embedding.pythonScriptPath}`);
+  logger.info(`- Embedding Inactivity Timeout: ${config.embedding.inactivityTimeoutMs}ms`);
+  logger.info(`- Embedding Script Timeout: ${config.embedding.scriptTimeoutMs}ms`);
+  logger.info(`- Active Model Args: ${config.embedding.modelArgs.join(', ')}`);
 }
 </file>
 
@@ -191,9 +206,9 @@ enum ParserState {
   ERROR,
 }
 const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
-const MAX_HEADER_BYTES = 8192; // 8KB
-const MAX_HEADERS = 100; // Maximum number of headers allowed
-const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_HEADER_BYTES = 8192;
+const MAX_HEADERS = 100;
+const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const CRLF = Buffer.from('\r\n');
 export class HttpRequestParser {
   protected buffer = Buffer.alloc(0);
@@ -249,9 +264,7 @@ export class HttpRequestParser {
           }
           this.state = ParserState.HEADERS;
         }
-        // HEADERS
         if (this.state === ParserState.HEADERS) {
-          // find end-of-headers or handle empty header block
           const idx = this.buffer.indexOf('\r\n\r\n');
           let headersRaw = '';
           if (idx === -1) {
@@ -278,7 +291,6 @@ export class HttpRequestParser {
               if (this.lastHeaderKey) {
                 const prev = this.headers[this.lastHeaderKey];
                 this.headers[this.lastHeaderKey] = prev + ' ' + line.trim();
-                // update map too
                 this.headersMap.set(
                   this.lastHeaderKey,
                   (this.headersMap.get(this.lastHeaderKey) || []).concat(
@@ -307,11 +319,9 @@ export class HttpRequestParser {
               return this._errorResponse();
             }
           }
-          // Short-circuit on parse errors
           if (this.invalid) {
             return this._errorResponse();
           }
-          // enforce Host header for HTTP/1.1
           if (this.httpVersion === 'HTTP/1.1' && !this.headers['host']) {
             this._setError('Missing Host header');
             return this._errorResponse();
@@ -334,7 +344,6 @@ export class HttpRequestParser {
             this.state = ParserState.DONE;
           }
         }
-        // BODY
         if (this.state === ParserState.BODY) {
           this.contentLength = parseInt(this.headers['content-length'], 10);
           if (isNaN(this.contentLength) || this.contentLength < 0) {
@@ -352,7 +361,6 @@ export class HttpRequestParser {
           this.remainingBody = 0;
           this.state = ParserState.DONE;
         }
-        // CHUNK_SIZE
         if (this.state === ParserState.CHUNK_SIZE) {
           const idx = this.buffer.indexOf('\r\n');
           if (idx === -1) return null;
@@ -370,7 +378,6 @@ export class HttpRequestParser {
             this.state = ParserState.CHUNK_BODY;
           }
         }
-        // CHUNK_BODY
         if (this.state === ParserState.CHUNK_BODY) {
           if (this.remainingBody > MAX_BODY_BYTES) {
             this._setError('Chunk body too large');
@@ -388,7 +395,6 @@ export class HttpRequestParser {
           this.buffer = this.buffer.subarray(2);
           this.state = ParserState.CHUNK_SIZE;
         }
-        // CHUNK_TRAILER
         if (this.state === ParserState.CHUNK_TRAILER) {
           if (this.buffer.length === 0 || this.buffer.equals(CRLF)) {
             this.buffer = Buffer.alloc(0);
@@ -400,9 +406,7 @@ export class HttpRequestParser {
           this.buffer = this.buffer.subarray(idx + 4);
           this.state = ParserState.DONE;
         }
-        // DONE
         if (this.state === ParserState.DONE) {
-          // capture leftover before reset (for pipelining)
           const leftover = this.buffer;
           const finalBody = this.bodyChunks.length ? Buffer.concat(this.bodyChunks) : undefined;
           const request = {
@@ -450,7 +454,7 @@ export class HttpRequestParser {
       headers: {},
       headersMap: new Map(),
       httpVersion: '',
-      url: new URL('http://invalid'),
+      url: new URL('http:
       body: undefined,
       raw: '',
       ctx: {},
@@ -465,7 +469,7 @@ export class HttpRequestParser {
     this.bodyChunks = [];
     this.method = '';
     this.httpVersion = '';
-    this.url = new URL('http://placeholder');
+    this.url = new URL('http:
     this.contentLength = 0;
     this.remainingBody = 0;
     this.isChunked = false;
@@ -480,7 +484,6 @@ import { IncomingRequest } from '../entities/http';
 import { URL } from 'url';
 const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'] as const;
 const MAX_HEADERS = 1000;
-// helper for duplicate headers
 function addHeader(map: Map<string, string[]>, key: string, value: string) {
   const k = key.toLowerCase();
   const list = map.get(k) ?? [];
@@ -506,7 +509,6 @@ export const parser = {
     if (raw.length === 0) return earlyReturn();
     const [head = '', bodyString = ''] = raw.split('\r\n\r\n');
     const lines = head.split('\r\n');
-    /* -------- request-line split -------- */
     const [requestLine, ...headerLines] = lines;
     const parts = requestLine.split(' ');
     if (parts.length < 3) return earlyReturn();
@@ -516,13 +518,11 @@ export const parser = {
       !ALLOWED_METHODS.includes(method as (typeof ALLOWED_METHODS)[number]) ||
       (!fullPath.startsWith('/') && !isOptionsStar) ||
       !httpVersion.startsWith('HTTP/');
-    /* -------- URL + query -------- */
     const url = isOptionsStar
       ? new URL('http://placeholder')
       : new URL(fullPath, 'http://placeholder');
     const query: Record<string, string> = {};
     url.searchParams.forEach((v, k) => (query[k] = v));
-    /* -------- headers -------- */
     const headers: Record<string, string> = {};
     const headersMap = new Map<string, string[]>();
     if (headerLines.length > MAX_HEADERS) invalid = true;
@@ -556,7 +556,6 @@ export const parser = {
 </file>
 
 <file path="core/router.ts">
-// src/core/router.ts
 import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
 import { sendResponse } from '../entities/sendResponse';
@@ -581,7 +580,6 @@ const logger = new Logger({
   level: 'info',
   exitOnError: false,
 });
-/* ───── Types ─────────────────────────────────────────────────────────── */
 export type Handler = (req: IncomingRequest, sock: Socket) => Promise<void> | void;
 export type Middleware = (
   req: IncomingRequest,
@@ -589,20 +587,17 @@ export type Middleware = (
   next: () => Promise<void>,
 ) => Promise<void> | void;
 interface Route {
-  method: string; // 'GET' | 'POST' | 'ANY'
-  regex: RegExp; // compiled path matcher
-  keys: string[]; // param names (for :id stuff)
+  method: string;
+  regex: RegExp;
+  keys: string[];
   handler: Handler;
 }
-/* ───── Router implementation ─────────────────────────────────────────── */
 class Router {
   private middlewares: Middleware[] = [];
   private routes: Route[] = [];
-  /* ---------- Middleware ---------- */
   use(mw: Middleware) {
     this.middlewares.push(mw);
   }
-  /* ---------- Route registration helpers ---------- */
   add(method: string, path: string, handler: Handler) {
     const { regex, keys } = compilePath(path);
     this.routes.push({ method: method.toUpperCase(), regex, keys, handler });
@@ -622,7 +617,6 @@ class Router {
   any(path: string, h: Handler) {
     this.add('ANY', path, h);
   }
-  /* ---------- Main entry ---------- */
   async handle(req: IncomingRequest, sock: Socket): Promise<void> {
     if (req.method === 'OPTIONS') {
       sendResponse(
@@ -648,24 +642,18 @@ class Router {
       return;
     }
     logger.info(`router saw ${req.method} ${req.path}`);
-    // 1. run middleware chain
     let i = 0;
-    // Use an explicit stack to unwind after handler
     const run = async (): Promise<void> => {
       if (i < this.middlewares.length) {
         const idx = i++;
         await this.middlewares[idx](req, sock, run);
         return;
       }
-      // Only after all middleware, run the handler
-      // 2. route lookup
       const matching = this.routes.filter((r) => r.regex.test(req.path));
       const route =
         matching.find((r) => r.method === req.method) ?? matching.find((r) => r.method === 'ANY');
       if (!route) {
-        // Distinguish 404 vs 405
         if (matching.length) {
-          // Only include allowed methods that are not 'ANY'
           const allowed = matching
             .map((r) => r.method)
             .filter((m) => m !== 'ANY')
@@ -697,14 +685,12 @@ class Router {
         }
         return;
       }
-      // 3. pull params (/:id etc.) → req.ctx.params
       const match = route.regex.exec(req.path)!;
       const params: Record<string, string> = {};
       route.keys.forEach((k, idx) => {
         params[k] = decodeURIComponent(match[idx + 1]);
       });
       (req.ctx ??= {}).params = params;
-      // 4. invoke handler
       try {
         await route.handler(req, sock);
       } catch (err) {
@@ -724,7 +710,6 @@ class Router {
     try {
       await run();
     } catch (err) {
-      // Global error handler for middleware
       if (req.path.startsWith('/api/')) {
         sendResponse(
           sock,
@@ -740,28 +725,6 @@ class Router {
     }
   }
 }
-/* ───── Path pattern compiler ───────────────────────────────────────────
-   /files/:name  ->  ^/files/([^/]+)$           keys=['name']
-   /api/*        ->  ^/api/(.*)$                keys=['*']
------------------------------------------------------------------------- */
-function compilePath(pattern: string): { regex: RegExp; keys: string[] } {
-  const keys: string[] = [];
-  const regexSrc = pattern
-    .replace(/\/:(\w+)/g, (_, k) => {
-      keys.push(k);
-      return '/([^/]+)';
-    })
-    .replace(/\*/g, () => {
-      keys.push('*');
-      return '(.*)';
-    });
-  return { regex: new RegExp(`^${regexSrc}$`), keys };
-}
-/* ───── Exports ───────────────────────────────────────────────────────── */
-export function createRouter(): Router {
-  return new Router();
-}
-export default createRouter();
 </file>
 
 <file path="core/server.ts">
@@ -770,7 +733,7 @@ import { HttpRequestParser } from './httpParser';
 import router from './router';
 import logger from '../utils/logger';
 import { sendResponse } from '../entities/sendResponse';
-import { config } from '../config/server.config'; // Assuming config is imported from a config file
+import { config } from '../config/server.config';
 export class HttpServer {
   private server = createServer();
   private readonly connections = new Set<Socket>();
@@ -786,7 +749,6 @@ export class HttpServer {
     this.server.on('connection', (socket: Socket) => {
       this.connections.add(socket);
       const parser = new HttpRequestParser();
-      // --- ⏰ Idle Timeout (Protection) ---
       const HEADER_TIMEOUT_MS = config.headerTimeoutMs;
       const BODY_TIMEOUT_MS = config.bodyTimeoutMs;
       let headerTimer: NodeJS.Timeout | undefined;
@@ -805,7 +767,7 @@ export class HttpServer {
           socket.destroy();
         }, BODY_TIMEOUT_MS);
       };
-      refreshTimeout(); // start immediately
+      refreshTimeout();
       socket.once('close', () => {
         this.connections.delete(socket);
         if (headerTimer) clearTimeout(headerTimer);
@@ -815,24 +777,19 @@ export class HttpServer {
       socket.on('data', async (chunk: Buffer) => {
         refreshTimeout();
         try {
-          // First feed yields the first complete request (or null)
           let req = parser.feed(chunk);
-          if (!req) return; // need more bytes
+          if (!req) return;
           clearTimeout(headerTimer);
-          // Handle all pipelined requests in buffer
           do {
-            // If this is a body-bearing method, start body timeout
             if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
               refreshBodyTimeout();
             }
             await this.router.handle(req, socket);
             clearTimeout(bodyTimer);
-            // now pull the next request from any leftover bytes
             req = parser.feed(Buffer.alloc(0));
           } while (req);
           const pending = parser.getPendingBytes();
           if (pending > 0) {
-            // more pipelined data waiting—keep alive
             refreshTimeout();
           } else {
             socket.end();
@@ -848,18 +805,8 @@ export class HttpServer {
     });
     this.server.on('error', (err: NodeJS.ErrnoException) => {
       logger.error(`Server error:`, [err, err.code, err.message]);
-      // if (err.code === 'EADDRINUSE') {
-      //   this.port += 1; // try the next port
-      //   logger.warn(`Port busy, retrying on ${this.port}`);
-      //   this.server.listen(this.port);
-      // } else {
-      //   logger.error(`Server error: ${err.message}`);
-      // }
     });
   }
-  /**
-   * Gracefully shuts down the server and every open TCP socket.
-   */
   public async stop(): Promise<void> {
     logger.info('🛑  Shutting down HTTP server');
     for (const sock of this.connections) sock.destroy();
@@ -867,9 +814,6 @@ export class HttpServer {
       this.server.close((err) => (err ? reject(err) : resolve())),
     );
   }
-  /**
-   * Public method to destroy all active sockets.
-   */
   public destroySockets(): void {
     this.connections.forEach((socket) => socket.destroy());
   }
@@ -877,7 +821,6 @@ export class HttpServer {
     this.server.listen(this.port, () => {
       logger.info(`🚀 Server running at port ${this.port}`);
     });
-    // graceful shutdown on Ctrl-C / kill
     ['SIGINT', 'SIGTERM'].forEach((sig) =>
       process.on(sig as NodeJS.Signals, () => {
         this.stop()
@@ -885,7 +828,6 @@ export class HttpServer {
           .catch(() => process.exit(1));
       }),
     );
-    // src/core/server.ts  – inside start() after existing SIGINT/SIGTERM hooks
     ['SIGUSR2'].forEach((sig) =>
       process.once(sig as NodeJS.Signals, () => {
         this.stop().then(() => process.kill(process.pid, sig));
@@ -897,10 +839,10 @@ export class HttpServer {
 
 <file path="entities/http.ts">
 export interface IncomingRequest {
-  url: URL; // canonical URL (always present)
-  path: string; // == url.pathname
-  query: Record<string, string>; // decoded single-value map
-  httpVersion: string; // e.g. "HTTP/1.1"
+  url: URL;
+  path: string;
+  query: Record<string, string>;
+  httpVersion: string;
   method: string;
   headers: Record<string, string>;
   headersMap?: Map<string, string[]>;
@@ -920,7 +862,7 @@ const STATUS_TEXT: Record<number, string> = {
   400: 'Bad Request',
   404: 'Not Found',
   405: 'Method Not Allowed',
-  416: 'Range Not Satisfiable', // ← new
+  416: 'Range Not Satisfiable',
   500: 'Internal Server Error',
 };
 export function sendResponse(
@@ -937,7 +879,6 @@ export function sendResponse(
     '\r\n\r\n';
   socket.write(head);
   if (!body) {
-    // No body: write head only, leave socket open for HttpServer to manage closing
     return;
   }
   if (body instanceof Readable) {
@@ -949,7 +890,6 @@ export function sendResponse(
     body.pipe(socket, { end: false });
     return;
   }
-  // Write body without closing socket
   socket.write(body);
 }
 </file>
@@ -981,7 +921,6 @@ export const metricsController = {
       }
       let payload: unknown;
       try {
-        // Accept Buffer, string, or already-parsed object
         if (Buffer.isBuffer(req.body)) {
           payload = JSON.parse(req.body.toString('utf8'));
         } else if (typeof req.body === 'string') {
@@ -1002,7 +941,6 @@ export const metricsController = {
         return;
       }
       const clientSessionId = req.headers['x-session-id'] || req.headers['X-Session-Id'];
-      // PerfLog batch shortcut
       if (Array.isArray(payload) && isPerfLogArray(payload)) {
         await saveMetrics(payload, clientSessionId);
         sendResponse(
@@ -1013,7 +951,6 @@ export const metricsController = {
         );
         return;
       }
-      // Always call saveMetrics, even if partially invalid
       await saveMetrics(payload, clientSessionId);
       sendResponse(
         sock,
@@ -1057,7 +994,6 @@ const logger = new Logger({
     }),
   ],
 });
-// --- Zod Schemas ---
 const PerfLogEntrySchema = z
   .object({
     timestamp: z.string(),
@@ -1069,7 +1005,7 @@ const PerfLogEntrySchema = z
         jsHeapSizeLimit: z.number().optional(),
       })
       .optional()
-      .nullable(), // allow null as well as undefined
+      .nullable(),
     action: z.string(),
     sessionId: z.string().optional(),
     batchId: z.number().optional(),
@@ -1130,13 +1066,10 @@ const FullPayloadSchema = z
   .catchall(z.unknown());
 export type PerfLogEntry = z.infer<typeof PerfLogEntrySchema>;
 export type FullPayload = z.infer<typeof FullPayloadSchema>;
-// Export metricsPayloadSchema for controller usage
 export const metricsPayloadSchema = FullPayloadSchema;
-// Type guard for PerfLogEntry array
 export function isPerfLogArray(arr: unknown): arr is PerfLogEntry[] {
   return Array.isArray(arr) && arr.every((item) => PerfLogEntrySchema.safeParse(item).success);
 }
-// --- DB Setup ---
 let db: Database | null = null;
 export async function initDb(): Promise<Database> {
   if (db) return db;
@@ -1196,20 +1129,17 @@ export async function initDb(): Promise<Database> {
   `);
   return db;
 }
-// --- Utility: Accept and log all valid data, never reject whole request ---
 function logInvalid(type: string, data: unknown, error: unknown) {
   logger.info(
     `[metrics] Invalid ${type}: ${JSON.stringify(error)} | Data: ${JSON.stringify(data)}`,
   );
 }
-// --- Session Helper ---
 async function ensureSessionExists(
   database: Database,
   sessionId: string,
   timestamp?: string,
   sessionStart?: number,
 ) {
-  // Try to find session by id
   const sessionRow = await database.get('SELECT id FROM sessions WHERE id = ?', sessionId);
   if (!sessionRow) {
     await database.run(
@@ -1224,11 +1154,9 @@ async function ensureSessionExists(
 export async function saveMetrics(
   payload: unknown,
   clientSessionId?: string,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _env?: unknown,
 ) {
   const database = await initDb();
-  // PerfLog batch
   if (Array.isArray(payload)) {
     for (const entry of payload) {
       const result = PerfLogEntrySchema.safeParse(entry);
@@ -1236,7 +1164,6 @@ export async function saveMetrics(
         logInvalid('perfLog', entry, result.error.format());
         continue;
       }
-      // Resolve sessionId
       const resolvedSessionId = result.data.sessionId || clientSessionId;
       if (!resolvedSessionId) {
         logger.warn('[metrics] No sessionId found for perfLog entry. Skipping.');
@@ -1262,13 +1189,10 @@ export async function saveMetrics(
     }
     return;
   }
-  // Full payload
   const result = FullPayloadSchema.safeParse(payload);
   if (!result.success) {
     logInvalid('fullPayload', payload, result.error.format());
-    // Try to salvage valid subfields
     if (payload && typeof payload === 'object') {
-      // Try perfLog
       const perfLogArray = Array.isArray((payload as Record<string, unknown>).perfLog)
         ? ((payload as Record<string, unknown>).perfLog as unknown[])
         : [];
@@ -1296,7 +1220,6 @@ export async function saveMetrics(
           logInvalid('perfLog', entry, perfResult.error.format());
         }
       }
-      // Try debug
       const debugArray = Array.isArray((payload as Record<string, unknown>).debug)
         ? ((payload as Record<string, unknown>).debug as unknown[])
         : [];
@@ -1313,7 +1236,6 @@ export async function saveMetrics(
           logInvalid('debug', entry, debugResult.error.format());
         }
       }
-      // Try engagement
       const engagementObj = (payload as Record<string, unknown>).engagement;
       if (engagementObj && typeof engagementObj === 'object' && !Array.isArray(engagementObj)) {
         for (const [itemId, stats] of Object.entries(engagementObj)) {
@@ -1344,7 +1266,6 @@ export async function saveMetrics(
     sessionStart,
     sessionMetrics: sessionMetricsFromPayload,
   } = result.data;
-  // Resolve sessionId
   const resolvedSessionId = sessionMetricsFromPayload.sessionId || clientSessionId;
   await ensureSessionExists(
     database,
@@ -1352,7 +1273,6 @@ export async function saveMetrics(
     timestamp,
     sessionStart,
   );
-  // Insert engagement
   for (const [itemId, stats] of Object.entries(engagement)) {
     await database.run(
       `INSERT INTO engagement (sessionId, itemId, views, lastViewedAt, totalWatchMs, completions) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1364,7 +1284,6 @@ export async function saveMetrics(
       stats.completions,
     );
   }
-  // Insert perfLog
   for (const entry of perfLog) {
     const { timestamp, perfNow, memory, action, batchId, uploadMode, ...rest } = entry;
     const details = JSON.stringify({ ...rest });
@@ -1382,7 +1301,6 @@ export async function saveMetrics(
       details,
     );
   }
-  // Insert debug
   for (const entry of debug) {
     await database.run(
       `INSERT INTO debug (sessionId, message, timestamp) VALUES (?, ?, ?)`,
@@ -1391,14 +1309,12 @@ export async function saveMetrics(
       entry.timestamp,
     );
   }
-  // Insert sessionMetrics
   await database.run(
     `INSERT INTO sessionMetrics (sessionId, data) VALUES (?, ?)`,
     resolvedSessionId,
     JSON.stringify(sessionMetricsFromPayload),
   );
 }
-// Graceful shutdown
 process.on('SIGINT', async () => {
   if (db) await db.close();
   logger.info('SQLite connection closed (SIGINT)');
@@ -1475,17 +1391,14 @@ src/modules/app-metrics/
 </file>
 
 <file path="modules/embeddings/embedding.service.ts">
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable @typescript-eslint/no-unused-vars */
-// modules/embeddings/embedding.service.ts
-import { spawn, ChildProcessWithoutNullStreams, execFile, execSync } from 'child_process'; // Import execSync
+import { spawn, ChildProcessWithoutNullStreams, execFile, execSync } from 'child_process';
 import Ajv, { ValidateFunction } from 'ajv';
 import addFormats from 'ajv-formats';
-import clipCacheSchema from '../../../schemas/clipCache.schema.json'; // Adjust path if needed
+import clipCacheSchema from '../../../schemas/clipCache.schema.json';
 import path from 'path';
-import fs from 'fs/promises'; // Use fs/promises for async file operations
-import { promisify } from 'util'; // Needed for promisifying execFile if not using fs/promises directly
-import { imageSize } from 'image-size'; // Import image-size correctly
+import fs from 'fs/promises';
+import { promisify } from 'util';
+import { imageSize } from 'image-size';
 import {
   Logger,
   ConsoleTransport,
@@ -1493,11 +1406,8 @@ import {
   JsonFormatter,
   PrettyFormatter,
 } from '../../utils/logger';
-import { config } from '../../config/server.config'; // Assuming config for paths
-// --- Types --- //
-/**
- * Represents the structure of a single entry in the ClipCache.
- */
+import { config } from '../../config/server.config';
+import { start } from 'repl';
 export interface ClipCacheEntry {
   schemaVersion: string;
   filePath: string;
@@ -1505,7 +1415,7 @@ export interface ClipCacheEntry {
   mtime: number;
   fileSize: number;
   dimensions: { width: number; height: number };
-  duration: number | null; // Made explicitly number | null
+  duration: number | null;
   embedding: number[];
   embeddingModel: string;
   embeddingConfig: {
@@ -1514,22 +1424,16 @@ export interface ClipCacheEntry {
     samplingMethod?: string;
     [k: string]: unknown;
   };
-  processingTimestamp: string; // ISO 8601 date-time string
+  processingTimestamp: string;
   debugMetadata?: { [k: string]: unknown };
   error?: string;
   detail?: string;
 }
-/**
- * Represents the entire ClipCache structure (filePath -> ClipCacheEntry mapping).
- */
 export type ClipCache = Record<string, ClipCacheEntry>;
-// --- AJV Setup --- //
 const ajv = new Ajv({ allErrors: true });
 addFormats(ajv);
-// Compile the schema for a SINGLE entry - validation is crucial
 let validateEntry: ValidateFunction<ClipCacheEntry>;
 try {
-  // Ensure the definition path is correct within your schema file
   if (!clipCacheSchema.definitions || !(clipCacheSchema.definitions as any).ClipCacheEntry) {
     throw new Error(
       'Schema definitions or ClipCacheEntry definition missing in clipCache.schema.json',
@@ -1538,23 +1442,16 @@ try {
   validateEntry = ajv.compile<ClipCacheEntry>((clipCacheSchema.definitions as any).ClipCacheEntry);
 } catch (err: any) {
   console.error('FATAL: Failed to compile ClipCacheEntry JSON Schema:', err);
-  // Depending on desired behavior, you might exit or use a dummy validator
-  // Using a dummy validator that always fails ensures no invalid data passes:
   validateEntry = ((data: any) => {
     (validateEntry as any).errors = [{ message: 'Schema compilation failed' }];
     return false;
   }) as ValidateFunction<ClipCacheEntry>;
-  // Alternatively, exit if schema validation is critical: process.exit(1);
 }
-// --- Logging Setup --- //
 const NODE_LOG_PREFIX = '[NodeEmbeddingService]';
-// NOTE: Consider moving log file path to config/server.config.ts
-// Log file path now comes from config
 const LOG_FILE_PATH = path.resolve(
-  config.logging.logDir, // Use centralized log directory from config
+  config.logging.logDir,
   'embedding_service.log',
 );
-// Ensure log directory exists
 try {
   fs.mkdir(path.dirname(LOG_FILE_PATH), { recursive: true });
 } catch (e) {
@@ -1568,16 +1465,15 @@ const logger = new Logger({
         useBoxes: true,
         showTimestamp: true,
       }),
-      level: config.logging.level || 'info', // Use level from config or default
+      level: config.logging.level || 'info',
     }),
     new FileTransport({
       filename: LOG_FILE_PATH,
       formatter: new JsonFormatter(),
-      level: 'debug', // Keep file log level potentially more verbose
+      level: 'debug',
     }),
   ],
 });
-// Add a dedicated logger for failed validation attempts
 const FAILED_VALIDATION_LOG_PATH = path.resolve(config.logging.logDir, 'failed_validation.log');
 const failedValidationLogger = new Logger({
   transports: [
@@ -1589,16 +1485,12 @@ const failedValidationLogger = new Logger({
   ],
   level: 'error',
 });
-// --- Configuration --- //
-// Read Python settings from the centralized config object
 const PYTHON_EXECUTABLE = config.embedding.pythonExecutable;
 const PYTHON_SCRIPT_PATH = config.embedding.pythonScriptPath;
 const PYTHON_MODEL_ARGS: string[] = config.embedding?.modelArgs || [];
-const INACTIVITY_TIMEOUT_MS = config.embedding?.inactivityTimeoutMs || 5 * 60 * 1000; // 5 minutes default
-const PYTHON_SCRIPT_TIMEOUT_MS = config.embedding?.scriptTimeoutMs || 15 * 60 * 1000; // 15 minutes default
-// --- Types (Internal) --- //
+const INACTIVITY_TIMEOUT_MS = config.embedding?.inactivityTimeoutMs || 5 * 60 * 1000;
+const PYTHON_SCRIPT_TIMEOUT_MS = config.embedding?.scriptTimeoutMs || 15 * 60 * 1000;
 interface EmbeddingResponseFromPython {
-  // Structure expected directly from the Python script's JSON output per file
   embedding?: number[];
   error?: string;
   detail?: string;
@@ -1613,12 +1505,11 @@ interface FileMetadata {
 }
 interface EmbeddingRequestInternal {
   paths: string[];
-  resolve: (result: ClipCache) => void; // Resolve with ClipCache structure
+  resolve: (result: ClipCache) => void;
   reject: (error: Error) => void;
-  startTime: number; // Track start time for logging duration
-  timeoutHandle?: NodeJS.Timeout; // Store timeout handle
+  startTime: number;
+  timeoutHandle?: NodeJS.Timeout;
 }
-// --- Status Types (Exported) --- //
 export type EmbeddingServiceState = 'IDLE' | 'PROCESSING' | 'STARTING' | 'ERROR' | 'STOPPED';
 export interface EmbeddingServiceStatus {
   state: EmbeddingServiceState;
@@ -1626,26 +1517,30 @@ export interface EmbeddingServiceStatus {
   isStarting: boolean;
   isProcessing: boolean;
   queueLength: number;
-  currentBatch?: { count: number; total: number; current: string };
-  lastError?: string; // Made optional
+  currentBatch?: {
+    count: number;
+    total: number;
+    current: string;
+  };
+  lastError?: string;
 }
-// Promisify execFile for ffprobe
 const execFileAsync = promisify(execFile);
-/**
- * Manages a persistent Python child process for CLIP embedding generation.
- * Handles spawning, communication (stdin/stdout), metadata fetching, validation,
- * and error handling/restarts.
- */
 class EmbeddingService {
   private pythonProcess: ChildProcessWithoutNullStreams | null = null;
   private isStarting = false;
-  private isStopping = false; // Flag to prevent restarts during manual stop
+  private isStopping = false;
   private requestQueue: EmbeddingRequestInternal[] = [];
   private currentProcessing: EmbeddingRequestInternal | null = null;
   private responseBuffer = '';
   private inactivityTimer: NodeJS.Timeout | null = null;
   private lastProgress: { processed: number; total: number; current: string } | null = null;
   private lastError: string | null = null;
+  // --- Restart Backoff State ---
+  private restartAttempts = 0;
+  private nextRestartDelayMs = 5000; // Initial delay
+  private readonly MAX_RESTART_ATTEMPTS = 5; // Max consecutive attempts before giving up
+  private readonly BASE_RESTART_DELAY_MS = 5000; // Base delay
+  private readonly MAX_RESTART_DELAY_MS = 60 * 1000; // Maximum delay (1 minute)
   constructor() {
     logger.info(`${NODE_LOG_PREFIX} Initializing Embedding Service...`);
     this.validateConfig();
@@ -1670,25 +1565,20 @@ class EmbeddingService {
   private checkDependencies() {
     // Check for ffprobe
     try {
-      execSync('ffprobe -version', { stdio: 'ignore' }); // Execute command, ignore output
+      execSync('ffprobe -version', { stdio: 'ignore' });
       logger.info(`${NODE_LOG_PREFIX} Dependency check: ffprobe found.`);
     } catch (error) {
       logger.error(
         `${NODE_LOG_PREFIX} Dependency check failed: ffprobe not found in PATH. Video metadata extraction will fail.`,
       );
-      // Consider setting an error state or warning prominently
     }
-    // Add checks for ffmpeg if needed by python script logic too?
   }
-  // --- Python Process Management --- //
   private resetInactivityTimer() {
     this.clearInactivityTimer();
-    // Only set timer if process exists and we are not deliberately stopping it
     if (this.pythonProcess && !this.isStopping) {
       this.inactivityTimer = setTimeout(() => {
         this.stopDueToInactivity();
       }, INACTIVITY_TIMEOUT_MS);
-      // Allow Node.js to exit if this timer is the only thing active
       if (this.inactivityTimer.unref) this.inactivityTimer.unref();
     }
   }
@@ -1699,48 +1589,54 @@ class EmbeddingService {
     }
   }
   private stopDueToInactivity() {
-    if (this.isStopping) return; // Already stopping
+    if (this.isStopping) return;
     logger.info(`${NODE_LOG_PREFIX} Stopping Python process due to inactivity.`);
-    this.isStopping = true; // Mark as stopping to prevent auto-restart
-    this.stop(); // Use the main stop method
+    this.isStopping = true;
+    this.stop();
   }
-  private async startPythonProcess(): Promise<void> {
+  public async startPythonProcess(): Promise<void> {
     if (this.pythonProcess || this.isStarting) {
       logger.warn(`${NODE_LOG_PREFIX} Process already running or starting.`);
-      return Promise.resolve(); // Don't reject, just return
+      return Promise.resolve();
     }
     if (this.lastError === `Python script not accessible at ${PYTHON_SCRIPT_PATH}`) {
       logger.error(`${NODE_LOG_PREFIX} Cannot start process, script is inaccessible.`);
       return Promise.reject(new Error(this.lastError));
     }
     this.isStarting = true;
-    this.isStopping = false; // Reset stopping flag
-    this.lastError = null; // Clear previous error
+    this.isStopping = false;
+    this.lastError = null;
     logger.info(
       `${NODE_LOG_PREFIX} Starting Python process: ${PYTHON_EXECUTABLE} "${PYTHON_SCRIPT_PATH}" ${PYTHON_MODEL_ARGS.join(' ')}`,
     );
     return new Promise((resolve, reject) => {
       try {
-        // Ensure script path is quoted if it contains spaces
         this.pythonProcess = spawn(PYTHON_EXECUTABLE, [PYTHON_SCRIPT_PATH, ...PYTHON_MODEL_ARGS], {
-          stdio: ['pipe', 'pipe', 'pipe'], // stdin, stdout, stderr
+          stdio: ['pipe', 'pipe', 'pipe'],
         });
-        this.isStarting = false; // Process spawned, not necessarily fully ready, but starting phase over
+        this.pythonProcess.once('spawn', () => {
+          this.isStarting = false;
+          logger.info(
+            `${NODE_LOG_PREFIX} Python process spawn event received (PID: ${this.pythonProcess?.pid}).`,
+          );
+          this.restartAttempts = 0;
+          this.nextRestartDelayMs = this.BASE_RESTART_DELAY_MS;
+          logger.debug(`${NODE_LOG_PREFIX} Restart counters reset.`);
+        });
         this.pythonProcess.stdout.on('data', (data: Buffer) => {
-          // Optimization: Decode buffer only once
           const chunk = data.toString('utf-8');
           logger.debug(`${NODE_LOG_PREFIX} [PYTHON STDOUT RAW] ${chunk.length} chars`);
           this.responseBuffer += chunk;
-          this.processResponseBuffer(); // Process lines efficiently
+          this.processResponseBuffer();
         });
         this.pythonProcess.stderr.on('data', (data: Buffer) => {
           const lines = data.toString('utf-8').split('\n');
           lines.forEach((line) => {
             const trimmed = line.trim();
-            if (!trimmed) return; // Skip empty lines
+            if (!trimmed) return;
             if (trimmed.startsWith('PROGRESS:')) {
               try {
-                const json = trimmed.substring(9).trim(); // More robust substring
+                const json = trimmed.substring(9).trim();
                 const progress = JSON.parse(json);
                 if (progress && typeof progress === 'object') {
                   this.lastProgress = {
@@ -1766,135 +1662,137 @@ class EmbeddingService {
           logger.error(`${NODE_LOG_PREFIX} Python process spawn error: ${err.message}`);
           this.lastError = err.message;
           const startError = new Error(`Python process failed to spawn: ${err.message}`);
-          this.handleProcessExit(startError); // Pass error for rejection
-          reject(startError); // Reject the start promise
+          this.handleProcessExit(startError);
+          reject(startError);
         });
         this.pythonProcess.on('exit', (code, signal) => {
           const exitMsg = `Python process exited (Code: ${code}, Signal: ${signal})`;
           logger.warn(`${NODE_LOG_PREFIX} ${exitMsg}`);
-          // Only set lastError if it exited unexpectedly (non-zero code, or signal)
           if (code !== 0 || signal) {
             this.lastError = exitMsg;
           }
-          this.handleProcessExit(new Error(exitMsg)); // Pass error for rejection
-          // Do not reject the start promise here if it already resolved
+          this.handleProcessExit(new Error(exitMsg));
         });
         logger.info(`${NODE_LOG_PREFIX} Python process started (PID: ${this.pythonProcess.pid}).`);
-        this.resetInactivityTimer(); // Start tracking activity
-        this.processQueue(); // Process any queued requests
-        resolve(); // Resolve the start promise
+        this.resetInactivityTimer();
+        this.processQueue();
+        resolve();
       } catch (error: any) {
         logger.error(`${NODE_LOG_PREFIX} Failed to spawn Python process: ${error.message}`);
         this.isStarting = false;
         this.pythonProcess = null;
         const spawnError = new Error(`Failed to spawn Python process: ${error.message}`);
         this.lastError = spawnError.message;
-        this.rejectQueue(spawnError); // Reject queued items
-        reject(spawnError); // Reject the start promise
+        this.rejectQueue(spawnError);
+        reject(spawnError);
       }
     });
   }
-  /** Efficiently process the response buffer line by line */
   private processResponseBuffer() {
     let newlineIndex;
-    // Use a loop for efficiency if multiple lines arrive in one chunk
     while ((newlineIndex = this.responseBuffer.indexOf('\n')) >= 0) {
       const jsonResponse = this.responseBuffer.substring(0, newlineIndex).trim();
-      // Advance the buffer past the processed line and newline character
       this.responseBuffer = this.responseBuffer.substring(newlineIndex + 1);
       if (jsonResponse) {
-        logger.debug(
-          `${NODE_LOG_PREFIX} [PYTHON RESPONSE] Processing response line (${jsonResponse.length} chars)`,
-        );
-        this.handlePythonJsonResponse(jsonResponse); // Handle the parsed line
+        if (jsonResponse.startsWith('{') || jsonResponse.startsWith('[')) {
+          logger.debug(
+            `${NODE_LOG_PREFIX} [PYTHON RESPONSE] Processing response line (${jsonResponse.length} chars)`,
+          );
+          this.handlePythonJsonResponse(jsonResponse);
+        } else {
+          logger.debug(
+            `${NODE_LOG_PREFIX} [PYTHON RESPONSE] Skipping non-JSON stdout line: ${jsonResponse}`,
+          );
+        }
       }
     }
   }
   private handleProcessExit(error?: Error): void {
     const pid = this.pythonProcess?.pid;
     logger.debug(`${NODE_LOG_PREFIX} handleProcessExit called (PID: ${pid})`);
-    this.pythonProcess = null; // Mark process as gone
-    this.isStarting = false; // Ensure starting flag is reset
+    this.pythonProcess = null;
+    this.isStarting = false;
     this.clearInactivityTimer();
-    // If there was an active request, reject it
     if (this.currentProcessing) {
       const exitError = error || new Error('Python embedding process exited unexpectedly.');
       logger.error(
         `${NODE_LOG_PREFIX} Python process exited while processing request for ${this.currentProcessing.paths.length} paths.`,
       );
       this.currentProcessing.reject(exitError);
-      // Clear timeout associated with this request
       if (this.currentProcessing.timeoutHandle) clearTimeout(this.currentProcessing.timeoutHandle);
       this.currentProcessing = null;
     }
-    // Reject all remaining queued requests
     const queueError = error || new Error('Python embedding process is not available.');
     this.rejectQueue(queueError);
-    // Conditionally restart if not manually stopped
     if (!this.isStopping) {
-      logger.info(`${NODE_LOG_PREFIX} Attempting to restart Python process in 5 seconds...`);
-      // Use setTimeout directly, no need for async/await here
-      setTimeout(() => {
-        logger.debug(`${NODE_LOG_PREFIX} Restart timer fired.`);
-        this.startPythonProcess().catch((err) => {
-          logger.error(`${NODE_LOG_PREFIX} Auto-restart failed: ${err.message}`);
-          // Keep lastError updated if restart fails
-          this.lastError = `Auto-restart failed: ${err.message}`;
-        });
-      }, 5000);
+      if (this.restartAttempts >= this.MAX_RESTART_ATTEMPTS) {
+        const maxAttemptMsg = `Maximum restart attempts (${this.MAX_RESTART_ATTEMPTS}) reached. Service will remain in ERROR state.`;
+        logger.error(`${NODE_LOG_PREFIX} ${maxAttemptMsg}`);
+        this.lastError = this.lastError ? `${this.lastError}. ${maxAttemptMsg}` : maxAttemptMsg;
+      } else {
+        this.restartAttempts++;
+        const currentDelay = this.nextRestartDelayMs;
+        logger.info(
+          `${NODE_LOG_PREFIX} Attempting restart ${this.restartAttempts}/${this.MAX_RESTART_ATTEMPTS} in ${currentDelay / 1000} seconds...`,
+        );
+        setTimeout(() => {
+          logger.debug(
+            `${NODE_LOG_PREFIX} Restart timer fired for attempt ${this.restartAttempts}.`,
+          );
+          this.startPythonProcess().catch((err) => {
+            logger.error(
+              `${NODE_LOG_PREFIX} Auto-restart attempt ${this.restartAttempts} failed: ${err.message}`,
+            );
+            this.lastError = `Auto-restart attempt ${this.restartAttempts} failed: ${err.message}`;
+          });
+        }, currentDelay);
+        this.nextRestartDelayMs = Math.min(this.nextRestartDelayMs * 2, this.MAX_RESTART_DELAY_MS);
+      }
     } else {
       logger.info(
         `${NODE_LOG_PREFIX} Manual stop initiated, Python process will not be restarted.`,
       );
-      this.isStopping = false; // Reset flag after handling exit during stop
+      this.isStopping = false;
     }
   }
-  // --- Metadata Fetching --- //
-  /** Fetches metadata for a single file. */
   private async getFileMetadata(filePath: string): Promise<FileMetadata> {
-    let mtime = 0; // Default to 0 for consistency if stat fails
+    let mtime = 0;
     let fileSize = 0;
-    let dimensions = { width: 1, height: 1 }; // Default dimension
+    let dimensions = { width: 1, height: 1 };
     let duration: number | null = null;
-    let mediaType: 'image' | 'video' = 'image'; // Default assumption
+    let mediaType: 'image' | 'video' = 'image';
     try {
       const ext = path.extname(filePath).toLowerCase();
-      // Basic media type detection based on extension
       mediaType = ['.mp4', '.mov', '.webm', '.avi', '.mkv', '.wmv', '.m4v'].includes(ext)
         ? 'video'
         : 'image';
-      // 1. Get file stats (mtime, size)
       const stat = await fs.stat(filePath);
       mtime = stat.mtimeMs;
       fileSize = stat.size;
-      // 2. Get dimensions (and duration for videos)
       if (mediaType === 'image') {
         try {
-          // Optimization: Read only necessary bytes for image-size
-          const buffer = Buffer.alloc(1024); // Adjust size if needed for specific formats
+          const buffer = Buffer.alloc(1024);
           const fd = await fs.open(filePath, 'r');
           await fd.read(buffer, 0, 1024, 0);
           await fd.close();
-          const dim = imageSize(buffer); // Pass buffer
+          const dim = imageSize(buffer);
           dimensions = { width: dim?.width ?? 1, height: dim?.height ?? 1 };
         } catch (imgErr) {
           logger.warn(
             `${NODE_LOG_PREFIX} Failed to get image dimensions for ${filePath}: ${(imgErr as Error).message}. Using default 1x1.`,
           );
-          // Keep default dimensions
         }
       } else if (mediaType === 'video') {
         try {
-          // Ensure ffprobe path is correct or in system PATH
           const { stdout } = await execFileAsync('ffprobe', [
             '-v',
             'error',
             '-select_streams',
-            'v:0', // Select video stream 0
+            'v:0',
             '-show_entries',
             'stream=width,height,duration',
             '-of',
-            'json', // Output as JSON
+            'json',
             filePath,
           ]);
           const info = JSON.parse(stdout);
@@ -1909,19 +1807,15 @@ class EmbeddingService {
           logger.warn(
             `${NODE_LOG_PREFIX} ffprobe failed for ${filePath}: ${(ffprobeErr as Error).message}.`,
           );
-          // Keep default dimensions/duration
         }
       }
     } catch (statErr) {
       logger.warn(
         `${NODE_LOG_PREFIX} Failed to stat file ${filePath}: ${(statErr as Error).message}. Using default metadata.`,
       );
-      // Keep default mtime/size if stat fails, might indicate file removed
-      // Should we propagate this error more clearly?
     }
     return { mtime, fileSize, dimensions, duration, mediaType };
   }
-  /** Fetches metadata for multiple files concurrently. */
   private async getBatchMetadata(filePaths: string[]): Promise<Record<string, FileMetadata>> {
     const metadataPromises = filePaths.map((fp) => this.getFileMetadata(fp));
     const results = await Promise.allSettled(metadataPromises);
@@ -1931,57 +1825,51 @@ class EmbeddingService {
       if (result.status === 'fulfilled') {
         metadataMap[filePath] = result.value;
       } else {
-        // Log error but still provide a default entry so processing can continue
         logger.error(
           `${NODE_LOG_PREFIX} Failed to get metadata for ${filePath} in batch: ${result.reason?.message || result.reason}`,
         );
         metadataMap[filePath] = {
-          // Provide default/fallback metadata
           mtime: 0,
           fileSize: 0,
           dimensions: { width: 1, height: 1 },
           duration: null,
-          mediaType: path.extname(filePath).match(/\.(mp4|mov|webm)$/i) ? 'video' : 'image', // Best guess
+          mediaType: path.extname(filePath).match(/\.(mp4|mov|webm)$/i) ? 'video' : 'image',
         };
       }
     });
     return metadataMap;
   }
-  // --- Response Handling & Validation --- //
   private async handlePythonJsonResponse(jsonResponse: string): Promise<void> {
     if (!this.currentProcessing) {
       logger.warn(`${NODE_LOG_PREFIX} Received response from Python but no request is processing.`);
       return;
     }
     const requestStartTime = this.currentProcessing.startTime;
-    const currentRequest = this.currentProcessing; // Capture ref in case it changes
-    this.currentProcessing = null; // Mark as done processing *before* async metadata fetching
+    const currentRequest = this.currentProcessing;
+    this.currentProcessing = null;
     try {
       const pythonOutput: Record<string, EmbeddingResponseFromPython> = JSON.parse(jsonResponse);
       const filePathsInResponse = Object.keys(pythonOutput);
       logger.debug(
         `${NODE_LOG_PREFIX} Parsed Python response for ${filePathsInResponse.length} files.`,
       );
-      // --- Optimization: Fetch metadata concurrently for all files in the batch ---
       logger.debug(
         `${NODE_LOG_PREFIX} Fetching metadata for ${filePathsInResponse.length} files...`,
       );
       const batchMetadata = await this.getBatchMetadata(filePathsInResponse);
       logger.debug(`${NODE_LOG_PREFIX} Finished fetching metadata.`);
-      const finalResults: ClipCache = {}; // Build the response object conforming to ClipCache
+      const finalResults: ClipCache = {};
       for (const filePath of filePathsInResponse) {
         const pyEntry = pythonOutput[filePath];
-        const meta = batchMetadata[filePath]; // Get pre-fetched metadata
+        const meta = batchMetadata[filePath];
         if (!meta) {
           logger.error(
             `${NODE_LOG_PREFIX} Metadata missing for ${filePath} after batch fetch. Skipping.`,
           );
-          // Create an error entry?
           finalResults[filePath] = {
             schemaVersion: '1.0.0',
             filePath: filePath,
             error: 'Metadata fetch failed',
-            // Add other required fields with defaults if possible, or make them optional in schema
             mtime: 0,
             fileSize: 0,
             dimensions: { width: 1, height: 1 },
@@ -1991,10 +1879,9 @@ class EmbeddingService {
             embeddingModel: 'unknown',
             embeddingConfig: {},
             processingTimestamp: new Date().toISOString(),
-          } as ClipCacheEntry; // May fail validation if embedding is required
+          } as ClipCacheEntry;
           continue;
         }
-        // Extract model/config from debugMetadata if present
         const debug = pyEntry.debugMetadata || {};
         const embeddingModel = String(debug.model || config.embedding?.defaultModel || 'unknown');
         const embeddingConfig: ClipCacheEntry['embeddingConfig'] = {
@@ -2003,11 +1890,10 @@ class EmbeddingService {
           numFrames: typeof debug.num_frames === 'number' ? debug.num_frames : null,
           samplingMethod: typeof debug.method_used === 'string' ? debug.method_used : undefined,
         };
-        // Construct the entry attempting to match the schema
         const entryData: Partial<ClipCacheEntry> = {
           schemaVersion: '1.0.0',
           filePath: filePath,
-          embedding: pyEntry.embedding, // Will be validated later
+          embedding: pyEntry.embedding,
           debugMetadata: pyEntry.debugMetadata,
           error: pyEntry.error != null ? String(pyEntry.error) : undefined,
           detail: pyEntry.detail != null ? String(pyEntry.detail) : undefined,
@@ -2020,91 +1906,76 @@ class EmbeddingService {
           embeddingModel,
           embeddingConfig,
         };
-        // Handle case where embedding failed in Python
         if (entryData.error && !entryData.embedding) {
-          // Schema requires embedding. Set to empty array to pass validation,
-          // client should check for error field.
           entryData.embedding = [];
         } else if (!entryData.embedding && !entryData.error) {
-          // No embedding and no error? Treat as error.
           entryData.error = 'Embedding missing without error from Python';
           entryData.embedding = [];
         }
-        // ---> VALIDATE the constructed entry against the schema <---
         if (validateEntry(entryData)) {
-          // If valid, assign the validated (and now typed) entry
           finalResults[filePath] = entryData as ClipCacheEntry;
         } else {
-          // If invalid, log details and store an error-focused object
           const validationErrors = JSON.stringify(validateEntry.errors);
           logger.error(
             `${NODE_LOG_PREFIX} Constructed cache entry failed validation for: ${filePath}`,
             {
-              constructedData: entryData, // Log data before validation
-              pythonData: pyEntry, // Log raw python data
+              constructedData: entryData,
+              pythonData: pyEntry,
               errors: validationErrors,
             },
           );
-          // Also log to failed_validation.log
           failedValidationLogger.error(`Failed validation for: ${filePath}`, {
             constructedData: entryData,
             pythonData: pyEntry,
             errors: validationErrors,
           });
-          // Create a minimal structure indicating validation failure
-          // This structure *must* still pass basic validation if possible,
-          // or the client needs specific handling for these error objects.
           finalResults[filePath] = {
             schemaVersion: '1.0.0',
             filePath: filePath,
             error: 'Internal schema validation failed',
             detail: validationErrors,
-            // Add required fields with placeholder/default values
-            mtime: meta.mtime, // Use fetched meta even on validation error
+            mtime: meta.mtime,
             fileSize: meta.fileSize,
             dimensions: meta.dimensions,
             duration: meta.duration,
             mediaType: meta.mediaType,
-            embedding: [], // Empty embedding on validation error
+            embedding: [],
             embeddingModel: embeddingModel,
             embeddingConfig: embeddingConfig,
             processingTimestamp: entryData.processingTimestamp || new Date().toISOString(),
-          } as ClipCacheEntry; // Note: This might still fail if required fields missing
+          } as ClipCacheEntry;
         }
       }
-      // Resolve the original promise with the processed results
       const duration = Date.now() - requestStartTime;
       logger.info(
         `${NODE_LOG_PREFIX} Successfully processed batch of ${filePathsInResponse.length} paths in ${duration} ms.`,
       );
       currentRequest.resolve(finalResults);
-      if (currentRequest.timeoutHandle) clearTimeout(currentRequest.timeoutHandle); // Clear timeout on success
+      if (currentRequest.timeoutHandle) clearTimeout(currentRequest.timeoutHandle);
     } catch (e: any) {
       logger.error(
         `${NODE_LOG_PREFIX} Failed to parse/process JSON response from Python: ${e.message}. Response: ${jsonResponse}`,
         e,
       );
       const processingError = new Error(`Failed to process response from Python: ${e.message}`);
-      currentRequest.reject(processingError); // Reject the original promise
-      if (currentRequest.timeoutHandle) clearTimeout(currentRequest.timeoutHandle); // Clear timeout on error
-      this.lastError = processingError.message; // Update last error
+      currentRequest.reject(processingError);
+      if (currentRequest.timeoutHandle) clearTimeout(currentRequest.timeoutHandle);
+      this.lastError = processingError.message;
     } finally {
-      // Ensure we attempt to process the queue regardless of success/failure of this batch
       this.processQueue();
-      this.resetInactivityTimer(); // Reset timer after processing a response
+      this.resetInactivityTimer();
     }
   }
-  // --- Request Queuing and Processing --- //
   private rejectQueue(error: Error): void {
     if (this.requestQueue.length > 0) {
       logger.warn(
         `${NODE_LOG_PREFIX} Rejecting ${this.requestQueue.length} queued request(s) due to error: ${error.message}`,
       );
       this.requestQueue.forEach((req) => {
-        if (req.timeoutHandle) clearTimeout(req.timeoutHandle); // Clear individual timeouts
+        if (req.timeoutHandle) clearTimeout(req.timeoutHandle);
         req.reject(error);
       });
-      this.requestQueue = []; // Clear the queue
+      this.requestQueue = [];
     }
   }
   private processQueue(): void {
@@ -2117,16 +1988,15 @@ class EmbeddingService {
       logger.debug(
         `${NODE_LOG_PREFIX} Skipping processQueue (Processing: ${!!this.currentProcessing}, Queue: ${this.requestQueue.length}, Proc: ${!!this.pythonProcess}, Starting: ${this.isStarting})`,
       );
-      return; // Process busy, queue empty, or process not ready/starting
+      return;
     }
-    this.currentProcessing = this.requestQueue.shift()!; // Get next request from queue
-    this.lastProgress = null; // Reset progress for new batch
+    this.currentProcessing = this.requestQueue.shift()!;
+    this.lastProgress = null;
     logger.info(
       `${NODE_LOG_PREFIX} Sending batch of ${this.currentProcessing.paths.length} paths to Python (Queue: ${this.requestQueue.length}).`,
     );
-    const requestPayload = { imagePaths: this.currentProcessing.paths }; // Python script expects this structure
+    const requestPayload = { imagePaths: this.currentProcessing.paths };
     try {
-      // Add newline delimiter for Python script's readline()
       const requestJson = JSON.stringify(requestPayload) + '\n';
       this.responseBuffer = ''; // Clear buffer before sending new request
       // Handle potential write errors (e.g., process died between check and write)
@@ -2146,7 +2016,7 @@ class EmbeddingService {
           this.handleProcessExit(writeError);
         } else {
           logger.debug(`${NODE_LOG_PREFIX} Data written to Python stdin successfully.`);
-          this.resetInactivityTimer(); // Reset timer after successful write
+          this.resetInactivityTimer();
         }
       });
     } catch (error: any) {
@@ -2155,19 +2025,61 @@ class EmbeddingService {
       this.currentProcessing.reject(catchError);
       if (this.currentProcessing.timeoutHandle) clearTimeout(this.currentProcessing.timeoutHandle);
       this.currentProcessing = null;
-      // Trigger exit handling if write fails critically
       this.handleProcessExit(catchError);
     }
   }
-  /**
-   * Public method to request embeddings. Starts Python process if needed.
-   */
+  private async findFile(filename: string): Promise<string | null> {
+    if (config.embedding?.inputDir) {
+      const inputDir = path.resolve(config.embedding.inputDir);
+      try {
+        await fs.access(inputDir);
+        const foundInInput = await this.findFileInDir(filename, inputDir);
+        if (foundInInput) return foundInInput;
+      } catch {
+        logger.warn(
+          `${NODE_LOG_PREFIX} Input directory not found or inaccessible: ${inputDir}, skipping.`,
+        );
+      }
+    }
+    const publicDir = path.resolve(config.publicDir || 'public');
+    const foundInPublic = await this.findFileInDir(filename, publicDir);
+    if (foundInPublic) return foundInPublic;
+    return null;
+  }
+  private async findFileInDir(filename: string, dir: string): Promise<string | null> {
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (err: any) {
+      logger.warn(`${NODE_LOG_PREFIX} Failed to read directory ${dir}: ${err.message}. Skipping.`);
+      return null;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const found = await this.findFileInDir(filename, fullPath);
+        if (found) return found;
+      } else if (entry.isFile() && entry.name === filename) {
+        return fullPath;
+      }
+    }
+    return null;
+  }
   public async getEmbeddings(
     imagePaths: string[],
     timeoutMs = PYTHON_SCRIPT_TIMEOUT_MS,
   ): Promise<ClipCache> {
-    // Return ClipCache structure
-    // Start process if it's not running and not already stopping/starting
+    const pathMap: Record<string, string | null> = {};
+    for (const reqPath of imagePaths) {
+      const filename = path.basename(reqPath);
+      pathMap[reqPath] = await this.findFile(filename);
+    }
+    const foundPaths = Object.values(pathMap).filter((p): p is string => !!p);
+    if (foundPaths.length === 0) {
+      return Promise.reject(
+        new Error('None of the requested files were found in the public directory.'),
+      );
+    }
     if (!this.pythonProcess && !this.isStarting && !this.isStopping) {
       logger.info(`${NODE_LOG_PREFIX} Python process not running. Starting for new request...`);
       try {
@@ -2176,27 +2088,46 @@ class EmbeddingService {
         logger.error(
           `${NODE_LOG_PREFIX} Failed to start Python process for request: ${startErr.message}`,
         );
-        // Reject immediately if start failed
         return Promise.reject(new Error(`Failed to start Python process: ${startErr.message}`));
       }
     } else {
-      // If process exists, reset inactivity timer as a request is coming in
       this.resetInactivityTimer();
     }
-    this.lastError = null; // Clear last error on new request attempt
+    this.lastError = null;
     return new Promise((resolve, reject) => {
       let settled = false;
       const startTime = Date.now();
       const request: EmbeddingRequestInternal = {
-        paths: imagePaths,
+        paths: foundPaths,
         startTime: startTime,
         resolve: (result: ClipCache) => {
-          // Expect ClipCache
           if (settled) return;
           settled = true;
           if (request.timeoutHandle) clearTimeout(request.timeoutHandle);
-          this.resetInactivityTimer(); // Reset timer on successful completion
-          resolve(result);
+          this.resetInactivityTimer();
+          const remapped: ClipCache = {};
+          for (const reqPath of imagePaths) {
+            const found = pathMap[reqPath];
+            if (found && result[found]) {
+              remapped[reqPath] = { ...result[found], filePath: reqPath };
+            } else {
+              remapped[reqPath] = {
+                schemaVersion: '1.0.0',
+                filePath: reqPath,
+                error: 'File not found in public directory',
+                mtime: 0,
+                fileSize: 0,
+                dimensions: { width: 1, height: 1 },
+                duration: null,
+                mediaType: 'image',
+                embedding: [],
+                embeddingModel: 'unknown',
+                embeddingConfig: {},
+                processingTimestamp: new Date().toISOString(),
+              };
+            }
+          }
+          resolve(remapped);
         },
         reject: (error: Error) => {
           if (settled) return;
@@ -2208,56 +2139,45 @@ class EmbeddingService {
           reject(error);
         },
       };
-      // Setup timeout for *this specific request*
       request.timeoutHandle = setTimeout(() => {
         if (settled) return;
         logger.warn(
           `${NODE_LOG_PREFIX} Request timed out after ${timeoutMs} ms for ${imagePaths.length} paths.`,
         );
-        // Remove request from queue *if it's still there*
         const index = this.requestQueue.findIndex((r) => r === request);
         if (index > -1) {
           this.requestQueue.splice(index, 1);
           logger.debug(`${NODE_LOG_PREFIX} Removed timed-out request from queue.`);
         } else if (this.currentProcessing === request) {
-          // If it was actively processing, we can't easily abort Python,
-          // but we should reject the promise and nullify currentProcessing
-          // so the queue can potentially continue. Maybe kill python? Risky.
           logger.error(
             `${NODE_LOG_PREFIX} Request timed out while actively processing. Python process might be stuck.`,
           );
-          this.currentProcessing = null; // Allow queue to proceed, previous request is lost
+          this.currentProcessing = null;
           this.lastError = `Request timed out while processing ${imagePaths.length} paths.`;
-          // Consider killing and restarting python process here if it's stuck
-          this.stop(); // Force stop and restart cycle
+          this.processQueue();
         }
         request.reject(new Error(`Embedding request timed out after ${timeoutMs} ms.`));
       }, timeoutMs);
-      // Add to queue and attempt processing
       this.requestQueue.push(request);
       logger.debug(
         `${NODE_LOG_PREFIX} Queued request for ${imagePaths.length} paths. Queue size: ${this.requestQueue.length}`,
       );
-      // Trigger queue processing immediately if possible
       if (!this.currentProcessing && this.pythonProcess && !this.isStarting) {
         this.processQueue();
       }
     });
   }
-  // --- Service Control --- //
-  /** Manually stops the Python process and rejects pending requests. */
   public stop(): void {
     logger.info(`${NODE_LOG_PREFIX} Manual stop requested.`);
-    this.isStopping = true; // Prevent restarts during manual stop
-    this.clearInactivityTimer(); // Stop inactivity timer
+    this.isStopping = true;
+    this.clearInactivityTimer();
     if (this.pythonProcess) {
       logger.info(`${NODE_LOG_PREFIX} Killing Python process (PID: ${this.pythonProcess.pid})...`);
-      this.pythonProcess.kill(); // Send SIGTERM
-      this.pythonProcess = null; // Assume it will exit
+      this.pythonProcess.kill();
+      this.pythonProcess = null;
     } else {
       logger.info(`${NODE_LOG_PREFIX} Python process already stopped.`);
     }
-    // Reject current and queued requests
     const stopError = new Error('Embedding service is stopping.');
     if (this.currentProcessing) {
       this.currentProcessing.reject(stopError);
@@ -2265,21 +2185,21 @@ class EmbeddingService {
       this.currentProcessing = null;
     }
     this.rejectQueue(stopError);
-    // isStopping will be reset by handleProcessExit if it triggers,
-    // or reset on next successful start
   }
   public getStatus(): EmbeddingServiceStatus {
-    let state: EmbeddingServiceState = 'IDLE';
-    if (this.isStopping)
-      state = 'STOPPED'; // Explicitly stopped state
-    else if (this.isStarting) state = 'STARTING';
-    else if (!this.pythonProcess && this.lastError)
-      state = 'ERROR'; // Error state if process down + error exists
-    else if (!this.pythonProcess && !this.lastError)
-      state = 'STOPPED'; // Stopped cleanly or hasn't started
-    else if (this.currentProcessing) state = 'PROCESSING';
-    // IDLE = process running but no current task
-    const status: EmbeddingServiceStatus = {
+    let state: EmbeddingServiceState;
+    if (this.isStopping) {
+      state = 'STOPPED';
+    } else if (this.isStarting) {
+      state = 'STARTING';
+    } else if (!this.pythonProcess) {
+      state = this.lastError ? 'ERROR' : 'STOPPED';
+    } else if (this.currentProcessing || this.requestQueue.length > 0) {
+      state = 'PROCESSING';
+    } else {
+      state = 'IDLE';
+    }
+    return {
       state,
       pid: this.pythonProcess?.pid ?? null,
       isStarting: this.isStarting,
@@ -2292,49 +2212,42 @@ class EmbeddingService {
             current: this.lastProgress.current,
           }
         : undefined,
-      lastError: this.lastError || undefined,
+      lastError: this.lastError ?? undefined,
     };
-    return status;
   }
   private setupExitHandlers() {
-    // Graceful shutdown: Ensure Python process is killed when Node exits
     const handleExit = () => {
       logger.info(`${NODE_LOG_PREFIX} Node process exiting. Stopping Python process...`);
-      this.isStopping = true; // Prevent restarts during shutdown
+      this.isStopping = true;
       this.stop();
     };
     process.on('exit', handleExit);
-    // Handle Ctrl+C, kill, etc.
     process.on('SIGINT', () => {
       logger.info(`${NODE_LOG_PREFIX} Received SIGINT.`);
       handleExit();
-      process.exit(0); // Exit Node process after cleanup attempt
+      process.exit(0);
     });
     process.on('SIGTERM', () => {
       logger.info(`${NODE_LOG_PREFIX} Received SIGTERM.`);
       handleExit();
-      process.exit(0); // Exit Node process after cleanup attempt
+      process.exit(0);
     });
     process.on('uncaughtException', (err) => {
       logger.child([err.stack]).error(`${NODE_LOG_PREFIX} Uncaught Exception: ${err.message}`);
-      // Optionally try to stop python before exiting
       handleExit();
-      process.exit(1); // Exit with error code
+      process.exit(1);
     });
     process.on('unhandledRejection', (reason, promise) => {
       logger.error(`${NODE_LOG_PREFIX} Unhandled Rejection at: ${promise}, reason: ${reason}`);
-      // Optionally try to stop python before exiting
       handleExit();
-      process.exit(1); // Exit with error code
+      process.exit(1);
     });
   }
 }
-// Export a singleton instance
 export const embeddingService = new EmbeddingService();
 </file>
 
 <file path="modules/embeddings/embeddings.handler.ts">
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { Socket } from 'net';
 import { IncomingRequest } from '../../entities/http';
 import { sendResponse } from '../../entities/sendResponse';
@@ -2345,9 +2258,9 @@ import {
   JsonFormatter,
   PrettyFormatter,
 } from '../../utils/logger';
-import { embeddingService } from './embedding.service'; // Import the service
-import path from 'path'; // Import path
-import { config } from '../../config/server.config'; // Import config
+import { embeddingService } from './embedding.service';
+import path from 'path';
+import { config } from '../../config/server.config';
 const logger = new Logger({
   transports: [
     new ConsoleTransport({
@@ -2363,7 +2276,6 @@ const logger = new Logger({
   level: 'debug',
   exitOnError: false,
 });
-// Helper to summarize large arrays for logging
 function summarizeArray(arr: any[]): string {
   if (!Array.isArray(arr)) return String(arr);
   const len = arr.length;
@@ -2375,7 +2287,6 @@ function summarizeArray(arr: any[]): string {
     min = Math.min(...arr);
     max = Math.max(...arr);
   } catch {
-    // empty catch to handle non-numeric arrays
   }
   return `[Array(len=${len}, min=${min}, max=${max}, preview=[${preview.join(', ')}]...)]`;
 }
@@ -2397,11 +2308,6 @@ function summarizeObject(obj: any): any {
   return obj;
 }
 export const embeddingsController = {
-  /**
-   * Handles POST requests to /api/embeddings
-   * Expects a JSON body: { "imagePaths": ["path1", "path2", ...] }
-   * Returns JSON: { "path1": { "embedding": [...] }, "path2": { "embedding": [...] }, ... }
-   */
   async handleEmbeddingsRequest(req: IncomingRequest, sock: Socket) {
     logger.info(
       `[EmbeddingsHandler] Received request: ` + JSON.stringify(summarizeObject(req.body)),
@@ -2411,7 +2317,7 @@ export const embeddingsController = {
         sock,
         405,
         { 'Content-Type': 'application/json' },
-        JSON.stringify({ error: 'Method Not Allowed' }),
+        JSON.stringify({ error: 'Method Not Allowed, use GET' }),
       );
     }
     if (!req.body || req.body.length === 0) {
@@ -2424,7 +2330,28 @@ export const embeddingsController = {
     }
     try {
       const body = JSON.parse(req.body.toString('utf-8'));
-      const requestedPaths = body.imagePaths;
+      let requestedPaths = body.imagePaths;
+      if (typeof requestedPaths === 'string') {
+        requestedPaths = [requestedPaths];
+      } else if (Array.isArray(requestedPaths)) {
+        requestedPaths = requestedPaths.filter((path) => typeof path === 'string');
+      } else {
+        return sendResponse(
+          sock,
+          400,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({ error: 'Invalid imagePaths format. Expected an array of strings.' }),
+        );
+      }
+      requestedPaths = requestedPaths
+        .map((p: string): string => p.trim())
+        .map(
+          (p: string): string =>
+            path
+              .normalize(p)
+              .replace(/^(\.\.[/\\])+/, '') // remove "../" segments
+              .replace(/^[/\\]+/, ''), // remove leading "/" or "\"
+        );
       if (!Array.isArray(requestedPaths) || requestedPaths.length === 0) {
         return sendResponse(
           sock,
@@ -2433,16 +2360,14 @@ export const embeddingsController = {
           JSON.stringify({ error: 'No file paths provided.' }),
         );
       }
-      // --- Security: Validate paths ---
-      const mediaDir = path.resolve(config.mediaDir); // Get absolute configured media directory
-      const imagePaths: string[] = []; // Store only validated paths
+      const mediaDir = path.resolve(config.mediaDir);
+      const imagePaths: string[] = [];
       for (const reqPath of requestedPaths) {
         if (typeof reqPath !== 'string') {
           logger.warn(`[EmbeddingsHandler] Invalid path type received: ${typeof reqPath}`);
-          continue; // Skip non-string paths
+          continue;
         }
         const absoluteReqPath = path.resolve(mediaDir, reqPath);
-        // Check for path traversal and ensure it's within the media directory
         if (!absoluteReqPath.startsWith(mediaDir) && !config.testMode) {
           logger.error(`[EmbeddingsHandler] Invalid path detected (outside media dir): ${reqPath}`);
           return sendResponse(
@@ -2455,7 +2380,7 @@ export const embeddingsController = {
             }),
           );
         }
-        imagePaths.push(absoluteReqPath); // Use the validated absolute path
+        imagePaths.push(absoluteReqPath);
       }
       if (imagePaths.length === 0) {
         logger.warn(`[EmbeddingsHandler] No valid paths remaining after validation.`);
@@ -2466,7 +2391,6 @@ export const embeddingsController = {
           JSON.stringify({ error: 'No valid file paths provided.' }),
         );
       }
-      // --- End Path Validation ---
       logger.info(
         `[EmbeddingsHandler] Requesting embeddings for ${imagePaths.length} validated paths.`,
       );
@@ -2484,7 +2408,6 @@ export const embeddingsController = {
     } catch (error: any) {
       logger.error(`[EmbeddingsHandler] Error processing embedding request: ${error.message}`);
       logger.error(`[EmbeddingsHandler] Error detail: ` + JSON.stringify(summarizeObject(error)));
-      // Distinguish between JSON parsing errors and service errors
       const statusCode = error instanceof SyntaxError ? 400 : 500;
       const errorMessage =
         error instanceof SyntaxError
@@ -2498,21 +2421,9 @@ export const embeddingsController = {
       );
     }
   },
-  /**
-   * Handles POST requests to /api/embeddings/shutdown
-   * Instructs the embedding service to stop gracefully.
-   */
   async handleShutdownRequest(req: IncomingRequest, sock: Socket) {
     logger.info(`[EmbeddingsHandler] Received shutdown request`);
-    if (req.method !== 'POST') {
-      return sendResponse(
-        sock,
-        405,
-        { 'Content-Type': 'application/json' },
-        JSON.stringify({ error: 'Method Not Allowed' }),
-      );
-    }
-    embeddingService.stop(); // Call stop
+    embeddingService.stop();
     logger.info(`[EmbeddingsHandler] Embedding service stop initiated.`);
     sendResponse(
       sock,
@@ -2521,10 +2432,6 @@ export const embeddingsController = {
       JSON.stringify({ message: 'Embedding service shutdown initiated.' }),
     );
   },
-  /**
-   * Handles GET requests to /api/embeddings/status
-   * Returns JSON: { state, isStarting, isProcessing, queueLength, currentBatch, error }
-   */
   async handleStatusRequest(req: IncomingRequest, sock: Socket) {
     if (req.method !== 'GET') {
       return sendResponse(
@@ -2534,14 +2441,22 @@ export const embeddingsController = {
         JSON.stringify({ error: 'Method Not Allowed' }),
       );
     }
-    const status = embeddingService.getStatus();
+    let status = embeddingService.getStatus();
+    if ((status.state === 'STOPPED' || status.state === 'ERROR') && !status.isStarting) {
+      logger.info('[EmbeddingsHandler] Status ping received: starting Python process.');
+      embeddingService.startPythonProcess().catch((err) => {
+        logger.error(
+          `[EmbeddingsHandler] Failed to start Python process on status ping: ${err.message}`,
+        );
+      });
+      status = embeddingService.getStatus();
+    }
     sendResponse(sock, 200, { 'Content-Type': 'application/json' }, JSON.stringify(status));
   },
 };
 </file>
 
 <file path="modules/file-hosting/fileHostingController.ts">
-// src/modules/file-hosting/fileHostingController.ts
 import { Socket } from 'net';
 import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
@@ -2553,7 +2468,6 @@ import { getMimeType } from '../../utils/helpers';
 import { Readable } from 'stream';
 const fileSvc = new FileHostingService(config.mediaDir);
 export const fileHostingController = {
-  /** GET /file?file=filename – serves a file (supports Range) */
   async getFile(req: IncomingRequest, sock: Socket) {
     logger.info(`[getFile] url=${req.url} path=${req.path} query=${JSON.stringify(req.query)}`);
     const fileName = getQuery(req, 'file');
@@ -2633,7 +2547,6 @@ export const fileHostingController = {
       sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, `File "${fileName}" not found.`);
     }
   },
-  /** GET /files – returns JSON list of filenames */
   async listFiles(req: IncomingRequest, sock: Socket) {
     try {
       const files = await fileSvc.listFiles();
@@ -2643,9 +2556,7 @@ export const fileHostingController = {
       sendResponse(sock, 500, { 'Content-Type': 'text/plain' }, 'Server error');
     }
   },
-  /** POST /file – upload a media file */
   async uploadFile(req: IncomingRequest, sock: Socket) {
-    // Assume fileName is provided as a query param or header, and body is the file data
     const fileName = getQuery(req, 'file') || req.headers['x-filename'];
     if (!fileName) {
       sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'Missing file name');
@@ -2664,9 +2575,7 @@ export const fileHostingController = {
       sendResponse(sock, 400, { 'Content-Type': 'text/plain' }, 'No file data');
       return;
     }
-    // Save file using FileHostingService
     const fileSvc = new FileHostingService(config.mediaDir);
-    // Convert Buffer or string to async iterable
     async function* bufferToAsyncIterable(buffer: Buffer) {
       yield buffer;
     }
@@ -2674,7 +2583,6 @@ export const fileHostingController = {
     await fileSvc.saveFile(fileName, bufferToAsyncIterable(data));
     sendResponse(sock, 200, { 'Content-Type': 'text/plain' }, 'Upload successful');
   },
-  /** DELETE /file?file=filename – delete a media file */
   async deleteFile(req: IncomingRequest, sock: Socket) {
     const fileName = getQuery(req, 'file');
     if (!fileName) {
@@ -2734,17 +2642,11 @@ export class FileHostingService {
 </file>
 
 <file path="modules/file-hosting/index.ts">
-// src/modules/file-hosting/index.ts
 export * from './fileHostingController';
 export * from './fileHostingService';
 </file>
 
 <file path="modules/file-streaming/fileService.ts">
-// file-streamer/fileService.ts
-/**
- * @deprecated This file is now obsolete after moving to file-hosting module.
- * This file is deprecated and should be removed. All file management logic is now in file-hosting/fileHostingService.ts.
- */
 export class FileService {
   constructor(private readonly rootDir: string) {
     throw new Error('FileService is deprecated. Use file-hosting module instead.');
@@ -2756,24 +2658,22 @@ export class FileService {
 import { Socket } from 'net';
 import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
-import { getHeader, getQuery } from '../../utils/httpHelpers';
+import { getHeader } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
 import { Logger } from '../../utils/logger';
-// Instantiate logger (default mock lacked info/error in tests)
 const logger = new Logger();
 import { getMimeType } from '../../utils/helpers';
 import { Readable } from 'stream';
 import { FileHostingService } from '../file-hosting/fileHostingService';
 const fileSvc = new FileHostingService(config.mediaDir);
 export const fileStreamingController = {
-  /** GET /stream?file=video.mp4 – streams file (supports Range) */
   async handleStream(req: IncomingRequest, sock: Socket) {
     if (!config.testMode) {
       logger.info(
         `[handleStream] url=${req.url} path=${req.path} query=${JSON.stringify(req.query)}`,
       );
     }
-    const fileName = getQuery(req, 'file');
+    const fileName = req.query.file as string | undefined;
     if (!fileName) {
       sendResponse(
         sock,
@@ -2853,39 +2753,35 @@ export * from './fileStreamingController';
 </file>
 
 <file path="routes/embeddings.routes.ts">
+import { config } from '../config/server.config';
 import router from '../core/router';
 import { embeddingsController } from '../modules/embeddings/embeddings.handler';
-// Placeholder: Add feature flag check if needed, similar to other routes
-// if (config.features.embeddings) {
-router.post('/api/embeddings', embeddingsController.handleEmbeddingsRequest);
-router.post('/api/embeddings/shutdown', embeddingsController.handleShutdownRequest);
-router.get('/api/embeddings/status', embeddingsController.handleStatusRequest);
+if (config.features.embeddingService) {
+  router.post('/api/embeddings', embeddingsController.handleEmbeddingsRequest);
+  router.any('/api/embeddings/shutdown', embeddingsController.handleShutdownRequest);
+  router.get('/api/embeddings/status', embeddingsController.handleStatusRequest);
+}
 </file>
 
 <file path="routes/file-hosting.routes.ts">
 import router from '../core/router';
 import { fileHostingController } from '../modules/file-hosting';
-// List all files
-router.get('/api/files', fileHostingController.listFiles);
-// Upload a file
-router.post('/api/files', fileHostingController.uploadFile);
-// Get a specific file
-router.get('/api/files/:filename', fileHostingController.getFile);
-// Delete a specific file
-router.del('/api/files/:filename', fileHostingController.deleteFile);
+import { config } from '../config/server.config';
+if (config.features.fileHosting) {
+  router.get('/api/files', fileHostingController.listFiles);
+  router.post('/api/files', fileHostingController.uploadFile);
+  router.get('/api/files/:filename', fileHostingController.getFile);
+  router.del('/api/files/:filename', fileHostingController.deleteFile);
+}
 </file>
 
 <file path="routes/files.routes.ts">
-// routes/files.routes.ts
-// DEPRECATED: This file is now handled by file-hosting.routes.ts for all /api/files endpoints.
-// Please use file-hosting.routes.ts instead.
 import router from '../core/router';
 import { fileHostingController } from '../modules/file-hosting';
 router.get('/files', fileHostingController.listFiles);
 </file>
 
 <file path="routes/index.ts">
-// routes/index.ts
 import './stream.routes';
 import './files.routes';
 import './metrics.routes';
@@ -2895,17 +2791,6 @@ import router from '../core/router';
 import { sendResponse } from '../entities/sendResponse';
 ['/echo', '/ping'].forEach((path) =>
   router.any(path, async (req, sock) => {
-    /**
-     * Determines the message to be used based on the request path and body.
-     *
-     * - If the path is `/ping`, the message is set to `undefined`.
-     * - Otherwise, it attempts to parse the request body as JSON and extract the `message` property.
-     * - If the `message` property exists and is a string, it is returned.
-     * - If parsing fails or the `message` property is not a string, a default message of `'Hello, world!'` is returned.
-     *
-     * @constant
-     * @type {string | undefined}
-     */
     const message =
       path === '/ping'
         ? undefined
@@ -2926,22 +2811,16 @@ import { sendResponse } from '../entities/sendResponse';
     );
   }),
 );
-export {}; // side-effect imports run immediately
+export {};
 </file>
 
 <file path="routes/metrics.routes.ts">
-// routes/metrics.routes.ts
 import router from '../core/router';
 import { metricsController } from '../modules/app-metrics/app_gallery-generator';
 import { config } from '../config/server.config';
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { sendResponse as sendCustomResponse } from '../entities/sendResponse';
 import { Readable } from 'stream';
 import { Socket } from 'net';
-/**
- * Accepts the JSON payload, validates, and writes into SQLite.
- */
-// CORS middleware for all /api/metrics/* routes
 router.use(async (req, sock, next) => {
   if (req.path.startsWith('/api/metrics/')) {
     const headers = {
@@ -2950,7 +2829,6 @@ router.use(async (req, sock, next) => {
       'Access-Control-Allow-Headers': 'Content-Type, X-Session-Id',
     };
     if (req.method === 'OPTIONS') {
-      // Preflight request
       sock.write(
         [
           'HTTP/1.1 204 No Content',
@@ -2962,7 +2840,6 @@ router.use(async (req, sock, next) => {
       sock.end();
       return;
     } else {
-      // For normal requests, add CORS headers to response
       req.ctx = req.ctx || {};
       req.ctx.corsHeaders = headers;
     }
@@ -2971,27 +2848,21 @@ router.use(async (req, sock, next) => {
 });
 if (config.features.metrics) {
   router.post('/api/metrics/gallery-generator', async (req, sock) => {
-    // Define the custom response sender *locally*
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const sendCustomResponse = (
       sock: Socket,
       status: number,
       headers: Record<string, string>,
       body?: string | Buffer | Readable,
     ) => {
-      // Access CORS headers from the request context (set by middleware)
       const corsHeaders = req.ctx && req.ctx.corsHeaders ? req.ctx.corsHeaders : {};
       sendCustomResponse(sock, status, { ...headers, ...corsHeaders }, body);
     };
-    // Patch sendResponse for this request
-    //req.sendResponse = sendResponse;
     await metricsController.handleMetrics(req, sock);
   });
 }
 </file>
 
 <file path="routes/stream.routes.ts">
-// routes/stream.routes.ts
 import router from '../core/router';
 import { fileStreamingController } from '../modules/file-streaming';
 import { config } from '../config/server.config';
@@ -3010,48 +2881,28 @@ export function getMimeType(fileName: string): string {
 </file>
 
 <file path="utils/httpHelpers.ts">
-// Simple header accessor that falls back to legacy Record<string,string>
 import { IncomingRequest } from '../entities/http';
-/**
- * Case-insensitive lookup that handles multi-value headers.
- * @param req - The incoming request object.
- * @param name - The name of the header to retrieve.
- * @returns The value of the header, or undefined if not found.
- * @example
- * const contentType = getHeader(req, 'Content-Type');
- * const userAgent = getHeader(req, 'User-Agent');
- * const customHeader = getHeader(req, 'X-Custom-Header');
- */
 export function getHeader(req: IncomingRequest, name: string): string | undefined {
   const key = name.toLowerCase();
   if (req.headersMap && req.headersMap.has(key)) {
-    return req.headersMap.get(key)![0]; // first value
+    return req.headersMap.get(key)![0];
   }
   return req.headers?.[key];
 }
-/** Case-sensitive query lookup that falls back to searchParams */
 export function getQuery(req: IncomingRequest, key: string): string | undefined {
   if (req.invalid || !req.query || !req.url) return undefined;
-  // ✅ look in the parser-built map first
   const direct = req.query?.[key];
   if (direct !== undefined) return direct;
-  // fallback (rare) – parse from URL
   return req.url.searchParams.get(key) ?? undefined;
 }
 </file>
 
 <file path="utils/logger.ts">
-/* eslint-disable prefer-const */
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable @typescript-eslint/no-explicit-any */
-// logger.ts - Refactored modular and extensible logging utility
-// Fix: Added explicit method signatures for standard levels + success to satisfy TypeScript.
 import fs from 'fs';
 import path from 'path';
-import chalk from 'chalk'; // Dependency for PrettyFormatter
-import boxen from 'boxen'; // Dependency for PrettyFormatter
+import chalk from 'chalk';
+import boxen from 'boxen';
 import { Writable } from 'stream';
-// --- Configuration ---
 const standardLevels = {
   error: 0,
   warn: 1,
@@ -3063,9 +2914,7 @@ const standardLevels = {
 };
 type LogLevel = keyof typeof standardLevels;
 type CustomLevels = Record<string, number>;
-// Combine standard and potential custom levels for type checking
-type AllLogLevels = LogLevel | 'success' | keyof CustomLevels; // Include 'success' explicitly if used often
-// --- Interfaces ---
+type AllLogLevels = LogLevel | 'success' | keyof CustomLevels;
 export interface LogEntry {
   level: string;
   message: string | object;
@@ -3079,10 +2928,8 @@ export interface Transport {
   log(formattedMessage: string, entry: LogEntry): void;
   level?: string;
   close?(): void;
-  // Add formatter property to the interface for type safety
   formatter: Formatter;
 }
-// --- Formatters ---
 export class JsonFormatter implements Formatter {
   format(entry: LogEntry): string {
     const logObject = {
@@ -3092,12 +2939,10 @@ export class JsonFormatter implements Formatter {
       ...entry.meta,
     };
     try {
-      // Handle potential circular references and BigInts
       return JSON.stringify(logObject, (key, value) =>
         typeof value === 'bigint' ? value.toString() : value,
       );
     } catch (error) {
-      // Fallback for stringification errors (e.g., circular refs)
       return JSON.stringify({
         level: entry.level,
         message: `[Unserializable Object: ${
@@ -3145,9 +2990,9 @@ export class PrettyFormatter implements Formatter {
     this.options = {
       useColors: options.useColors ?? true,
       useBoxes: options.useBoxes ?? false,
-      maxDepth: options.maxDepth ?? 3, // Increased default depth slightly
+      maxDepth: options.maxDepth ?? 3,
       indent: options.indent ?? 2,
-      stringLengthLimit: options.stringLengthLimit ?? 150, // Increased limit slightly
+      stringLengthLimit: options.stringLengthLimit ?? 150,
       arrayLengthLimit: options.arrayLengthLimit ?? 5,
       objectKeysLimit: options.objectKeysLimit ?? 5,
       showTimestamp: options.showTimestamp ?? false,
@@ -3162,28 +3007,22 @@ export class PrettyFormatter implements Formatter {
     return 'default';
   }
   private highlightSemantics(str: string): string {
-    // Avoid double-coloring numbers if useBoxes is true (boxen will color the whole box)
     if (!this.options.useColors) return str;
     try {
       const hasAnsi = new RegExp(
-        // eslint-disable-next-line no-control-regex
         '(?:\\u001b\\[[0-9;]*m|\\x1b\\[[0-9;]*m|\\u001b\\[.*?m|\\x1b\\[.*?m)',
       ).test(str);
-      // Highlight file paths
       str = str.replace(
         /([./\w-]+\.(?:ts|js|py|sh|json|log|txt|md|html|css))/g,
         chalk.underline.blue('$1'),
       );
-      // Highlight error keywords
       str = str.replace(
         /\b(error|exception|fail(?:ed)?|traceback|stack|warn(?:ing)?|critical|fatal)\b/gi,
         chalk.bgRed.white('$1'),
       );
-      // Only highlight numbers if not using boxes (to avoid double-coloring)
       if (!this.options.useBoxes && !hasAnsi) {
         str = str.replace(/\b(\d+(?:\.\d+)?)\b/g, chalk.yellow('$1'));
       }
-      // Highlight common log levels in messages
       str = str.replace(/\b(INFO|DEBUG|WARN|ERROR|SUCCESS|HTTP|VERBOSE|SILLY)\b/g, (match) => {
         const style = PrettyFormatter.LEVEL_STYLES[match.toLowerCase()] || {
           color: chalk.white,
@@ -3198,14 +3037,12 @@ export class PrettyFormatter implements Formatter {
   private formatValue(value: any, level = 0): string {
     const pad = ' '.repeat(this.options.indent * level);
     const colorize = this.options.useColors;
-    // Max depth check
     if (level > this.options.maxDepth) {
       if (Array.isArray(value)) return colorize ? chalk.gray('[Array]') : '[Array]';
       if (typeof value === 'object' && value !== null)
         return colorize ? chalk.gray('[Object]') : '[Object]';
       return colorize ? chalk.gray('...') : '...';
     }
-    // Type-based formatting
     if (value === null) return colorize ? chalk.gray('null') : 'null';
     if (value === undefined) return colorize ? chalk.gray('undefined') : 'undefined';
     if (typeof value === 'string') {
@@ -3214,7 +3051,6 @@ export class PrettyFormatter implements Formatter {
         highlighted.length > this.options.stringLengthLimit
           ? highlighted.slice(0, this.options.stringLengthLimit) + '...'
           : highlighted;
-      // Use JSON.stringify for proper escaping, then remove surrounding quotes for readability
       const jsonStr = JSON.stringify(truncated);
       return colorize ? chalk.yellowBright(jsonStr.slice(1, -1)) : jsonStr.slice(1, -1);
     }
@@ -3241,7 +3077,7 @@ export class PrettyFormatter implements Formatter {
       const max = this.options.arrayLengthLimit;
       for (let i = 0; i < Math.min(value.length, max); i++) {
         out += pad + '  ' + this.formatValue(value[i], level + 1);
-        if (i < Math.min(value.length, max) - 1 || value.length > max) out += ','; // Add comma if not last shown or if truncated
+        if (i < Math.min(value.length, max) - 1 || value.length > max) out += ',';
         out += '\n';
       }
       if (value.length > max) {
@@ -3252,7 +3088,6 @@ export class PrettyFormatter implements Formatter {
       return out;
     }
     if (typeof value === 'object' && value !== null) {
-      // Handle potential circular references more gracefully during formatting
       try {
         const keys = Object.keys(value);
         if (keys.length === 0) return '{}';
@@ -3263,7 +3098,7 @@ export class PrettyFormatter implements Formatter {
           const keyStr = colorize ? chalk.cyanBright(`"${key}"`) : `"${key}"`;
           out += pad + '  ' + keyStr + ': ';
           out += this.formatValue(value[key], level + 1);
-          if (idx < Math.min(keys.length, max) - 1 || keys.length > max) out += ','; // Add comma
+          if (idx < Math.min(keys.length, max) - 1 || keys.length > max) out += ',';
           out += '\n';
         }
         if (keys.length > max) {
@@ -3273,19 +3108,16 @@ export class PrettyFormatter implements Formatter {
         out += pad + '}';
         return out;
       } catch (e) {
-        // Likely a circular reference or other object traversal issue
         return colorize
           ? chalk.redBright('[Object Formatting Error]')
           : '[Object Formatting Error]';
       }
     }
-    // Fallback for other types
     return colorize ? chalk.white(String(value)) : String(value);
   }
   format(entry: LogEntry): string {
     const { level, message, meta, timestamp } = entry;
     const style = PrettyFormatter.LEVEL_STYLES[level] || PrettyFormatter.LEVEL_STYLES.default;
-    // When using boxes, do not color the inner message at all
     let formattedMessage = typeof message === 'string' ? message : JSON.stringify(message);
     let formattedMeta = '';
     if (meta && Object.keys(meta).length > 0 && meta !== message) {
@@ -3316,7 +3148,6 @@ export class PrettyFormatter implements Formatter {
     }
   }
 }
-// --- Transports ---
 export class ConsoleTransport implements Transport {
   public formatter: Formatter;
   public level?: string;
@@ -3341,7 +3172,6 @@ export class FileTransport implements Transport {
   public level?: string;
   constructor(options: { filename: string; formatter?: Formatter; level?: string }) {
     this.filename = options.filename;
-    // Default to JSON for files unless overridden
     this.formatter = options.formatter ?? new JsonFormatter();
     this.level = options.level;
     this.ensureLogDir(this.filename);
@@ -3349,9 +3179,7 @@ export class FileTransport implements Transport {
     this.stream.on('error', (err) => {
       console.error(`Error writing to log file ${this.filename}:`, err);
     });
-    // Handle stream closing gracefully
     this.stream.on('finish', () => {
-      // console.log(`Log stream closed for ${this.filename}`);
     });
   }
   private ensureLogDir(logPath: string): void {
@@ -3372,7 +3200,6 @@ export class FileTransport implements Transport {
     });
   }
   close(): void {
-    // Promisify stream end for cleaner shutdown
     new Promise<void>((resolve) => {
       this.stream.end(() => resolve());
     }).catch((err) => {
@@ -3380,7 +3207,6 @@ export class FileTransport implements Transport {
     });
   }
 }
-// --- Logger Core ---
 export interface LoggerOptions {
   level?: LogLevel | string;
   levels?: CustomLevels;
@@ -3389,12 +3215,9 @@ export interface LoggerOptions {
   exitOnError?: boolean;
 }
 export class Logger {
-  private options: Required<Omit<LoggerOptions, 'levels'>>; // Omit levels as it's merged into this.levels
+  private options: Required<Omit<LoggerOptions, 'levels'>>;
   private levels: Record<string, number>;
   private transports: Transport[];
-  // --- TypeScript Fix: Explicit Method Signatures ---
-  // Define methods for standard levels + 'success' so TypeScript knows they exist.
-  // The actual implementation is still handled dynamically below or via the core `log` method.
   error!: (message: string | object, meta?: Record<string, any>) => void;
   warn!: (message: string | object, meta?: Record<string, any>) => void;
   info!: (message: string | object, meta?: Record<string, any>) => void;
@@ -3402,15 +3225,13 @@ export class Logger {
   verbose!: (message: string | object, meta?: Record<string, any>) => void;
   debug!: (message: string | object, meta?: Record<string, any>) => void;
   silly!: (message: string | object, meta?: Record<string, any>) => void;
-  success!: (message: string | object, meta?: Record<string, any>) => void; // Include success if it's commonly used
-  // --- End TypeScript Fix ---
+  success!: (message: string | object, meta?: Record<string, any>) => void;
   constructor(options: LoggerOptions = {}) {
-    // Define levels, merging standard and custom. Ensure 'success' is present if used.
     this.levels = {
       ...standardLevels,
       success: standardLevels.info,
       ...(options.levels ?? {}),
-    }; // Map success to info level by default
+    };
     const defaultTransports = options.transports ?? [
       new ConsoleTransport({
         formatter: new PrettyFormatter({ useColors: true }),
@@ -3423,10 +3244,7 @@ export class Logger {
       exitOnError: options.exitOnError ?? false,
     };
     this.transports = this.options.transports;
-    // --- Dynamic Method Implementation ---
-    // This part still creates the runtime methods, but TypeScript now relies on the explicit signatures above.
     Object.keys(this.levels).forEach((level) => {
-      // Assign the implementation to the pre-declared properties
       (this as any)[level] = (message: string | object, meta?: Record<string, any>) => {
         this.log(level, message, meta);
       };
@@ -3437,9 +3255,8 @@ export class Logger {
     const configuredLevelValue = this.levels[this.options.level as string] ?? this.levels.info;
     if (levelValue === -1) {
       console.warn(`Attempted to log with unknown level: "${level}"`);
-      return; // Don't log unknown levels
+      return;
     }
-    // Check main logger level
     if (levelValue > configuredLevelValue) {
       return;
     }
@@ -3453,9 +3270,7 @@ export class Logger {
       const transportLevel = transport.level ?? this.options.level;
       const transportLevelValue =
         this.levels[transportLevel as Exclude<keyof AllLogLevels, symbol>] ?? configuredLevelValue;
-      // Check transport-specific level
       if (typeof transportLevelValue === 'number' && levelValue <= transportLevelValue) {
-        // Use the formatter associated with the transport
         const formattedMessage = transport.formatter.format(entry);
         try {
           transport.log(formattedMessage, entry);
@@ -3466,26 +3281,24 @@ export class Logger {
     });
   }
   child(metadata: Record<string, any>): Logger {
-    // Create a new instance, inheriting options but merging metadata
     const childOptions: LoggerOptions = {
       level: this.options.level,
-      levels: this.levels, // Pass the combined levels object
-      transports: this.transports, // Share transports by default
+      levels: this.levels,
+      transports: this.transports,
       metadata: { ...this.options.metadata, ...metadata },
       exitOnError: this.options.exitOnError,
     };
     return new Logger(childOptions);
   }
   close(): void {
-    // Use Promise.all to wait for all streams to close
     Promise.all(
       this.transports.map((transport) => {
         if (typeof transport.close === 'function') {
           try {
-            return transport.close(); // Assuming close might return a promise or be synchronous
+            return transport.close();
           } catch (err) {
             console.error(`Error closing transport ${transport.constructor.name}:`, err);
-            return Promise.resolve(); // Resolve even if one fails to close others
+            return Promise.resolve();
           }
         }
         return Promise.resolve();
@@ -3494,10 +3307,7 @@ export class Logger {
       console.error('Error during logger close:', err);
     });
   }
-  // --- Placeholder for AI Integration ---
-  // ... (keep the AI placeholder comment)
 }
-// --- Backward Compatibility & Default Export ---
 const defaultLogFilePath = process.env.LOG_FILE_PATH || path.join(process.cwd(), 'logs/app.log');
 const defaultLogger = new Logger({
   level: (process.env.LOG_LEVEL as LogLevel) || 'info',
@@ -3505,7 +3315,7 @@ const defaultLogger = new Logger({
     new ConsoleTransport({
       formatter: new PrettyFormatter({
         useColors: true,
-        useBoxes: true, // Keep boxes for default console
+        useBoxes: true,
         showTimestamp: false,
       }),
       level: (process.env.CONSOLE_LOG_LEVEL as LogLevel) || undefined,
@@ -3514,17 +3324,15 @@ const defaultLogger = new Logger({
       filename: defaultLogFilePath,
       formatter: new PrettyFormatter({
         useColors: false,
-        useBoxes: false, // No boxes for file transport
+        useBoxes: false,
         showTimestamp: true,
-      }), // Default file transport to JSON
+      }),
       level: (process.env.FILE_LOG_LEVEL as LogLevel) || undefined,
     }),
   ],
-  // levels definition already includes 'success' mapped to 'info' in the constructor
 });
 export default defaultLogger;
 export { standardLevels };
-// --- Usage Examples ---
 </file>
 
 <file path="utils/mimeTypes.ts">
@@ -3552,7 +3360,6 @@ export const mimeTypes: Record<string, string> = {
 </file>
 
 <file path="main.ts">
-// main.ts
 import './routes';
 import { HttpServer } from './core/server';
 import { config } from './config/server.config';
@@ -3563,57 +3370,9 @@ server.start();
 </file>
 
 <file path="embedding_service_helper.py">
-#!/usr/bin/env python
-"""
-get_clip_embedding.py – now supports batching & on-disk caching
-Usage:
-    python get_clip_embedding.py <file_paths> [--num_frames NUM] [--model MODEL] [--debug]
-This script computes CLIP embeddings for one or more image or video files.
-For video files, it extracts multiple frames selected via an advanced, content-aware sampling
-strategy that combines scene-representative sampling with visual entropy-based salience and
-temporal smoothing. The embeddings are computed in batch and averaged.
-The script uses the Hugging Face Transformers library for CLIP model loading and inference,
-and ffmpeg for video processing. It supports caching to avoid redundant computation.
-Features:
-    • Batch processing of multiple files.
-    • On-disk caching to avoid redundant computation.
-    • Image and video file support (JPEG, PNG, MP4, etc.).
-    • Advanced video frame extraction using scene detection and visual entropy.
-    • CLIP model loading and inference using Hugging Face Transformers.
-    • Inference on CPU or GPU (if available).
-    • Configurable number of frames for video processing.
-    • Command-line arguments for file paths, model name, number of frames, and debug metadata.
-    • JSON output format for embedding and debug metadata.
-    • Error handling and logging.
-    • Debug metadata output for advanced sampling methods.
-    • Support for multiple CLIP models from Hugging Face.
-    • Parallel frame extraction for performance.
-    • In-memory frame extraction without temporary file I/O.
-    • Modular design with classes for video processing and CLIP inference.
-    • Configurable parameters via command-line arguments.
-    • Structured logging and centralized error handling.
-    • Scene detection via PySceneDetect (if installed) to extract scene midpoints.
-    • Visual entropy computation as a salience heuristic.
-    • Temporal diversity enforcement (smoothing) via a minimum time-gap filter.
-    • Fallback to uniform sampling if advanced scene analysis fails.
-    • Optional debug metadata (candidate timestamps, entropy values, selected timestamps).
-    • Optional data augmentation for images and video frames.
-Performance and production readiness improvements include:
-    • Parallel frame extraction using concurrent futures.
-    • In-memory frame extraction without temporary file I/O.
-    • Modular design with classes for video processing and CLIP inference.
-    • Configurable parameters via command-line arguments.
-    • Structured logging and centralized error handling.
-Advanced improvements in this version:
-    • Scene detection via PySceneDetect (if installed) to extract scene midpoints.
-    • Visual entropy computation as a salience heuristic.
-    • Temporal diversity enforcement (smoothing) via a minimum time-gap filter.
-    • Fallback to uniform sampling if advanced scene analysis fails.
-    • Optional debug metadata (candidate timestamps, entropy values, selected timestamps).
-    • Optional data augmentation for images and video frames.
-"""
 import logging
 import sys
+print(sys.executable)
 import os
 import json
 from PIL import Image
@@ -3634,7 +3393,6 @@ class StructuredFormatter(logging.Formatter):
         if record.exc_info:
             base["exc"] = self.formatException(record.exc_info)
         return json.dumps(base)
-# Setup root logger for both console and file
 console_handler = logging.StreamHandler(sys.stderr)
 console_handler.setFormatter(
     logging.Formatter(
@@ -3648,7 +3406,7 @@ log_file_path = os.path.join(
 file_handler = logging.FileHandler(log_file_path)
 file_handler.setFormatter(StructuredFormatter())
 root_logger = logging.getLogger()
-root_logger.setLevel(logging.DEBUG)  # Set to DEBUG for maximum output
+root_logger.setLevel(logging.DEBUG)
 root_logger.handlers = [console_handler, file_handler]
 logging.getLogger("transformers").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
@@ -3656,7 +3414,6 @@ logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
 logging.getLogger().setLevel(logging.ERROR)
 def handle_sigint(signum, frame):
     logging.getLogger(__name__).info("Received SIGINT (Ctrl+C). Exiting gracefully.")
-    # Perform any additional cleanup here if needed
     sys.exit(0)
 def handle_sigterm(signum, frame):
     logging.getLogger(__name__).info("Received SIGTERM. Exiting gracefully.")
@@ -3669,59 +3426,19 @@ import subprocess
 import concurrent.futures
 import io
 from contextlib import nullcontext
-# Supported file extensions for images and videos.
 IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif"]
 VIDEO_EXTS = [".mp4", ".mov", ".webm", ".ogg", ".m4v"]
 def compute_entropy(image: Image.Image) -> float:
-    """
-    Compute the visual entropy of an image as a simple salience measure.
-    The image is converted to grayscale; its normalized histogram is used to
-    calculate entropy (in bits).
-    Args:
-        image (PIL.Image): The input image.
-    Returns:
-        float: The computed entropy value.
-    """
     grayscale = image.convert("L")
     histogram = grayscale.histogram()
     total_pixels = sum(histogram)
     entropy = 0.0
-    # Compute entropy as sum(-p * log2(p)) for nonzero probabilities.
     for count in histogram:
         if count > 0:
             p = count / total_pixels
             entropy -= p * math.log(p, 2)
     return entropy
 class VideoProcessor:
-    """
-    A class to manage video processing tasks like duration extraction and advanced
-    frame extraction using a combination of scene detection, visual entropy, and
-    temporal smoothing.
-    The class uses ffmpeg for video processing and PIL for image handling.
-    It also provides methods for extracting frames based on advanced sampling
-    strategies, including scene detection and visual entropy salience.
-    The class is designed to be modular and reusable, allowing for easy integration
-    into larger systems or pipelines.
-    Args:
-        video_path (str): Path to the video file.
-        num_frames (int): Number of frames to sample from the video.
-        logger (logging.Logger): Optional logger for debug information.
-        executor (concurrent.futures.ThreadPoolExecutor): Shared executor for parallel frame extraction.
-    Attributes:
-        video_path (str): Path to the video file.
-        num_frames (int): Number of frames to sample from the video.
-        logger (logging.Logger): Logger for debug information.
-        duration (float): Duration of the video in seconds.
-        executor (concurrent.futures.ThreadPoolExecutor): Shared executor for parallel frame extraction.
-    Methods:
-        get_duration(): Get the duration of the video using ffprobe.
-        get_advanced_sample_times(): Compute candidate sampling timestamps using
-            scene detection, visual entropy, and temporal smoothing.
-        extract_frame(time_sec): Extract a single frame from the video at a
-            specific time (in seconds).
-        extract_frames(): Extract frames concurrently based on advanced sampling times.
-        compute_entropy(image): Compute the visual entropy of an image.
-    """
     def __init__(self, video_path: str, num_frames: int, logger=None, executor=None):
         self.video_path = video_path
         self.num_frames = num_frames
@@ -3729,12 +3446,6 @@ class VideoProcessor:
         self.duration = self.get_duration()
         self.executor = executor
     def get_duration(self) -> float:
-        """Get the duration of the video in seconds using ffprobe.
-        Returns:
-            float: Duration of the video in seconds.
-        Raises:
-            RuntimeError: If ffprobe fails to retrieve the duration.
-        """
         self.logger.debug(
             f"Calling ffprobe to get duration for video: {self.video_path}"
         )
@@ -3762,40 +3473,22 @@ class VideoProcessor:
             self.logger.error("Failed to get video duration", exc_info=True)
             raise RuntimeError(f"Failed to get video duration: {e}")
     def get_advanced_sample_times(self) -> tuple:
-        """
-        Compute candidate sampling timestamps using a combination of scene detection,
-        visual entropy salience, and temporal smoothing. The method first attempts
-        to extract scene boundaries via PySceneDetect. If successful, it computes a
-        candidate timestamp for each scene (using the midpoint). For each candidate, a
-        frame is extracted to compute visual entropy. Candidates are then ranked and
-        filtered to enforce a minimum time gap (diversity). If scene detection fails or
-        does not yield enough candidates, the method falls back to uniform sampling.
-        The method returns a tuple containing the selected timestamps and debug metadata
-        (if requested).
-        Args:
-            None
-        Returns:
-            tuple: (selected_timestamps, debug_metadata)
-                selected_timestamps (list): List of selected timestamps for frame extraction.
-                debug_metadata (dict): Debug metadata containing candidate timestamps,
-                                       entropy values, and method used.
-        Raises:
-            RuntimeError: If frame extraction fails or no frames are extracted.
-        """
         candidate_times = None
         debug_metadata = {}
         method_used = ""
-        # Attempt scene detection with PySceneDetect.
         try:
             from scenedetect import VideoManager, SceneManager
             from scenedetect.detectors import ContentDetector
+            self.logger.debug(
+                f"Starting scene detection with PySceneDetect for video: {self.video_path}"
+            )
             video_manager = VideoManager([self.video_path])
             scene_manager = SceneManager()
-            # The threshold here is heuristic; adjust based on your domain.
             scene_manager.add_detector(ContentDetector(threshold=25, min_scene_len=10))
             video_manager.start()
             scene_manager.detect_scenes(frame_source=video_manager, show_progress=True)
             scene_list = scene_manager.get_scene_list()
+            self.logger.debug(f"Scene detection complete. Scene list: {scene_list}")
             candidate_times = [
                 (scene[0].get_seconds() + scene[1].get_seconds()) / 2
                 for scene in scene_list
@@ -3803,24 +3496,22 @@ class VideoProcessor:
             debug_metadata["scene_count"] = len(scene_list)
             method_used = "scene_detection"
             self.logger.debug(f"Detected {len(scene_list)} scenes.")
-            # If scene coverage is insufficient or the video is too short, fall back to uniform sampling.
             if (
                 len(candidate_times)
-                < self.num_frames  # fewer scene midpoints than needed frames
-                or len(scene_list) < (self.num_frames // 2)  # too few distinct scenes
+                < self.num_frames
+                or len(scene_list) < (self.num_frames // 2)
                 or self.duration
-                < (self.num_frames * 2)  # video too short for advanced sampling
+                < (self.num_frames * 2)
             ):
                 self.logger.warning(
                     "Insufficient scene coverage or short video; falling back to uniform sampling."
                 )
                 candidate_times = None
         except Exception as e:
-            self.logger.warning(
-                "Scene detection failed or PySceneDetect not installed; falling back to dense candidate extraction.",
+            self.logger.error(
+                f"Scene detection failed or PySceneDetect not installed. Exception: {e}",
                 exc_info=True,
             )
-        # If candidate times are insufficient, fall back to uniform dense extraction.
         if not candidate_times or len(candidate_times) < self.num_frames:
             candidate_times = [
                 (i + 1) * self.duration / (self.num_frames + 1)
@@ -3829,7 +3520,6 @@ class VideoProcessor:
             method_used = "fallback_uniform"
             debug_metadata = {"method_used": method_used, "timestamps": candidate_times}
             return candidate_times, debug_metadata
-        # For each candidate timestamp, extract the frame and compute visual entropy.
         candidate_frames = []
         executor = self.executor or concurrent.futures.ThreadPoolExecutor()
         with executor if self.executor is None else nullcontext(executor):
@@ -3846,7 +3536,6 @@ class VideoProcessor:
                         f"Failed to extract candidate frame at {t} sec: {e}"
                     )
         if not candidate_frames:
-            # If extraction completely failed, fallback.
             uniform_times = [
                 (i + 1) * self.duration / (self.num_frames + 1)
                 for i in range(self.num_frames)
@@ -3856,7 +3545,6 @@ class VideoProcessor:
                 "timestamps": uniform_times,
             }
             return uniform_times, debug_metadata
-        # Compute entropy values for all candidate frames.
         entropy_values = []
         for t, frame in candidate_frames:
             try:
@@ -3865,19 +3553,16 @@ class VideoProcessor:
                 entropy_val = 0.0
             entropy_values.append((t, entropy_val))
         debug_metadata["entropy_values"] = entropy_values
-        # Rank candidates by entropy (descending).
         entropy_values.sort(key=lambda x: x[1], reverse=True)
-        # Select frames ensuring temporal diversity.
         selected = []
         diversity_threshold = (
             self.duration * 0.05
-        )  # At least 5% of video duration apart.
+        )
         for t, entropy_val in entropy_values:
             if not selected or all(abs(t - s) > diversity_threshold for s in selected):
                 selected.append(t)
             if len(selected) == self.num_frames:
                 break
-        # In case diversity filtering does not yield enough frames, fill with lower-ranked ones.
         debug_metadata["selected_entropy_values"] = [
             (t, entropy_val) for t, entropy_val in entropy_values if t in selected
         ]
@@ -3891,19 +3576,11 @@ class VideoProcessor:
         debug_metadata["method_used"] = method_used
         return selected, debug_metadata
     def extract_frame(self, time_sec: float) -> Image.Image:
-        """
-        Extract a single frame from the video at a specific time (in seconds)
-        by piping JPEG data through stdout.
-        Args:
-            time_sec (float): Time in seconds to extract the frame.
-        Returns:
-            PIL.Image: The extracted frame as a PIL Image object.
-        Raises:
-            RuntimeError: If ffmpeg fails to extract the frame.
-        """
         command = [
             "ffmpeg",
             "-y",
+            "-loglevel",
+            "debug",
             "-ss",
             str(time_sec),
             "-i",
@@ -3917,38 +3594,51 @@ class VideoProcessor:
             "-",
         ]
         self.logger.debug(
-            f"Calling ffmpeg to extract frame at {time_sec} seconds from video: {self.video_path}"
+            f"Calling ffmpeg to extract frame at {time_sec} seconds from video: {self.video_path} with command: {' '.join(command)}"
         )
         try:
             result = subprocess.run(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+                text=False,
             )
             if not result.stdout:
-                raise RuntimeError("No frame data returned from ffmpeg.")
+                error_output = (
+                    result.stderr.decode("utf-8", errors="ignore")
+                    if result.stderr
+                    else "No stderr output"
+                )
+                self.logger.error(
+                    f"No frame data returned from ffmpeg at {time_sec} sec. FFmpeg stderr:\n{error_output}"
+                )
+                raise RuntimeError(
+                    f"No frame data returned from ffmpeg. Stderr: {error_output}"
+                )
             image = Image.open(io.BytesIO(result.stdout)).convert("RGB")
             self.logger.debug(f"Extracted frame at {time_sec} seconds")
             return image
+        except subprocess.CalledProcessError as e:
+            error_output = (
+                e.stderr.decode("utf-8", errors="ignore")
+                if e.stderr
+                else "No stderr output"
+            )
+            self.logger.error(
+                f"Frame extraction failed at {time_sec} sec. FFmpeg stderr:\n{error_output}",
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"Failed to extract frame at {time_sec} sec: {e}. Stderr: {error_output}"
+            )
         except Exception as e:
             self.logger.error(
-                f"Frame extraction failed at {time_sec} sec", exc_info=True
+                f"Frame extraction failed at {time_sec} sec with unexpected error",
+                exc_info=True,
             )
             raise RuntimeError(f"Failed to extract frame at {time_sec} sec: {e}")
     def extract_frames(self) -> tuple:
-        """
-        Extract frames concurrently based on advanced sampling times.
-        Returns a tuple: (list of PIL.Image objects, debug_metadata)
-        The frames are extracted using the advanced sampling method, which
-        combines scene detection, visual entropy, and temporal smoothing.
-        Args:
-            None
-        Returns:
-            tuple: (frames, debug_metadata)
-                frames (list): List of extracted frames as PIL Image objects.
-                debug_metadata (dict): Debug metadata containing candidate timestamps,
-                                       entropy values, and method used.
-        Raises:
-            RuntimeError: If frame extraction fails or no frames are extracted.
-        """
         timestamps, debug_metadata = self.get_advanced_sample_times()
         frames = []
         executor = self.executor or concurrent.futures.ThreadPoolExecutor()
@@ -3968,28 +3658,6 @@ class VideoProcessor:
         frames.sort(key=lambda x: x[0])
         return [frame for _, frame in frames], debug_metadata
 class CLIPEmbedder:
-    """
-    A class to handle CLIP model loading and embedding computation for images and videos.
-    The class uses the Hugging Face Transformers library to load the CLIP model and
-    processor. It provides methods for computing embeddings for both single images and
-    averaged embeddings from multiple video frames.
-    Args:
-        model_name (str): Name of the CLIP model to load from Hugging Face.
-        device (str): Device to run the model on ('mps', 'cuda', or 'cpu').
-        logger (logging.Logger): Optional logger for debug information.
-        enable_augmentation (bool): If True, apply basic image augmentations.
-    Attributes:
-        model_name (str): Name of the CLIP model.
-        device (str): Device to run the model on.
-        logger (logging.Logger): Logger for debug information.
-        model (CLIPModel): Loaded CLIP model.
-        processor (CLIPProcessor): Processor for pre-processing inputs.
-        enable_augmentation (bool): Flag to enable data augmentation.
-        augmentation_transforms (torchvision.transforms.Compose): Data augmentation transforms.
-    Methods:
-        get_image_embedding(image): Compute and return the normalized CLIP embedding for a single image.
-        get_video_embedding(frames): Compute and return an averaged CLIP embedding from multiple video frames.
-    """
     def __init__(
         self,
         model_name="openai/clip-vit-base-patch32",
@@ -3998,7 +3666,6 @@ class CLIPEmbedder:
         enable_augmentation=False,
     ):
         self.logger = logger
-        # Device selection: Prefer MPS on M1 Mac, then CUDA, then CPU.
         if device is None:
             if torch.backends.mps.is_available():
                 self.device = "mps"
@@ -4010,7 +3677,6 @@ class CLIPEmbedder:
             self.device = device
         self.model = CLIPModel.from_pretrained(model_name).to(self.device)
         self.processor = CLIPProcessor.from_pretrained(model_name)
-        # Optional data augmentation transforms for images.
         self.enable_augmentation = enable_augmentation
         if enable_augmentation:
             import torchvision.transforms as T
@@ -4023,10 +3689,6 @@ class CLIPEmbedder:
         else:
             self.augmentation_transforms = None
     def get_image_embedding(self, image: Image.Image) -> list:
-        """
-        Compute and return the normalized CLIP embedding for a single image,
-        optionally applying data augmentation.
-        """
         if self.enable_augmentation:
             image = self.augmentation_transforms(image)
         inputs = self.processor(images=image, return_tensors="pt").to(self.device)
@@ -4035,11 +3697,6 @@ class CLIPEmbedder:
         image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
         return image_features[0].cpu().numpy().tolist()
     def get_video_embedding(self, frames: list) -> list:
-        """
-        Compute and return an averaged CLIP embedding from multiple video frames.
-        Future improvements can include weighted or attention-based aggregation.
-        """
-        # If augmentation is enabled, apply transforms to each frame.
         if self.enable_augmentation:
             frames = [self.augmentation_transforms(f) for f in frames]
         inputs = self.processor(images=frames, return_tensors="pt", padding=True).to(
@@ -4058,7 +3715,7 @@ def compute_single_embedding(fp, args, embedder, executor=None):
     logger = logging.getLogger(__name__)
     try:
         debug_metadata = {
-            "model": getattr(args, "model", None),
+            "model": f"{getattr(args, 'model', None)} - {getattr(embedder, 'device', None)}",
             "num_frames": (
                 getattr(args, "num_frames", None) if ext in VIDEO_EXTS else None
             ),
@@ -4133,7 +3790,6 @@ def process_batch(image_paths, embedder, args, logger, shared_executor):
         result = compute_single_embedding(fp, args, embedder, shared_executor)
         if "error" in result and "detail" not in result:
             result["detail"] = f"Failed to process file: {fp}"
-        # Ensure all keys are present
         for k in ["embedding", "debugMetadata", "error", "detail"]:
             if k not in result:
                 result[k] = None
@@ -4179,7 +3835,7 @@ def main_service():
         try:
             line = sys.stdin.readline()
             if not line:
-                break  # EOF
+                break
             line = line.strip()
             if not line:
                 continue
@@ -4198,7 +3854,6 @@ def main_service():
                 )
                 print(json.dumps(results), flush=True)
             except Exception as e:
-                # Instead of exiting, print a batchError JSON and continue
                 batch_error = {
                     "batchError": str(e),
                     "detail": f"{type(e).__name__}: {e}",
@@ -4213,11 +3868,967 @@ if __name__ == "__main__":
 </file>
 
 <file path="requirements.txt">
-pillow==9.5.0
-torch==2.1.0
-scenedetect==0.7.0
-torchvision==0.16.0
-transformers==4.30.2
+pillow==11.2.1
+torch==2.7
+torchvision==0.22
+transformers
+numpy==2.2.5
+scenedetect
+opencv-python
+</file>
+
+<file path="__mocks__/logger.ts">
+module.exports = {
+  info: jest.fn(),
+  error: jest.fn(),
+  warn: jest.fn(),
+};
+</file>
+
+<file path="core/httpParser.test.ts">
+import { HttpRequestParser } from '../../src/core/httpParser';
+import { IncomingRequest } from '../../src/entities/http';
+function feedAll(parser: HttpRequestParser, str: string): IncomingRequest | null {
+  return parser.feed(Buffer.from(str, 'utf8'));
+}
+describe('HttpRequestParser', () => {
+  let parser: HttpRequestParser;
+  beforeEach(() => {
+    parser = new HttpRequestParser();
+  });
+  test('parses simple GET request', () => {
+    const req = feedAll(parser, 'GET /hello HTTP/1.1\r\nHost: example.com\r\n\r\n');
+    expect(req).not.toBeNull();
+    expect(req?.method).toBe('GET');
+    expect(req?.path).toBe('/hello');
+    expect(req?.headers['host']).toBe('example.com');
+    expect(req?.invalid).toBeFalsy();
+  });
+  test('parses POST with Content-Length', () => {
+    const req = feedAll(
+      parser,
+      'POST /submit HTTP/1.1\r\nHost: test\r\nContent-Length: 11\r\n\r\nHello World',
+    );
+    expect(req).not.toBeNull();
+    expect(req?.method).toBe('POST');
+    expect(req?.body?.toString()).toBe('Hello World');
+  });
+  test('handles chunked transfer-encoding', () => {
+    const parts = [
+      'POST /upload HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n',
+      '5\r\nHello\r\n',
+      '6\r\n World\r\n',
+      '0\r\n\r\n',
+    ];
+    let result: IncomingRequest | null = null;
+    for (const p of parts) {
+      const feedResult = parser.feed(Buffer.from(p, 'utf8'));
+      if (feedResult) result = feedResult;
+    }
+    if (!result) {
+      const feedResult = parser.feed(Buffer.alloc(0));
+      if (feedResult) result = feedResult;
+    }
+    expect(result).not.toBeNull();
+    expect(result?.body?.toString()).toBe('Hello World');
+  });
+  test('rejects invalid request line', () => {
+    const req = feedAll(parser, 'BADREQUEST\r\nHost: test\r\n\r\n');
+    expect(req).not.toBeNull();
+    expect(req?.invalid).toBeTruthy();
+  });
+  test('rejects unsupported HTTP method', () => {
+    const req = feedAll(parser, 'FOO / HTTP/1.1\r\nHost: test\r\n\r\n');
+    expect(req).not.toBeNull();
+    expect(req?.invalid).toBeTruthy();
+  });
+  test('rejects too many headers', () => {
+    const headers = Array(1005).fill('X-Test: 123').join('\r\n');
+    const req = feedAll(parser, `GET / HTTP/1.1\r\n${headers}\r\n\r\n`);
+    expect(req).not.toBeNull();
+    expect(req?.invalid).toBeTruthy();
+  });
+  test('rejects body exceeding MAX_BODY_BYTES', () => {
+    const bigBody = 'A'.repeat(11 * 1024 * 1024);
+    const req = feedAll(
+      parser,
+      `POST / HTTP/1.1\r\nHost: test\r\nContent-Length: ${bigBody.length}\r\n\r\n${bigBody}`,
+    );
+    expect(req).not.toBeNull();
+    expect(req?.invalid).toBeTruthy();
+  });
+  test('parses partial requests across multiple TCP chunks', () => {
+    const req1 = parser.feed(Buffer.from('GET /mul', 'utf8'));
+    expect(req1).toBeNull();
+    const req2 = parser.feed(Buffer.from('ti-part HTTP/1.1\r\nHost: te', 'utf8'));
+    expect(req2).toBeNull();
+    const req3 = parser.feed(Buffer.from('st\r\n\r\n', 'utf8'));
+    expect(req3).not.toBeNull();
+    expect(req3?.method).toBe('GET');
+    expect(req3?.path).toBe('/multi-part');
+    expect(req3?.headers['host']).toBe('test');
+  });
+  test('parses headers with continuations', () => {
+    const req = feedAll(
+      parser,
+      'GET / HTTP/1.1\r\nHost: test\r\nX-Long-Header: abc\r\n def\r\n\r\n',
+    );
+    expect(req).not.toBeNull();
+    expect(req?.headers['x-long-header']).toBe('abc def');
+  });
+  test('ignores trailers after chunked body', () => {
+    const parts = [
+      'POST /upload HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n',
+      '5\r\nHello\r\n',
+      '6\r\n World\r\n',
+      '0\r\nSome-Trailer: yes\r\n\r\n',
+    ];
+    let result: IncomingRequest | null = null;
+    for (const p of parts) {
+      const feedResult = parser.feed(Buffer.from(p, 'utf8'));
+      if (feedResult) result = feedResult;
+    }
+    expect(result).not.toBeNull();
+    expect(result?.body?.toString()).toBe('Hello World');
+  });
+  test('rejects missing Host header in HTTP/1.1', () => {
+    const req = feedAll(parser, 'GET /test HTTP/1.1\r\n\r\n');
+    expect(req).not.toBeNull();
+    expect(req?.invalid).toBeTruthy();
+  });
+  test('allows HTTP/1.0 without Host header', () => {
+    const req = feedAll(parser, 'GET /test HTTP/1.0\r\n\r\n');
+    expect(req).not.toBeNull();
+    expect(req?.invalid).toBeFalsy();
+  });
+});
+</file>
+
+<file path="core/parser.test.ts">
+import { parser } from '../../src/core/parser';
+describe('HTTP Parser', () => {
+  it('should parse a simple GET request', () => {
+    const raw = 'GET /hello HTTP/1.1\r\nHost: localhost\r\nUser-Agent: test\r\n\r\n';
+    const parsed = parser.parse(raw);
+    expect(parsed.method).toBe('GET');
+    expect(parsed.path).toBe('/hello');
+    expect(parsed.httpVersion).toBe('HTTP/1.1');
+    expect(parsed.headers.host).toBe('localhost');
+    expect(parsed.headers['user-agent']).toBe('test');
+  });
+  it('should handle missing headers gracefully', () => {
+    const raw = 'POST /upload HTTP/1.1\r\n\r\n';
+    const parsed = parser.parse(raw);
+    expect(parsed.method).toBe('POST');
+    expect(parsed.path).toBe('/upload');
+    expect(parsed.headers).toEqual({});
+  });
+  it('should not crash on completely malformed request', () => {
+    const raw = 'INVALID REQUEST';
+    const parsed = parser.parse(raw);
+    expect(parsed.invalid).toBe(true);
+    expect(parsed.method).toBeFalsy();
+    expect(parsed.path).toBeFalsy();
+  });
+  it('should parse url.pathname and headersMap correctly', () => {
+    const raw = 'GET /hello HTTP/1.1\r\nHost: localhost\r\nUser-Agent: test\r\n\r\n';
+    const parsed = parser.parse(raw);
+    expect(parsed.url?.pathname).toBe('/hello');
+    expect(parsed.headersMap?.get('host')).toEqual(['localhost']);
+  });
+  it('exposes url, path, and query consistently', () => {
+    const raw = 'GET /stream?file=test.mp4 HTTP/1.1\r\nHost: x\r\n\r\n';
+    const r = parser.parse(raw);
+    expect(r.url.pathname).toBe('/stream');
+    expect(r.path).toBe('/stream');
+    expect(r.query).toEqual({ file: 'test.mp4' });
+  });
+  it('includes httpVersion', () => {
+    const raw = 'GET /test HTTP/1.1\r\nHost: x\r\n\r\n';
+    const r = parser.parse(raw);
+    expect(r.httpVersion).toBe('HTTP/1.1');
+  });
+  it('should handle completely empty request', () => {
+    const raw = '';
+    const parsed = parser.parse(raw);
+    expect(parsed.invalid).toBe(true);
+    expect(parsed.method).toBeFalsy();
+    expect(parsed.path).toBeFalsy();
+    expect(parsed.headers).toEqual({});
+  });
+  it('should correctly parse multiple query parameters', () => {
+    const raw = 'GET /search?q=nodejs&sort=desc HTTP/1.1\r\nHost: localhost\r\n\r\n';
+    const parsed = parser.parse(raw);
+    expect(parsed.method).toBe('GET');
+    expect(parsed.path).toBe('/search');
+    expect(parsed.httpVersion).toBe('HTTP/1.1');
+    expect(parsed.headers.host).toBe('localhost');
+    expect(parsed.query).toEqual({ q: 'nodejs', sort: 'desc' });
+  });
+  it('should decode percent-encoded paths', () => {
+    const raw = 'GET /foo%20bar HTTP/1.1\r\nHost: localhost\r\n\r\n';
+    const parsed = parser.parse(raw);
+    expect(parsed.path).toBe('/foo bar');
+  });
+  it('should handle OPTIONS * request', () => {
+    const raw = 'OPTIONS * HTTP/1.1\r\nHost: localhost\r\n\r\n';
+    const parsed = parser.parse(raw);
+    expect(parsed.method).toBe('OPTIONS');
+    expect(parsed.path).toBe('*');
+  });
+  it('should handle duplicated headers gracefully', () => {
+    const raw = `GET / HTTP/1.1\r\nHost: localhost\r\nCookie: a=1\r\nCookie: b=2\r\n\r\n`;
+    const parsed = parser.parse(raw);
+    expect(parsed.headers.host).toBe('localhost');
+    expect(parsed.headers['cookie']).toBe('b=2');
+    expect(parsed.headersMap?.get('cookie')).toEqual(['a=1', 'b=2']);
+  });
+});
+</file>
+
+<file path="core/router.test.ts">
+import { Socket } from 'net';
+import { createRouter } from '../../src/core/router';
+import { sendResponse } from '../../src/entities/sendResponse';
+import type { IncomingRequest } from '../../src/entities/http';
+jest.mock('../../src/entities/sendResponse');
+jest.mock('../../src/utils/logger', () => {
+  return {
+    Logger: jest.fn().mockImplementation(() => ({
+      info: jest.fn(),
+      error: jest.fn(),
+      warn: jest.fn(),
+    })),
+    ConsoleTransport: jest.fn(),
+    FileTransport: jest.fn(),
+    PrettyFormatter: jest.fn(),
+  };
+});
+describe('Router', () => {
+  let router;
+  let socket: Socket;
+  let req: IncomingRequest;
+  beforeEach(() => {
+    router = createRouter();
+    socket = {
+      write: jest.fn(),
+      end: jest.fn(),
+      destroy: jest.fn(),
+    } as unknown as Socket;
+    req = {
+      method: 'GET',
+      path: '/test',
+      query: {},
+      httpVersion: 'HTTP/1.1',
+      headers: {},
+      headersMap: new Map(),
+      url: new URL('http://localhost/test'),
+      raw: '',
+      ctx: {},
+      invalid: false,
+    };
+  });
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+  test('should run middleware in sequence', async () => {
+    const order: string[] = [];
+    router.use(async (_req, _sock, next) => {
+      order.push('mw1');
+      await next();
+      order.push('mw1-after');
+    });
+    router.use(async (_req, _sock, next) => {
+      order.push('mw2');
+      await next();
+      order.push('mw2-after');
+    });
+    router.any('/test', async () => {
+      order.push('handler');
+    });
+    await router.handle(req, socket);
+    expect(order).toEqual(['mw1', 'mw2', 'handler', 'mw2-after', 'mw1-after']);
+  });
+  test('should call matching handler for GET route', async () => {
+    const handler = jest.fn();
+    router.get('/test', handler);
+    await router.handle(req, socket);
+    expect(handler).toHaveBeenCalledWith(req, socket);
+  });
+  test('should respond with 404 if no route matches', async () => {
+    req.path = '/unknown';
+    await router.handle(req, socket);
+    expect(sendResponse).toHaveBeenCalledWith(
+      socket,
+      404,
+      { 'Content-Type': 'text/plain' },
+      'Not Found',
+    );
+  });
+  test('should respond with 405 if method does not match', async () => {
+    req.method = 'POST';
+    router.get('/test', jest.fn());
+    await router.handle(req, socket);
+    expect(sendResponse).toHaveBeenCalledWith(socket, 405, { Allow: 'GET' }, 'Method Not Allowed');
+  });
+  test('should extract params into req.ctx.params', async () => {
+    const paramHandler = jest.fn();
+    router.get('/users/:id', paramHandler);
+    req.path = '/users/123';
+    req.url = new URL('http://localhost/users/123');
+    await router.handle(req, socket);
+    expect(paramHandler).toHaveBeenCalled();
+    expect(req.ctx?.params).toEqual({ id: '123' });
+  });
+  test('should respond with 500 on handler error', async () => {
+    router.get('/error', () => {
+      throw new Error('fail');
+    });
+    req.path = '/error';
+    req.url = new URL('http://localhost/error');
+    await router.handle(req, socket);
+    expect(sendResponse).toHaveBeenCalledWith(
+      socket,
+      500,
+      { 'Content-Type': 'text/plain' },
+      '500 Server Error',
+    );
+  });
+  test('should respond to OPTIONS with Allow header', async () => {
+    req.method = 'OPTIONS';
+    req.path = '/anything';
+    await router.handle(req, socket);
+    expect(sendResponse).toHaveBeenCalledWith(
+      socket,
+      200,
+      { 'Content-Type': 'text/plain', Allow: 'GET, POST, PUT, DELETE, OPTIONS' },
+      'OK',
+    );
+  });
+});
+</file>
+
+<file path="core/server.test.ts">
+import { createServer, Socket } from 'net';
+import { HttpServer } from '../../src/core/server';
+import { sendResponse } from '../../src/entities/sendResponse';
+import logger from '../../src/utils/logger';
+import { config } from '../../src/config/server.config';
+import * as RouterModule from '../../src/core/router';
+import { HttpRequestParser } from '../../src/core/httpParser';
+jest.mock('net');
+jest.mock('../../src/utils/logger');
+jest.mock('../../src/entities/sendResponse');
+jest.mock('../../src/config/server.config', () => ({
+  config: {
+    headerTimeoutMs: 100,
+    bodyTimeoutMs: 100,
+  },
+}));
+describe('HttpServer', () => {
+  let server: HttpServer;
+  let mockSocket: Socket;
+  let mockNetServer: any;
+  let parserInstance: any;
+  let realRouter: any;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockSocket = {
+      on: jest.fn(),
+      once: jest.fn(),
+      write: jest.fn(),
+      end: jest.fn(),
+      destroy: jest.fn(),
+    } as unknown as Socket;
+    parserInstance = new HttpRequestParser();
+    mockNetServer = {
+      on: jest.fn(),
+      listen: jest.fn(),
+      close: jest.fn((cb: () => void) => cb()),
+    };
+    (createServer as jest.Mock).mockReturnValue(mockNetServer);
+    realRouter = RouterModule.createRouter();
+    jest.spyOn(realRouter, 'handle').mockImplementation(jest.fn());
+    server = new HttpServer(3000, realRouter);
+  });
+  test('should listen on provided port', () => {
+    server.start();
+    expect(mockNetServer.listen).toHaveBeenCalledWith(3000, expect.any(Function));
+  });
+  test('should destroy sockets on stop()', async () => {
+    const destroySpy = jest.spyOn(mockSocket, 'destroy');
+    (server as any).connections.add(mockSocket);
+    await server.stop();
+    expect(destroySpy).toHaveBeenCalled();
+    expect(mockNetServer.close).toHaveBeenCalled();
+  });
+  test('should handle incoming connection and process data', async () => {
+    let dataHandler;
+    mockSocket.on = jest.fn().mockImplementation((event, cb) => {
+      if (event === 'data') dataHandler = cb;
+    });
+    mockSocket.once = jest.fn();
+    const connHandler = mockNetServer.on.mock.calls.find(([evt]) => evt === 'connection')[1];
+    connHandler(mockSocket);
+    const handleSpy = jest.spyOn(realRouter, 'handle');
+    dataHandler(Buffer.from('GET / HTTP/1.1\r\nHost: localhost\r\n\r\n'));
+    expect(handleSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        path: '/',
+        invalid: false,
+      }),
+      mockSocket,
+    );
+  });
+  test('should destroy socket on header timeout', () => {
+    let timeoutFn;
+    global.setTimeout = jest.fn((fn) => {
+      timeoutFn = fn;
+      return 123;
+    }) as any;
+    global.clearTimeout = jest.fn();
+    mockSocket.once = jest.fn();
+    mockSocket.on = jest.fn();
+    const connHandler = mockNetServer.on.mock.calls.find(([evt]) => evt === 'connection')[1];
+    connHandler(mockSocket);
+    expect(setTimeout).toHaveBeenCalled();
+    expect(typeof timeoutFn).toBe('function');
+    timeoutFn();
+    expect(mockSocket.destroy).toHaveBeenCalled();
+  });
+  test('should destroy socket on body timeout for POST request', async () => {
+    let dataHandler;
+    mockSocket.on = jest.fn().mockImplementation((event, cb) => {
+      if (event === 'data') dataHandler = cb;
+    });
+    mockSocket.once = jest.fn();
+    const connHandler = mockNetServer.on.mock.calls.find(([evt]) => evt === 'connection')[1];
+    connHandler(mockSocket);
+    let bodyTimeoutFn;
+    global.setTimeout = jest.fn((fn) => {
+      if (!bodyTimeoutFn) bodyTimeoutFn = fn;
+      return 123;
+    }) as any;
+    global.clearTimeout = jest.fn();
+    dataHandler(Buffer.from('POST / HTTP/1.1\r\n\r\n'));
+    expect(typeof bodyTimeoutFn).toBe('function');
+    bodyTimeoutFn();
+    expect(mockSocket.destroy).toHaveBeenCalled();
+  });
+  test('should handle multiple pipelined requests in sequence', async () => {
+    let dataHandler;
+    mockSocket.on = jest.fn().mockImplementation((event, cb) => {
+      if (event === 'data') dataHandler = cb;
+    });
+    mockSocket.once = jest.fn();
+    const connHandler = mockNetServer.on.mock.calls.find(([evt]) => evt === 'connection')[1];
+    connHandler(mockSocket);
+    const handleSpy = jest.spyOn(realRouter, 'handle');
+    dataHandler(Buffer.from('GET /first HTTP/1.1\r\n\r\n'));
+    dataHandler(Buffer.from('GET /second HTTP/1.1\r\n\r\n'));
+    expect(handleSpy).toHaveBeenCalledTimes(2);
+  });
+});
+</file>
+
+<file path="entities/sendResponse.test.ts">
+import { sendResponse } from '../../src/entities/sendResponse';
+import { Socket } from 'net';
+import { Readable, Writable } from 'stream';
+describe('sendResponse', () => {
+  let socket: jest.Mocked<Socket>;
+  beforeEach(() => {
+    socket = new Writable({
+      write(chunk, encoding, callback) {
+        callback();
+      },
+    }) as jest.Mocked<Socket>;
+    socket.write = jest.fn();
+    socket.destroy = jest.fn();
+  });
+  test('writes headers only if no body', () => {
+    sendResponse(socket, 200, { 'Content-Type': 'text/plain' });
+    expect(socket.write).toHaveBeenCalledWith(
+      expect.stringContaining('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n'),
+    );
+    expect(socket.write).toHaveBeenCalledTimes(1);
+  });
+  test('writes headers and string body', () => {
+    sendResponse(socket, 200, { 'Content-Type': 'text/plain' }, 'Hello');
+    expect(socket.write).toHaveBeenNthCalledWith(1, expect.stringContaining('HTTP/1.1 200 OK'));
+    expect(socket.write).toHaveBeenNthCalledWith(2, 'Hello');
+  });
+  test('pipes readable body to socket', () => {
+    const readable = new Readable();
+    readable._read = () => {};
+    readable.push('streamed');
+    readable.push(null);
+    const pipe = jest.spyOn(readable, 'pipe');
+    sendResponse(socket, 200, {}, readable);
+    expect(pipe).toHaveBeenCalledWith(socket, { end: false });
+  });
+  test('attaches error handler to stream', () => {
+    const readable = new Readable();
+    readable._read = () => {};
+    const on = jest.spyOn(readable, 'once');
+    sendResponse(socket, 200, {}, readable);
+    expect(on).toHaveBeenCalledWith('error', expect.any(Function));
+  });
+  test('gracefully handles unknown status code', () => {
+    sendResponse(socket, 499, { 'Content-Type': 'text/plain' }, 'Weird code');
+    expect(socket.write).toHaveBeenCalledWith(expect.stringMatching(/^HTTP\/1.1 499 \r\n/));
+  });
+});
+</file>
+
+<file path="modules/app-metrics/metricsController.test.ts">
+import router from '../../../src/core/router';
+import { config } from '../../../src/config/server.config';
+import { Socket } from 'net';
+import { IncomingRequest } from '../../../src/entities/http';
+describe('Metrics Endpoint (gallery-generator)', () => {
+  let originalMetricsFeature: boolean;
+  beforeAll(() => {
+    originalMetricsFeature = config.features.metrics;
+    config.features.metrics = true;
+  });
+  afterAll(() => {
+    config.features.metrics = originalMetricsFeature;
+  });
+  it('should return 404 for unknown metrics app', async () => {
+    const req: Omit<IncomingRequest, 'ctx'> & { ctx: Record<string, unknown> } = {
+      method: 'POST',
+      path: '/api/metrics/unknown-app',
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.from(JSON.stringify({ event: 'test' })),
+      ctx: {},
+      url: new URL('http://localhost/api/metrics/unknown-app'),
+      query: {},
+      httpVersion: '1.1',
+      raw: '', // Added raw request string
+    };
+    let responseCode = 0;
+    let responseBody = '';
+    const sock = {
+      write: (data: string) => {
+        const match = data.match(/HTTP\/1\.[01] (\d{3})/);
+        if (match) responseCode = parseInt(match[1], 10);
+        responseBody += data;
+      },
+      end: () => {},
+    } as unknown as Socket;
+    await router.handle(req, sock);
+    expect(responseCode).toBe(404);
+    expect(responseBody).toContain('Not Found');
+  });
+});
+</file>
+
+<file path="modules/file-hosting/fileHostingService.test.ts">
+import { FileHostingService } from '../../../src/modules/file-hosting/fileHostingService';
+import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
+jest.mock('fs');
+jest.mock('fs/promises');
+describe('FileHostingService', () => {
+  let service: FileHostingService;
+  beforeEach(() => {
+    service = new FileHostingService('/mock/root');
+  });
+  test('resolveSafe throws on path traversal', () => {
+    expect(() => service['resolveSafe']('../etc/passwd')).toThrow('Path traversal attempt');
+  });
+  test('listFiles calls readdir with safe path', async () => {
+    (fsPromises.readdir as jest.Mock).mockResolvedValue(['file1.txt']);
+    const result = await service.listFiles('.');
+    expect(result).toEqual(['file1.txt']);
+    expect(fsPromises.readdir).toHaveBeenCalledWith(expect.stringContaining('/mock/root'));
+  });
+  test('stat returns file stats from safe path', async () => {
+    const fakeStat = { isFile: () => true };
+    (fsPromises.stat as jest.Mock).mockResolvedValue(fakeStat);
+    const result = await service.stat('data.txt');
+    expect(result).toBe(fakeStat);
+    expect(fsPromises.stat).toHaveBeenCalledWith(expect.stringContaining('/mock/root'));
+  });
+  test('readFile calls createReadStream with optional range', async () => {
+    const createReadStream = fs.createReadStream as jest.Mock;
+    await service.readFile('video.mp4', { start: 0, end: 100 });
+    expect(createReadStream).toHaveBeenCalledWith(expect.stringContaining('video.mp4'), {
+      start: 0,
+      end: 100,
+    });
+  });
+  test('saveFile writes data to file stream and ends it', async () => {
+    const write = jest.fn();
+    const end = jest.fn((cb) => cb());
+    const on = jest.fn();
+    const fakeStream = { write, end, on };
+    (fs.createWriteStream as jest.Mock).mockReturnValue(fakeStream);
+    (fsPromises.mkdir as jest.Mock).mockResolvedValue(undefined);
+    const chunks = ['a', 'b'].map((x) => Buffer.from(x));
+    const iterable = (async function* () {
+      for (const chunk of chunks) yield chunk;
+    })();
+    await service.saveFile('upload.txt', iterable);
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(end).toHaveBeenCalled();
+    expect(fs.createWriteStream).toHaveBeenCalledWith(expect.stringContaining('upload.txt'));
+  });
+});
+</file>
+
+<file path="modules/file-streaming/fileStreamingController.test.ts">
+import { fileStreamingController } from '../../../src/modules/file-streaming/fileStreamingController';
+import { sendResponse } from '../../../src/entities/sendResponse';
+import { FileHostingService } from '../../../src/modules/file-hosting/fileHostingService';
+import logger from '../../../src/utils/logger';
+import { Readable } from 'stream';
+jest.mock('../../../src/entities/sendResponse');
+jest.mock('../../../src/modules/file-hosting/fileHostingService');
+jest.mock('../../../src/utils/logger');
+const createMockReadable = () => {
+  const stream = new Readable();
+  stream._read = () => {};
+  return stream;
+};
+describe('fileStreamingController.handleStream', () => {
+  let req: any;
+  let sock: any;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    req = {
+      path: '/stream',
+      query: {},
+      headers: {},
+      url: new URL('http://localhost/stream'),
+    };
+    sock = {
+      end: jest.fn(),
+      write: jest.fn(),
+      destroy: jest.fn(),
+    };
+  });
+  test('responds 400 if no file query provided', async () => {
+    await fileStreamingController.handleStream(req, sock);
+    expect(sendResponse).toHaveBeenCalledWith(
+      sock,
+      400,
+      { 'Content-Type': 'text/plain' },
+      'Missing required "file" query parameter.',
+    );
+  });
+  test('responds 404 if file not found', async () => {
+    req.query.file = 'nonexistent.mp4';
+    (FileHostingService.prototype.stat as jest.Mock).mockRejectedValue(new Error('not found'));
+    await fileStreamingController.handleStream(req, sock);
+    expect(sendResponse).toHaveBeenCalledWith(
+      sock,
+      404,
+      { 'Content-Type': 'text/plain' },
+      expect.stringContaining('not found'),
+    );
+  });
+  test('streams full file with 200 if no range', async () => {
+    req.query.file = 'video.mp4';
+    (FileHostingService.prototype.stat as jest.Mock).mockResolvedValue({ size: 1000 });
+    const stream = createMockReadable();
+    (FileHostingService.prototype.readFile as jest.Mock).mockResolvedValue(stream);
+    await fileStreamingController.handleStream(req, sock);
+    expect(sendResponse).toHaveBeenCalledWith(
+      sock,
+      200,
+      expect.objectContaining({
+        'Content-Type': expect.any(String),
+        'Content-Length': '1000',
+      }),
+      stream,
+    );
+  });
+  test('streams partial file with 206 if valid range', async () => {
+    req.query.file = 'video.mp4';
+    req.headers.range = 'bytes=0-499';
+    (FileHostingService.prototype.stat as jest.Mock).mockResolvedValue({ size: 1000 });
+    const stream = createMockReadable();
+    (FileHostingService.prototype.readFile as jest.Mock).mockResolvedValue(stream);
+    await fileStreamingController.handleStream(req, sock);
+    expect(sendResponse).toHaveBeenCalledWith(
+      sock,
+      206,
+      expect.objectContaining({
+        'Content-Range': 'bytes 0-499/1000',
+        'Content-Length': '500',
+      }),
+      stream,
+    );
+  });
+  test('responds 416 if range invalid', async () => {
+    req.query.file = 'video.mp4';
+    req.headers.range = 'bytes=1500-1600';
+    (FileHostingService.prototype.stat as jest.Mock).mockResolvedValue({ size: 1000 });
+    await fileStreamingController.handleStream(req, sock);
+    expect(sendResponse).toHaveBeenCalledWith(
+      sock,
+      416,
+      { 'Content-Type': 'text/plain' },
+      '416 Range Not Satisfiable',
+    );
+    expect(sock.end).toHaveBeenCalled();
+  });
+});
+</file>
+
+<file path="utils/helpers.test.ts">
+import { getMimeType } from '../../src/utils/helpers';
+describe('Helpers - getMimeType', () => {
+  it('should return correct MIME type for mp4', () => {
+    expect(getMimeType('movie.mp4')).toBe('video/mp4');
+  });
+  it('should return correct MIME type for jpg', () => {
+    expect(getMimeType('image.jpg')).toBe('image/jpeg');
+  });
+  it('should return default MIME type for unknown file extension', () => {
+    expect(getMimeType('something.unknownext')).toBe('application/octet-stream');
+  });
+  it('should return default MIME type for file with no extension', () => {
+    expect(getMimeType('README')).toBe('application/octet-stream');
+  });
+});
+</file>
+
+<file path="global.d.ts">
+export {};
+</file>
+
+<file path="setupJest.ts">
+import 'jest-extended';
+export const add = (a: number, b: number): number => {
+  return a + b;
+};
+export const subtract = (a: number, b: number): number => {
+  return a - b;
+};
+</file>
+
+<file path="fileHosting.stress.test.ts">
+import { FileHostingService } from '../src/modules/file-hosting/fileHostingService';
+import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
+import { Writable } from 'stream';
+import pLimit from 'p-limit';
+jest.mock('fs');
+jest.mock('fs/promises');
+describe('FileHostingService Stress Test', () => {
+  const limit = pLimit(50);
+  const writeCalls: any[] = [];
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (fsPromises.mkdir as jest.Mock).mockResolvedValue(undefined);
+    (fs.createWriteStream as jest.Mock).mockImplementation((path: string) => {
+      if (path.includes('fail-fd')) {
+        const err = new Error('Too many open files') as NodeJS.ErrnoException;
+        err.code = 'EMFILE';
+        throw err;
+      }
+      const writable = new Writable({
+        write(chunk, _encoding, callback) {
+          writeCalls.push(chunk.toString());
+          callback();
+        },
+      });
+      writable.on('error', jest.fn());
+      writable.end = jest.fn((cb) => cb && cb());
+      return writable;
+    });
+  });
+  test('handles 1000 concurrent small uploads with disk delays and fd exhaustion', async () => {
+    const service = new FileHostingService('/mock/root');
+    const uploads = Array.from({ length: 1000 }).map((_, i) =>
+      limit(async () => {
+        const shouldFail = i % 20 === 0;
+        const failFd = i % 25 === 0;
+        const fileName = failFd ? `fail-fd-${i}.txt` : `upload-${i}.txt`;
+        const chunks = [Buffer.from(`part1-${i}`), Buffer.from(`part2-${i}`)];
+        const iterable = (async function* () {
+          yield chunks[0];
+          if (shouldFail) throw new Error(`Stream interrupted for ${i}`);
+          yield chunks[1];
+        })();
+        try {
+          await service.saveFile(fileName, iterable);
+        } catch {
+        }
+      }),
+    );
+    await Promise.all(uploads);
+    expect(fs.createWriteStream).toHaveBeenCalled();
+    expect(writeCalls.length).toBeGreaterThan(1000);
+  });
+});
+</file>
+
+<file path="fileStreaming.stress.test.ts">
+import { fileStreamingController } from '../src/modules/file-streaming/fileStreamingController';
+import { FileHostingService } from '../src/modules/file-hosting/fileHostingService';
+import { sendResponse } from '../src/entities/sendResponse';
+import { Readable } from 'stream';
+import pLimit from 'p-limit';
+import { Socket } from 'net';
+jest.mock('../src/modules/file-hosting/fileHostingService');
+jest.mock('../src/entities/sendResponse');
+describe('File Streaming Stress Test', () => {
+  const dummyStream = () => {
+    const stream = new Readable();
+    stream._read = () => {
+      stream.push(Buffer.alloc(1024));
+      stream.push(null);
+    };
+    return stream;
+  };
+  const limit = pLimit(20);
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (FileHostingService.prototype.stat as jest.Mock).mockResolvedValue({ size: 10000 });
+    (FileHostingService.prototype.readFile as jest.Mock).mockResolvedValue(dummyStream());
+  });
+  test('200 concurrent stream requests (full + range)', async () => {
+    const tasks: Promise<void>[] = [];
+    for (let i = 0; i < 200; i++) {
+      const range = i % 2 === 0 ? undefined : `bytes=${i * 10}-${i * 10 + 999}`;
+      const req = {
+        method: 'GET',
+        path: '/stream',
+        query: { file: 'stress-test.mp4' },
+        headers: { ...(range ? { range } : {}) } as Record<string, string>,
+        httpVersion: '1.1',
+        raw: '',
+        url: new URL(`http://localhost/stream?file=stress-test.mp4`),
+      };
+      const sock = {
+        write: jest.fn(),
+        end: jest.fn(),
+        destroy: jest.fn(),
+      } as unknown as Socket;
+      tasks.push(limit(() => fileStreamingController.handleStream(req, sock)));
+    }
+    await Promise.all(tasks);
+    expect(sendResponse).toHaveBeenCalledTimes(200);
+    const codes = (sendResponse as jest.Mock).mock.calls.map(([, code]) => code);
+    expect(codes.filter((c) => c === 200).length).toBeGreaterThan(80);
+    expect(codes.filter((c) => c === 206).length).toBeGreaterThan(80);
+  });
+});
+</file>
+
+<file path="router.stress.test.ts">
+import { createRouter } from '../src/core/router';
+import { Socket } from 'net';
+describe('Router Stress Test', () => {
+  let router: ReturnType<typeof createRouter>;
+  let mockSocket: Socket;
+  beforeEach(() => {
+    router = createRouter();
+    mockSocket = {
+      write: jest.fn(),
+      end: jest.fn(),
+      destroy: jest.fn(),
+    } as unknown as Socket;
+  });
+  test('handles 100 rapid requests across different routes', async () => {
+    const results: string[] = [];
+    const handler = jest.fn((req) => {
+      results.push(`${req.method} ${req.path}`);
+    });
+    const middleware = jest.fn(async (req, sock, next) => {
+      await next();
+    });
+    router.use(middleware);
+    router.get('/a', handler);
+    router.get('/b', handler);
+    router.get('/c/:id', handler);
+    const requests = Array.from({ length: 100 }).map((_, i) => {
+      const path = i % 3 === 0 ? '/a' : i % 3 === 1 ? '/b' : `/c/${i}`;
+      return {
+        method: 'GET',
+        path,
+        query: {},
+        headers: {},
+        url: new URL(`http://localhost${path}`),
+        ctx: {},
+        httpVersion: 'HTTP/1.1',
+        headersMap: new Map(),
+        raw: '',
+        invalid: false,
+      };
+    });
+    await Promise.all(requests.map((req) => router.handle(req, mockSocket)));
+    expect(handler).toHaveBeenCalledTimes(100);
+    expect(middleware).toHaveBeenCalledTimes(100);
+  });
+});
+</file>
+
+<file path="server.stress.test.ts">
+import { HttpServer } from '../src/core/server';
+import { createRouter } from '../src/core/router';
+import { Socket } from 'net';
+import pLimit from 'p-limit';
+describe('HttpServer Stress Test', () => {
+  let server: HttpServer;
+  let port: number;
+  beforeAll(async () => {
+    const router = createRouter();
+    router.get('/ping', (req, sock) => {
+      sock.write('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK');
+    });
+    server = new HttpServer(0, router);
+    await new Promise((resolve) => {
+      server['server'].listen(0, () => {
+        port = (server['server'].address() as any).port;
+        resolve(null);
+      });
+    });
+  });
+  afterAll(async () => {
+    await server.stop();
+  });
+  test('handles 500 concurrent TCP socket clients with throttling', async () => {
+    const limit = pLimit(50);
+    const results: Promise<string>[] = [];
+    for (let i = 0; i < 500; i++) {
+      results.push(
+        limit(
+          () =>
+            new Promise((resolve, reject) => {
+              const client = new Socket();
+              let data = '';
+              client.connect(port, '127.0.0.1', () => {
+                client.write('GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n');
+              });
+              client.on('data', (chunk) => {
+                data += chunk.toString();
+                if (data.includes('OK')) {
+                  client.end();
+                  resolve(data);
+                }
+              });
+              client.on('error', reject);
+              client.on('end', () => {
+                if (!data.includes('OK')) reject(new Error('Incomplete response'));
+              });
+            }),
+        ),
+      );
+    }
+    const responses = await Promise.all(results);
+    expect(responses).toHaveLength(500);
+    for (const res of responses) {
+      expect(res).toContain('200 OK');
+      expect(res).toContain('OK');
+    }
+  });
+});
 </file>
 
 </files>
