@@ -42,7 +42,9 @@ class EmbeddingsLogger {
       transports: [
         // Console for immediate feedback with pretty formatting
         new ConsoleTransport({
-          formatter: new PrettyFormatter(),
+          formatter: new PrettyFormatter({
+            useBoxes: true,
+          }),
           level: 'info',
         }),
         // JSON file logs for structured data and debugging
@@ -67,7 +69,7 @@ class EmbeddingsLogger {
    * Create a new context for tracking a request through the system
    */
   createContext(data: Partial<EmbeddingContext> = {}): string {
-    const requestId = data.requestId || randomUUID();
+    const requestId = data.requestId || randomUUID().toString();
     const context: EmbeddingContext = {
       requestId,
       startTime: Date.now(),

@@ -32,7 +32,7 @@ const logger = new Logger({
     }),
     // Add a file transport specifically for application startup logs
     new FileTransport({
-      filename: path.join(process.cwd(), config.logging.logDir, 'app.log'),
+      filename: path.join(config.logging.logDir, 'startup.log'),
       formatter: new PrettyFormatter({
         useColors: false,
         useBoxes: false,

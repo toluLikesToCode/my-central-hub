@@ -29,8 +29,6 @@ RUN npm install -g typescript
 # The proxy fix should help prevent hash mismatches here.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        python3 \
-        python3-pip \
         ffmpeg \
         git \
     && apt-get clean && \
@@ -91,15 +89,6 @@ RUN apt-get update && \
 # Ensure this path is correct relative to your build context
 COPY python/requirements.txt ./requirements.txt
 
-# Install Python dependencies
-# PyTorch wheels are generally available for Debian-based images
-# Use --break-system-packages to allow pip install in Debian's system Python (PEP 668)
-# RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
-RUN pip3 install --break-system-packages -r requirements.txt
-
-# Install PyTorch, torchvision, and torchaudio with CUDA 12.8 support
-# RUN pip3 install --no-cache-dir --break-system-packages torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-RUN pip3 install --break-system-packages torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # Copy the rest of your application code into the container
 # Ensure your .dockerignore prevents copying unnecessary files

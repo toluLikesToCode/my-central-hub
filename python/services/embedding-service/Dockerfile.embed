@@ -1,0 +1,35 @@
+# Base image: specific CUDA 12.8.1 runtime on Ubuntu 22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+
+# Prevent interactive prompts and configure APT for stability
+ENV DEBIAN_FRONTEND=noninteractive
+RUN printf "Acquire::http::Pipeline-Depth 0;\nAcquire::http::No-Cache true;\nAcquire::BrokenProxy true;\n" > /etc/apt/apt.conf.d/99no-cache
+
+# (Optional) Switch to a reliable Ubuntu mirror for apt sources
+# RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+
+# Install Python 3.11 and minimal OS dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3-pip python3.11-dev \ 
+    # (Include any other system libraries needed by your packages, e.g.:
+    libgl1-mesa-glx libglib2.0-0 ) && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Ensure `python3` points to Python 3.11 (Ubuntu may default python3 to 3.10)
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Set working directory
+WORKDIR /app
+
+# Install Python dependencies (pinned in requirements.txt)
+COPY python/services/embedding-service/requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# (If using a multi-stage build, you could copy wheels here instead of pip installing from internet)
+
+# Copy application code
+COPY python/services/embedding-service/ .
+
+# Final configuration (if any ENV or CMD)
+ENV PYTHONUNBUFFERED=1
+CMD ["python3", "server.py"]

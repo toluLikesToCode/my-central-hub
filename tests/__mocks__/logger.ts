@@ -10,6 +10,7 @@ const mockLogger = {
     error: jest.fn(),
     warn: jest.fn(),
     debug: jest.fn(),
+    child: jest.fn(),
   }),
 };
 
@@ -30,6 +31,7 @@ class Logger {
     error: jest.fn(),
     warn: jest.fn(),
     debug: jest.fn(),
+    child: jest.fn(),
   });
 }
 

@@ -3,15 +3,39 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
 
+jest.mock('../../../src/entities/sendResponse');
+jest.mock('../../../src/modules/file-hosting/fileHostingService');
+jest.mock('../../../src/utils/logger');
+
+// Mock the streamLogger
+jest.mock('../../../src/modules/file-streaming/fileStreamingController', () => {
+  const originalModule = jest.requireActual(
+    '../../../src/modules/file-streaming/fileStreamingController',
+  );
+
+  // Create a fake streamLogger with all needed methods
+  const mockStreamLogger = {
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  };
+
+  // Override the exported object with our instrumented version
+  return {
+    fileStreamingController: {
+      ...originalModule.fileStreamingController,
+      // Inject our mock streamLogger for tests
+      streamLogger: mockStreamLogger,
+    },
+  };
+});
+
 import { fileStreamingController } from '../../../src/modules/file-streaming/fileStreamingController';
 import { sendResponse } from '../../../src/entities/sendResponse';
 import { FileHostingService } from '../../../src/modules/file-hosting/fileHostingService';
 import logger from '../../../src/utils/logger';
 import { Readable } from 'stream';
-
-jest.mock('../../../src/entities/sendResponse');
-jest.mock('../../../src/modules/file-hosting/fileHostingService');
-jest.mock('../../../src/utils/logger');
 
 const createMockReadable = () => {
   const stream = new Readable();

@@ -1,7 +1,0 @@
-pillow==11.2.1
-torch==2.7
-torchvision==0.22
-transformers
-numpy==2.2.5
-scenedetect
-opencv-python

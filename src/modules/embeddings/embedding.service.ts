@@ -4,7 +4,7 @@
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable @typescript-eslint/no-unused-vars */
-import { spawn, ChildProcessWithoutNullStreams, execFile, execSync } from 'child_process';
+import { execFile } from 'child_process';
 import Ajv, { ValidateFunction } from 'ajv';
 import addFormats from 'ajv-formats';
 import clipCacheSchema from '../../../schemas/clipCache.schema.json';
@@ -12,9 +12,10 @@ import path from 'path';
 import fs from 'fs/promises';
 import { promisify } from 'util';
 import { imageSize } from 'image-size';
-import { embeddingsLogger, EmbeddingComponent, EmbeddingContext } from './embeddingsLogger';
+import { embeddingsLogger, EmbeddingComponent } from './embeddingsLogger';
 import { config } from '../../config/server.config';
 import { randomUUID } from 'crypto';
+import { EmbeddingHttpClient } from './embedding-http-client';
 
 // --- Types --- //
 
@@ -76,36 +77,15 @@ try {
 }
 
 // --- Configuration --- //
-const PYTHON_EXECUTABLE = config.embedding.pythonExecutable;
-const PYTHON_SCRIPT_PATH = config.embedding.pythonScriptPath;
-const PYTHON_MODEL_ARGS: string[] = config.embedding?.modelArgs || [];
-const INACTIVITY_TIMEOUT_MS = config.embedding?.inactivityTimeoutMs || 5 * 60 * 1000; // 5 minutes default
-const PYTHON_SCRIPT_TIMEOUT_MS = config.embedding?.scriptTimeoutMs || 15 * 60 * 1000; // 15 minutes default
+const SCRIPT_TIMEOUT_MS = config.embedding?.scriptTimeoutMs || 15 * 60 * 1000; // 15 minutes default
 
 // --- Types (Internal) --- //
-interface EmbeddingResponseFromPython {
-  embedding?: number[];
-  error?: string;
-  detail?: string;
-  debugMetadata?: any;
-}
-
 interface FileMetadata {
   mtime: number;
   fileSize: number;
   dimensions: { width: number; height: number };
   duration: number | null;
   mediaType: 'image' | 'video';
-}
-
-interface EmbeddingRequestInternal {
-  paths: string[];
-  resolve: (result: ClipCache) => void;
-  reject: (error: Error) => void;
-  startTime: number;
-  timeoutHandle?: NodeJS.Timeout;
-  requestId: string;
-  batchId?: string;
 }
 
 // --- Status Types (Exported) --- //
@@ -128,60 +108,47 @@ export interface EmbeddingServiceStatus {
 const execFileAsync = promisify(execFile);
 
 /**
- * Manages a persistent Python child process for CLIP embedding generation.
- * Handles spawning, communication (stdin/stdout), metadata fetching, validation,
- * and error handling/restarts.
+ * Manages the embedding service functionality using an HTTP client
+ * to communicate with the CLIP embedding HTTP server.
  */
 class EmbeddingService {
-  private pythonProcess: ChildProcessWithoutNullStreams | null = null;
-  private isStarting = false;
-  private isStopping = false;
-  private requestQueue: EmbeddingRequestInternal[] = [];
-  private currentProcessing: EmbeddingRequestInternal | null = null;
-  private responseBuffer = '';
-  private inactivityTimer: NodeJS.Timeout | null = null;
-  private lastProgress: { processed: number; total: number; current: string } | null = null;
+  private httpClient: EmbeddingHttpClient;
+  private isProcessing = false;
   private lastError: string | null = null;
-
-  // --- Restart Backoff State ---
-  private restartAttempts = 0;
-  private nextRestartDelayMs = 5000; // Initial delay
-  private readonly MAX_RESTART_ATTEMPTS = 5;
-  private readonly BASE_RESTART_DELAY_MS = 5000;
-  private readonly MAX_RESTART_DELAY_MS = 60 * 1000; // Maximum delay (1 minute)
+  private currentBatch: { count: number; total: number; current: string } | null = null;
 
   constructor() {
-    embeddingsLogger.info(EmbeddingComponent.SERVICE, 'Initializing Embedding Service...');
+    embeddingsLogger.info(
+      EmbeddingComponent.SERVICE,
+      'Initializing Embedding Service with HTTP client...',
+    );
 
-    this.validateConfig();
+    this.httpClient = new EmbeddingHttpClient({
+      serviceUrl: config.embedding.serviceUrl || 'http://localhost:3456',
+      maxRetries: config.embedding.maxRetries || 3,
+      retryDelayMs: config.embedding.retryDelayMs || 1000,
+      timeoutMs: config.embedding.timeoutMs || SCRIPT_TIMEOUT_MS,
+    });
+
     this.checkDependencies();
     this.setupExitHandlers();
-    // Do not start the Python process immediately; wait for the first request.
-  }
-
-  private validateConfig() {
-    // Basic checks for essential config/paths
-    if (!PYTHON_EXECUTABLE)
-      embeddingsLogger.warn(EmbeddingComponent.SERVICE, 'PYTHON_EXECUTABLE not set, defaulting.');
-
-    try {
-      fs.access(PYTHON_SCRIPT_PATH, fs.constants.R_OK);
-    } catch (e) {
-      embeddingsLogger.error(
-        EmbeddingComponent.SERVICE,
-        `Python script not found or not readable at: ${PYTHON_SCRIPT_PATH}`,
-        undefined,
-        { scriptPath: PYTHON_SCRIPT_PATH },
-      );
-      this.lastError = `Python script not accessible at ${PYTHON_SCRIPT_PATH}`;
-    }
   }
 
   private checkDependencies() {
-    // Check for ffprobe
+    // Check for ffprobe for metadata extraction
     try {
-      execSync('ffprobe -version', { stdio: 'ignore' });
-      embeddingsLogger.info(EmbeddingComponent.SERVICE, 'Dependency check: ffprobe found.');
+      execFileAsync('ffprobe', ['-version'])
+        .then(() => {
+          embeddingsLogger.info(EmbeddingComponent.SERVICE, 'Dependency check: ffprobe found.');
+        })
+        .catch((error) => {
+          embeddingsLogger.error(
+            EmbeddingComponent.SERVICE,
+            'Dependency check failed: ffprobe not found in PATH. Video metadata extraction will fail.',
+            undefined,
+            { error },
+          );
+        });
     } catch (error) {
       embeddingsLogger.error(
         EmbeddingComponent.SERVICE,
@@ -189,325 +156,6 @@ class EmbeddingService {
         undefined,
         { error },
       );
-    }
-  }
-
-  // --- Python Process Management --- //
-
-  private resetInactivityTimer() {
-    this.clearInactivityTimer();
-    // Only set timer if process exists and we are not deliberately stopping it
-    if (this.pythonProcess && !this.isStopping) {
-      this.inactivityTimer = setTimeout(() => {
-        this.stopDueToInactivity();
-      }, INACTIVITY_TIMEOUT_MS);
-      // Allow Node.js to exit if this timer is the only thing active
-      if (this.inactivityTimer.unref) this.inactivityTimer.unref();
-    }
-  }
-
-  private clearInactivityTimer() {
-    if (this.inactivityTimer) {
-      clearTimeout(this.inactivityTimer);
-      this.inactivityTimer = null;
-    }
-  }
-
-  private stopDueToInactivity() {
-    if (this.isStopping) return; // Already stopping
-    embeddingsLogger.info(EmbeddingComponent.SERVICE, 'Stopping Python process due to inactivity.');
-    this.isStopping = true;
-    this.stop();
-  }
-
-  public async startPythonProcess(): Promise<void> {
-    if (this.pythonProcess || this.isStarting) {
-      embeddingsLogger.warn(EmbeddingComponent.SERVICE, 'Process already running or starting.');
-      return Promise.resolve();
-    }
-
-    if (this.lastError === `Python script not accessible at ${PYTHON_SCRIPT_PATH}`) {
-      embeddingsLogger.error(
-        EmbeddingComponent.SERVICE,
-        'Cannot start process, script is inaccessible.',
-        undefined,
-        { scriptPath: PYTHON_SCRIPT_PATH },
-      );
-      return Promise.reject(new Error(this.lastError));
-    }
-
-    this.isStarting = true;
-    this.isStopping = false;
-    this.lastError = null;
-
-    embeddingsLogger.info(
-      EmbeddingComponent.SERVICE,
-      `Starting Python process: ${PYTHON_EXECUTABLE} "${PYTHON_SCRIPT_PATH}" ${PYTHON_MODEL_ARGS.join(' ')}`,
-      undefined,
-      {
-        pythonExecutable: PYTHON_EXECUTABLE,
-        scriptPath: PYTHON_SCRIPT_PATH,
-        modelArgs: PYTHON_MODEL_ARGS,
-      },
-    );
-
-    return new Promise((resolve, reject) => {
-      try {
-        this.pythonProcess = spawn(PYTHON_EXECUTABLE, [PYTHON_SCRIPT_PATH, ...PYTHON_MODEL_ARGS], {
-          stdio: ['pipe', 'pipe', 'pipe'], // stdin, stdout, stderr
-        });
-
-        // Defer clearing isStarting until the process actually spawns
-        this.pythonProcess.once('spawn', () => {
-          this.isStarting = false;
-          embeddingsLogger.info(
-            EmbeddingComponent.SERVICE,
-            `Python process spawn event received (PID: ${this.pythonProcess?.pid}).`,
-            undefined,
-            { pid: this.pythonProcess?.pid },
-          );
-
-          // Reset restart counters on successful spawn
-          this.restartAttempts = 0;
-          this.nextRestartDelayMs = this.BASE_RESTART_DELAY_MS;
-          embeddingsLogger.debug(EmbeddingComponent.SERVICE, 'Restart counters reset.');
-        });
-
-        this.pythonProcess.stdout.on('data', (data: Buffer) => {
-          // Optimization: Decode buffer only once
-          const chunk = data.toString('utf-8');
-          embeddingsLogger.debug(
-            EmbeddingComponent.SERVICE,
-            `PYTHON STDOUT RAW received (${chunk.length} chars)`,
-            this.currentProcessing?.requestId,
-            { byteLength: data.length },
-          );
-
-          this.responseBuffer += chunk;
-          this.processResponseBuffer();
-        });
-
-        this.pythonProcess.stderr.on('data', (data: Buffer) => {
-          const lines = data.toString('utf-8').split('\n');
-          lines.forEach((line) => {
-            const trimmed = line.trim();
-            if (!trimmed) return; // Skip empty lines
-
-            if (trimmed.startsWith('PROGRESS:')) {
-              try {
-                const json = trimmed.substring(9).trim();
-                const progress = JSON.parse(json);
-                if (progress && typeof progress === 'object') {
-                  this.lastProgress = {
-                    processed: Number(progress.processed) || 0,
-                    total: Number(progress.total) || 0,
-                    current: String(progress.current || ''),
-                  };
-
-                  embeddingsLogger.pythonErr(trimmed, this.currentProcessing?.requestId, {
-                    progress: this.lastProgress,
-                    batchId: this.currentProcessing?.batchId,
-                  });
-                } else {
-                  embeddingsLogger.warn(
-                    EmbeddingComponent.PYTHON,
-                    `Invalid progress JSON structure: ${json}`,
-                    this.currentProcessing?.requestId,
-                  );
-                }
-              } catch (e) {
-                embeddingsLogger.warn(
-                  EmbeddingComponent.PYTHON,
-                  `Failed to parse progress line: "${trimmed}"`,
-                  this.currentProcessing?.requestId,
-                  { error: e },
-                );
-              }
-            } else {
-              // Log other stderr lines through the Python error handler
-              embeddingsLogger.pythonErr(trimmed, this.currentProcessing?.requestId);
-            }
-          });
-        });
-
-        this.pythonProcess.on('error', (err) => {
-          embeddingsLogger.error(
-            EmbeddingComponent.SERVICE,
-            `Python process spawn error: ${err.message}`,
-            this.currentProcessing?.requestId,
-            { error: err },
-          );
-
-          this.lastError = err.message;
-          const startError = new Error(`Python process failed to spawn: ${err.message}`);
-          this.handleProcessExit(startError);
-          reject(startError);
-        });
-
-        this.pythonProcess.on('exit', (code, signal) => {
-          const exitMsg = `Python process exited (Code: ${code}, Signal: ${signal})`;
-          embeddingsLogger.warn(
-            EmbeddingComponent.SERVICE,
-            exitMsg,
-            this.currentProcessing?.requestId,
-            { exitCode: code, exitSignal: signal },
-          );
-
-          // Only set lastError if it exited unexpectedly (non-zero code, or signal)
-          if (code !== 0 || signal) {
-            this.lastError = exitMsg;
-          }
-          this.handleProcessExit(new Error(exitMsg));
-        });
-
-        embeddingsLogger.info(
-          EmbeddingComponent.SERVICE,
-          `Python process started (PID: ${this.pythonProcess.pid}).`,
-          undefined,
-          { pid: this.pythonProcess.pid },
-        );
-
-        this.resetInactivityTimer();
-        this.processQueue();
-        resolve();
-      } catch (error: any) {
-        embeddingsLogger.error(
-          EmbeddingComponent.SERVICE,
-          `Failed to spawn Python process: ${error.message}`,
-          undefined,
-          { error },
-        );
-
-        this.isStarting = false;
-        this.pythonProcess = null;
-        const spawnError = new Error(`Failed to spawn Python process: ${error.message}`);
-        this.lastError = spawnError.message;
-        this.rejectQueue(spawnError);
-        reject(spawnError);
-      }
-    });
-  }
-
-  /** Efficiently process the response buffer line by line */
-  private processResponseBuffer() {
-    let newlineIndex;
-    // Use a loop for efficiency if multiple lines arrive in one chunk
-    while ((newlineIndex = this.responseBuffer.indexOf('\n')) >= 0) {
-      const jsonResponse = this.responseBuffer.substring(0, newlineIndex).trim();
-      // Advance the buffer past the processed line and newline character
-      this.responseBuffer = this.responseBuffer.substring(newlineIndex + 1);
-      if (jsonResponse) {
-        // Only attempt JSON parse on lines that look like JSON
-        if (jsonResponse.startsWith('{') || jsonResponse.startsWith('[')) {
-          embeddingsLogger.debug(
-            EmbeddingComponent.SERVICE,
-            `Processing response line (${jsonResponse.length} chars)`,
-            this.currentProcessing?.requestId,
-          );
-          this.handlePythonJsonResponse(jsonResponse);
-        } else {
-          embeddingsLogger.debug(
-            EmbeddingComponent.SERVICE,
-            `Skipping non-JSON stdout line: ${jsonResponse}`,
-            this.currentProcessing?.requestId,
-          );
-        }
-      }
-    }
-  }
-
-  private handleProcessExit(error?: Error): void {
-    const pid = this.pythonProcess?.pid;
-    embeddingsLogger.debug(
-      EmbeddingComponent.SERVICE,
-      `handleProcessExit called (PID: ${pid})`,
-      this.currentProcessing?.requestId,
-      { pid },
-    );
-
-    this.pythonProcess = null;
-    this.isStarting = false;
-    this.clearInactivityTimer();
-
-    // If there was an active request, reject it
-    if (this.currentProcessing) {
-      const exitError = error || new Error('Python embedding process exited unexpectedly.');
-      embeddingsLogger.error(
-        EmbeddingComponent.SERVICE,
-        `Python process exited while processing request for ${this.currentProcessing.paths.length} paths.`,
-        this.currentProcessing.requestId,
-        {
-          pathCount: this.currentProcessing.paths.length,
-          error: exitError,
-        },
-      );
-
-      this.currentProcessing.reject(exitError);
-      // Clear timeout associated with this request
-      if (this.currentProcessing.timeoutHandle) clearTimeout(this.currentProcessing.timeoutHandle);
-      this.currentProcessing = null;
-    }
-
-    // Reject all remaining queued requests
-    const queueError = error || new Error('Python embedding process is not available.');
-    this.rejectQueue(queueError);
-
-    // Conditionally restart if not manually stopped
-    if (!this.isStopping) {
-      if (this.restartAttempts >= this.MAX_RESTART_ATTEMPTS) {
-        const maxAttemptMsg = `Maximum restart attempts (${this.MAX_RESTART_ATTEMPTS}) reached. Service will remain in ERROR state.`;
-        embeddingsLogger.error(EmbeddingComponent.SERVICE, maxAttemptMsg, undefined, {
-          attempts: this.restartAttempts,
-          maxAttempts: this.MAX_RESTART_ATTEMPTS,
-        });
-
-        this.lastError = this.lastError ? `${this.lastError}. ${maxAttemptMsg}` : maxAttemptMsg;
-      } else {
-        this.restartAttempts++;
-        const currentDelay = this.nextRestartDelayMs;
-
-        embeddingsLogger.info(
-          EmbeddingComponent.SERVICE,
-          `Attempting restart ${this.restartAttempts}/${this.MAX_RESTART_ATTEMPTS} in ${currentDelay / 1000} seconds...`,
-          undefined,
-          {
-            attempt: this.restartAttempts,
-            maxAttempts: this.MAX_RESTART_ATTEMPTS,
-            delayMs: currentDelay,
-          },
-        );
-
-        setTimeout(() => {
-          embeddingsLogger.debug(
-            EmbeddingComponent.SERVICE,
-            `Restart timer fired for attempt ${this.restartAttempts}.`,
-          );
-
-          this.startPythonProcess().catch((err) => {
-            embeddingsLogger.error(
-              EmbeddingComponent.SERVICE,
-              `Auto-restart attempt ${this.restartAttempts} failed: ${err.message}`,
-              undefined,
-              {
-                attempt: this.restartAttempts,
-                error: err,
-              },
-            );
-
-            this.lastError = `Auto-restart attempt ${this.restartAttempts} failed: ${err.message}`;
-          });
-        }, currentDelay);
-
-        // Exponential backoff for next attempt
-        this.nextRestartDelayMs = Math.min(this.nextRestartDelayMs * 2, this.MAX_RESTART_DELAY_MS);
-      }
-    } else {
-      embeddingsLogger.info(
-        EmbeddingComponent.SERVICE,
-        'Manual stop initiated, Python process will not be restarted.',
-      );
-
-      this.isStopping = false; // Reset flag after handling exit during stop
     }
   }
 
@@ -611,332 +259,6 @@ class EmbeddingService {
     return { mtime, fileSize, dimensions, duration, mediaType };
   }
 
-  /** Fetches metadata for multiple files concurrently. */
-  private async getBatchMetadata(filePaths: string[]): Promise<Record<string, FileMetadata>> {
-    const metadataPromises = filePaths.map((fp) => this.getFileMetadata(fp));
-    const results = await Promise.allSettled(metadataPromises);
-    const metadataMap: Record<string, FileMetadata> = {};
-
-    results.forEach((result, index) => {
-      const filePath = filePaths[index];
-      if (result.status === 'fulfilled') {
-        metadataMap[filePath] = result.value;
-      } else {
-        // Log error but still provide a default entry so processing can continue
-        embeddingsLogger.error(
-          EmbeddingComponent.SERVICE,
-          `Failed to get metadata for ${filePath} in batch`,
-          this.currentProcessing?.requestId,
-          {
-            filePath,
-            error: result.reason,
-          },
-        );
-
-        metadataMap[filePath] = {
-          // Provide default/fallback metadata
-          mtime: 0,
-          fileSize: 0,
-          dimensions: { width: 1, height: 1 },
-          duration: null,
-          mediaType: path.extname(filePath).match(/\.(mp4|mov|webm)$/i) ? 'video' : 'image', // Best guess
-        };
-      }
-    });
-    return metadataMap;
-  }
-
-  // --- Response Handling & Validation --- //
-
-  private async handlePythonJsonResponse(jsonResponse: string): Promise<void> {
-    if (!this.currentProcessing) {
-      embeddingsLogger.warn(
-        EmbeddingComponent.SERVICE,
-        'Received response from Python but no request is processing.',
-      );
-      return;
-    }
-
-    const requestStartTime = this.currentProcessing.startTime;
-    const currentRequest = this.currentProcessing;
-    const requestId = currentRequest.requestId;
-    this.currentProcessing = null; // Mark as done processing *before* async metadata fetching
-
-    try {
-      const pythonOutput: Record<string, EmbeddingResponseFromPython> = JSON.parse(jsonResponse);
-      const filePathsInResponse = Object.keys(pythonOutput);
-
-      embeddingsLogger.debug(
-        EmbeddingComponent.SERVICE,
-        `Parsed Python response for ${filePathsInResponse.length} files.`,
-        requestId,
-        { fileCount: filePathsInResponse.length },
-      );
-
-      // --- Optimization: Fetch metadata concurrently for all files in the batch ---
-      const timerEnd = embeddingsLogger.startTimer('fetchMetadata', requestId);
-      embeddingsLogger.debug(
-        EmbeddingComponent.SERVICE,
-        `Fetching metadata for ${filePathsInResponse.length} files...`,
-        requestId,
-      );
-
-      const batchMetadata = await this.getBatchMetadata(filePathsInResponse);
-
-      timerEnd(); // Log the duration
-      embeddingsLogger.debug(EmbeddingComponent.SERVICE, `Finished fetching metadata.`, requestId);
-
-      const finalResults: ClipCache = {};
-
-      for (const filePath of filePathsInResponse) {
-        const pyEntry = pythonOutput[filePath];
-        const meta = batchMetadata[filePath]; // Get pre-fetched metadata
-
-        if (!meta) {
-          embeddingsLogger.error(
-            EmbeddingComponent.SERVICE,
-            `Metadata missing for ${filePath} after batch fetch. Skipping.`,
-            requestId,
-            { filePath },
-          );
-
-          // Create an error entry
-          finalResults[filePath] = {
-            schemaVersion: '1.0.0',
-            filePath: filePath,
-            error: 'Metadata fetch failed',
-            mtime: 0,
-            fileSize: 0,
-            dimensions: { width: 1, height: 1 },
-            duration: null,
-            mediaType: 'image',
-            embedding: [],
-            embeddingModel: 'unknown',
-            embeddingConfig: {},
-            processingTimestamp: new Date().toISOString(),
-          } as ClipCacheEntry;
-          continue;
-        }
-
-        // Extract model/config from debugMetadata if present
-        const debug = pyEntry.debugMetadata || {};
-        const embeddingModel = String(debug.model || config.embedding?.defaultModel || 'unknown');
-        const embeddingConfig: ClipCacheEntry['embeddingConfig'] = {
-          augmentation:
-            typeof debug.enable_augmentation === 'boolean' ? debug.enable_augmentation : undefined,
-          numFrames: typeof debug.num_frames === 'number' ? debug.num_frames : null,
-          samplingMethod: typeof debug.method_used === 'string' ? debug.method_used : undefined,
-        };
-
-        // Construct the entry attempting to match the schema
-        const entryData: Partial<ClipCacheEntry> = {
-          schemaVersion: '1.0.0',
-          filePath: filePath,
-          embedding: pyEntry.embedding,
-          debugMetadata: pyEntry.debugMetadata,
-          error: pyEntry.error != null ? String(pyEntry.error) : undefined,
-          detail: pyEntry.detail != null ? String(pyEntry.detail) : undefined,
-          processingTimestamp: new Date().toISOString(),
-          mtime: meta.mtime,
-          fileSize: meta.fileSize,
-          dimensions: meta.dimensions,
-          mediaType: meta.mediaType,
-          duration: meta.duration,
-          embeddingModel,
-          embeddingConfig,
-        };
-
-        // Handle case where embedding failed in Python
-        if (entryData.error && !entryData.embedding) {
-          // Schema requires embedding. Set to empty array to pass validation,
-          // client should check for error field.
-          entryData.embedding = [];
-        } else if (!entryData.embedding && !entryData.error) {
-          // No embedding and no error? Treat as error.
-          entryData.error = 'Embedding missing without error from Python';
-          entryData.embedding = [];
-        }
-
-        // ---> VALIDATE the constructed entry against the schema <---
-        if (validateEntry(entryData)) {
-          // If valid, assign the validated (and now typed) entry
-          finalResults[filePath] = entryData as ClipCacheEntry;
-        } else {
-          // If invalid, log details and store an error-focused object
-          const validationErrors = JSON.stringify(validateEntry.errors);
-
-          embeddingsLogger.logValidationIssue(
-            `Constructed cache entry failed validation for: ${filePath}`,
-            requestId,
-            {
-              constructedData: entryData,
-              pythonData: pyEntry,
-              errors: validateEntry.errors,
-            },
-          );
-
-          // Create a minimal structure indicating validation failure
-          finalResults[filePath] = {
-            schemaVersion: '1.0.0',
-            filePath: filePath,
-            error: 'Internal schema validation failed',
-            detail: validationErrors,
-            // Add required fields with placeholder/default values
-            mtime: meta.mtime, // Use fetched meta even on validation error
-            fileSize: meta.fileSize,
-            dimensions: meta.dimensions,
-            duration: meta.duration,
-            mediaType: meta.mediaType,
-            embedding: [], // Empty embedding on validation error
-            embeddingModel: embeddingModel,
-            embeddingConfig: embeddingConfig,
-            processingTimestamp: entryData.processingTimestamp || new Date().toISOString(),
-          } as ClipCacheEntry;
-        }
-      }
-
-      // Resolve the original promise with the processed results
-      const duration = Date.now() - requestStartTime;
-      embeddingsLogger.info(
-        EmbeddingComponent.SERVICE,
-        `Successfully processed batch of ${filePathsInResponse.length} paths in ${duration} ms.`,
-        requestId,
-        {
-          fileCount: filePathsInResponse.length,
-          durationMs: duration,
-          batchId: currentRequest.batchId,
-        },
-      );
-
-      currentRequest.resolve(finalResults);
-      if (currentRequest.timeoutHandle) clearTimeout(currentRequest.timeoutHandle);
-    } catch (e: any) {
-      embeddingsLogger.error(
-        EmbeddingComponent.SERVICE,
-        `Failed to parse/process JSON response from Python: ${e.message}`,
-        requestId,
-        {
-          error: e,
-          responsePreview:
-            jsonResponse.length > 200 ? jsonResponse.substring(0, 200) + '...' : jsonResponse,
-        },
-      );
-
-      const processingError = new Error(`Failed to process response from Python: ${e.message}`);
-      currentRequest.reject(processingError);
-      if (currentRequest.timeoutHandle) clearTimeout(currentRequest.timeoutHandle);
-      this.lastError = processingError.message;
-    } finally {
-      // Ensure we attempt to process the queue regardless of success/failure of this batch
-      this.processQueue();
-      this.resetInactivityTimer();
-    }
-  }
-
-  // --- Request Queuing and Processing --- //
-
-  private rejectQueue(error: Error): void {
-    if (this.requestQueue.length > 0) {
-      embeddingsLogger.warn(
-        EmbeddingComponent.SERVICE,
-        `Rejecting ${this.requestQueue.length} queued request(s) due to error`,
-        undefined,
-        {
-          queueLength: this.requestQueue.length,
-          error,
-        },
-      );
-
-      this.requestQueue.forEach((req) => {
-        if (req.timeoutHandle) clearTimeout(req.timeoutHandle);
-        req.reject(error);
-      });
-
-      this.requestQueue = [];
-    }
-  }
-
-  private processQueue(): void {
-    if (
-      this.currentProcessing ||
-      this.requestQueue.length === 0 ||
-      !this.pythonProcess ||
-      this.isStarting
-    ) {
-      embeddingsLogger.debug(
-        EmbeddingComponent.SERVICE,
-        `Skipping processQueue (Processing: ${!!this.currentProcessing}, Queue: ${this.requestQueue.length}, Proc: ${!!this.pythonProcess}, Starting: ${this.isStarting})`,
-      );
-      return;
-    }
-
-    this.currentProcessing = this.requestQueue.shift()!;
-    this.lastProgress = null; // Reset progress for new batch
-
-    const requestId = this.currentProcessing.requestId;
-    const batchId = this.currentProcessing.batchId || randomUUID().substring(0, 8);
-    this.currentProcessing.batchId = batchId;
-
-    embeddingsLogger.logBatch(batchId, this.currentProcessing.paths.length, requestId, {
-      queueRemaining: this.requestQueue.length,
-    });
-
-    const requestPayload = { imagePaths: this.currentProcessing.paths };
-
-    try {
-      // Add newline delimiter for Python script's readline()
-      const requestJson = JSON.stringify(requestPayload) + '\n';
-      this.responseBuffer = ''; // Clear buffer before sending new request
-
-      // Handle potential write errors (e.g., process died between check and write)
-      if (!this.pythonProcess?.stdin?.writable) {
-        throw new Error('Python process stdin is not writable.');
-      }
-
-      this.pythonProcess.stdin.write(requestJson, (err) => {
-        if (err) {
-          embeddingsLogger.error(
-            EmbeddingComponent.SERVICE,
-            `Failed to write to Python stdin: ${err.message}`,
-            requestId,
-            { error: err },
-          );
-
-          // Process might be dead, trigger exit handling
-          const writeError = new Error(`Failed to send data to Python: ${err.message}`);
-          this.currentProcessing?.reject(writeError);
-          if (this.currentProcessing?.timeoutHandle)
-            clearTimeout(this.currentProcessing.timeoutHandle);
-          this.currentProcessing = null;
-          // Don't necessarily kill here, let exit handler manage potential restart
-          this.handleProcessExit(writeError);
-        } else {
-          embeddingsLogger.debug(
-            EmbeddingComponent.SERVICE,
-            'Data written to Python stdin successfully.',
-            requestId,
-          );
-
-          this.resetInactivityTimer();
-        }
-      });
-    } catch (error: any) {
-      embeddingsLogger.error(
-        EmbeddingComponent.SERVICE,
-        `Error writing to Python stdin: ${error.message}`,
-        requestId,
-        { error },
-      );
-
-      const catchError = new Error(`Error sending data to Python: ${error.message}`);
-      this.currentProcessing.reject(catchError);
-      if (this.currentProcessing.timeoutHandle) clearTimeout(this.currentProcessing.timeoutHandle);
-      this.currentProcessing = null;
-      // Trigger exit handling if write fails critically
-      this.handleProcessExit(catchError);
-    }
-  }
-
   /**
    * Recursively searches inputDir (if set) and then publicDir for a file with the given filename.
    * Returns the absolute path if found, or null if not found.
@@ -999,16 +321,16 @@ class EmbeddingService {
   }
 
   /**
-   * Public method to request embeddings. Starts Python process if needed.
+   * Public method to request embeddings using the HTTP client.
    * Recursively searches the public directory for each filename in imagePaths.
    * The response will use the original request paths as keys and in filePath fields.
    */
   public async getEmbeddings(
     imagePaths: string[],
+    requestId: string,
     rawPaths?: string[],
-    timeoutMs = PYTHON_SCRIPT_TIMEOUT_MS,
+    timeoutMs = SCRIPT_TIMEOUT_MS,
   ): Promise<ClipCache> {
-    const requestId = randomUUID();
     const context = embeddingsLogger.createContext({
       requestId,
       mediaCount: imagePaths.length,
@@ -1024,6 +346,9 @@ class EmbeddingService {
       context,
       { pathsRequested: imagePaths.length },
     );
+
+    // Reset error on new request
+    this.lastError = null;
 
     // Map original request path to found absolute path
     const pathMap: Record<string, string | null> = {};
@@ -1058,236 +383,134 @@ class EmbeddingService {
       },
     );
 
-    // Start process if it's not running and not already stopping/starting
-    if (!this.pythonProcess && !this.isStarting && !this.isStopping) {
-      embeddingsLogger.info(
-        EmbeddingComponent.SERVICE,
-        'Python process not running. Starting for new request...',
-        context,
-      );
-
-      try {
-        await this.startPythonProcess();
-      } catch (startErr: any) {
-        embeddingsLogger.error(
-          EmbeddingComponent.SERVICE,
-          `Failed to start Python process for request: ${startErr.message}`,
-          context,
-          { error: startErr },
-        );
-
-        embeddingsLogger.removeContext(requestId);
-        // Reject immediately if start failed
-        return Promise.reject(new Error(`Failed to start Python process: ${startErr.message}`));
-      }
-    } else {
-      // If process exists, reset inactivity timer as a request is coming in
-      this.resetInactivityTimer();
-    }
-
-    this.lastError = null; // Clear last error on new request attempt
-
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const startTime = Date.now();
-
-      const request: EmbeddingRequestInternal = {
-        // Use found absolute paths for processing
-        paths: foundPaths,
-        startTime: startTime,
-        requestId,
-        resolve: (result: ClipCache) => {
-          // Remap result keys and filePath fields to original request paths
-          if (settled) return;
-          settled = true;
-          if (request.timeoutHandle) clearTimeout(request.timeoutHandle);
-          this.resetInactivityTimer();
-
-          // Remap result: for each original request path, use the result for the found path
-          const remapped: ClipCache = {};
-          for (const reqPath of originalPaths) {
-            const found = pathMap[reqPath];
-            if (found && result[found]) {
-              remapped[reqPath] = { ...result[found], filePath: reqPath };
-            } else {
-              embeddingsLogger.warn(
-                EmbeddingComponent.SERVICE,
-                `File not found in results: ${reqPath}`,
-                context,
-                { filePath: reqPath },
-              );
-
-              remapped[reqPath] = {
-                schemaVersion: '1.0.0',
-                filePath: reqPath,
-                error: 'File not found in public directory',
-                mtime: 0,
-                fileSize: 0,
-                dimensions: { width: 1, height: 1 },
-                duration: null,
-                mediaType: 'image',
-                embedding: [],
-                embeddingModel: 'unknown',
-                embeddingConfig: {},
-                processingTimestamp: new Date().toISOString(),
-              };
-            }
-          }
-
-          embeddingsLogger.info(
-            EmbeddingComponent.SERVICE,
-            `Request completed successfully in ${Date.now() - startTime}ms`,
-            context,
-            { durationMs: Date.now() - startTime },
-          );
-
-          embeddingsLogger.removeContext(requestId);
-          resolve(remapped);
-        },
-        reject: (error: Error) => {
-          if (settled) return;
-          settled = true;
-          if (request.timeoutHandle) clearTimeout(request.timeoutHandle);
-
-          embeddingsLogger.error(
-            EmbeddingComponent.SERVICE,
-            `Request failed after ${Date.now() - startTime}ms: ${error.message}`,
-            context,
-            {
-              error,
-              durationMs: Date.now() - startTime,
-            },
-          );
-
-          embeddingsLogger.removeContext(requestId);
-          reject(error);
-        },
+    try {
+      // Set processing state
+      this.isProcessing = true;
+      this.currentBatch = {
+        count: 0,
+        total: foundPaths.length,
+        current: foundPaths[0] || '',
       };
 
-      // Setup timeout for *this specific request*
-      request.timeoutHandle = setTimeout(() => {
-        if (settled) return;
-
-        embeddingsLogger.warn(
-          EmbeddingComponent.SERVICE,
-          `Request timed out after ${timeoutMs}ms for ${imagePaths.length} paths.`,
-          context,
-          {
-            timeoutMs,
-            pathCount: imagePaths.length,
-          },
-        );
-
-        // Remove request from queue *if it's still there*
-        const index = this.requestQueue.findIndex((r) => r === request);
-        if (index > -1) {
-          this.requestQueue.splice(index, 1);
-          embeddingsLogger.debug(
-            EmbeddingComponent.SERVICE,
-            'Removed timed-out request from queue.',
-            context,
-          );
-        } else if (this.currentProcessing === request) {
-          // If it was actively processing, we can't easily abort Python,
-          // but we should reject the promise and nullify currentProcessing
-          // so the queue can potentially continue.
-          embeddingsLogger.error(
-            EmbeddingComponent.SERVICE,
-            'Request timed out while actively processing. Python process might be stuck.',
-            context,
-          );
-
-          this.currentProcessing = null; // Allow queue to proceed
-          this.lastError = `Request timed out while processing ${imagePaths.length} paths.`;
-          this.processQueue(); // Attempt to process next queued request
-        }
-
-        request.reject(new Error(`Embedding request timed out after ${timeoutMs}ms.`));
-      }, timeoutMs);
-
-      // Add to queue and attempt processing
-      this.requestQueue.push(request);
-
-      embeddingsLogger.debug(
-        EmbeddingComponent.SERVICE,
-        `Queued request for ${imagePaths.length} paths. Queue size: ${this.requestQueue.length}`,
-        context,
-        {
-          pathCount: imagePaths.length,
-          queueSize: this.requestQueue.length,
-        },
+      // Use the HTTP client to get embeddings
+      const clipCache = await this.httpClient.getEmbeddings(
+        foundPaths,
+        requestId,
+        undefined,
+        timeoutMs,
       );
 
-      // Trigger queue processing immediately if possible
-      if (!this.currentProcessing && this.pythonProcess && !this.isStarting) {
-        this.processQueue();
+      // Remap result: for each original request path, use the result for the found path
+      const remapped: ClipCache = {};
+      for (const reqPath of originalPaths) {
+        const found = pathMap[reqPath];
+        if (found && clipCache[found]) {
+          remapped[reqPath] = { ...clipCache[found], filePath: reqPath };
+        } else {
+          embeddingsLogger.warn(
+            EmbeddingComponent.SERVICE,
+            `File not found in results: ${reqPath}`,
+            context,
+            { filePath: reqPath },
+          );
+
+          remapped[reqPath] = {
+            schemaVersion: '1.0.0',
+            filePath: reqPath,
+            error: 'File not found in public directory',
+            mtime: 0,
+            fileSize: 0,
+            dimensions: { width: 1, height: 1 },
+            duration: null,
+            mediaType: 'image',
+            embedding: [],
+            embeddingModel: 'unknown',
+            embeddingConfig: {},
+            processingTimestamp: new Date().toISOString(),
+          };
+        }
       }
-    });
+
+      embeddingsLogger.info(EmbeddingComponent.SERVICE, `Request completed successfully`, context);
+
+      this.isProcessing = false;
+      this.currentBatch = null;
+      embeddingsLogger.removeContext(requestId);
+
+      return remapped;
+    } catch (error: any) {
+      this.lastError = error.message;
+      this.isProcessing = false;
+      this.currentBatch = null;
+
+      embeddingsLogger.error(
+        EmbeddingComponent.SERVICE,
+        `Request failed: ${error.message}`,
+        context,
+        { error },
+      );
+
+      embeddingsLogger.removeContext(requestId);
+      throw error;
+    }
   }
 
   // --- Service Control --- //
 
-  /** Manually stops the Python process and rejects pending requests. */
-  public stop(): void {
-    embeddingsLogger.info(EmbeddingComponent.SERVICE, 'Manual stop requested.');
+  /**
+   * Get the current status of the embedding service.
+   * Attempts to check the health of the HTTP embedding service.
+   */
+  public async getStatus(requestId: string): Promise<EmbeddingServiceStatus> {
+    let state: EmbeddingServiceState = 'IDLE';
+    let isHealthy = false;
 
-    this.isStopping = true; // Prevent restarts during manual stop
-    this.clearInactivityTimer(); // Stop inactivity timer
+    try {
+      const healthResponse = await this.httpClient.checkHealth(requestId);
+      isHealthy = healthResponse.status === 'ok';
 
-    if (this.pythonProcess) {
-      embeddingsLogger.info(
+      if (this.isProcessing) {
+        state = 'PROCESSING';
+      } else if (!isHealthy) {
+        state = 'ERROR';
+        this.lastError = 'Embedding service health check failed';
+
+        // Log warning about service being unavailable
+        embeddingsLogger.warn(
+          EmbeddingComponent.SERVICE,
+          'Embedding service health check failed - Python service may not be running',
+          undefined,
+          { serviceUrl: this.httpClient.getServiceUrl() },
+        );
+      } else {
+        state = 'IDLE';
+      }
+    } catch (error: any) {
+      state = 'ERROR';
+      this.lastError = `Failed to connect to embedding service: ${error.message}`;
+      embeddingsLogger.error(
         EmbeddingComponent.SERVICE,
-        `Killing Python process (PID: ${this.pythonProcess.pid})...`,
+        `Health check failed: ${error.message}`,
         undefined,
-        { pid: this.pythonProcess.pid },
+        { error },
       );
 
-      this.pythonProcess.kill(); // Send SIGTERM
-      this.pythonProcess = null; // Assume it will exit
-    } else {
-      embeddingsLogger.info(EmbeddingComponent.SERVICE, 'Python process already stopped.');
-    }
-
-    // Reject current and queued requests
-    const stopError = new Error('Embedding service is stopping.');
-    if (this.currentProcessing) {
-      this.currentProcessing.reject(stopError);
-      if (this.currentProcessing.timeoutHandle) clearTimeout(this.currentProcessing.timeoutHandle);
-      this.currentProcessing = null;
-    }
-    this.rejectQueue(stopError);
-    // isStopping will be reset by handleProcessExit if it triggers,
-    // or reset on next successful start
-  }
-
-  public getStatus(): EmbeddingServiceStatus {
-    // Determine service state based on flags and queue
-    let state: EmbeddingServiceState;
-    if (this.isStopping) {
-      state = 'STOPPED';
-    } else if (this.isStarting) {
-      state = 'STARTING';
-    } else if (!this.pythonProcess) {
-      state = this.lastError ? 'ERROR' : 'STOPPED';
-    } else if (this.currentProcessing || this.requestQueue.length > 0) {
-      state = 'PROCESSING';
-    } else {
-      state = 'IDLE';
+      // Log warning about service being unavailable
+      embeddingsLogger.warn(
+        EmbeddingComponent.SERVICE,
+        'Cannot connect to embedding service - ensure Python service is running at the configured URL',
+        undefined,
+        { serviceUrl: this.httpClient.getServiceUrl() },
+      );
     }
 
     const status = {
       state,
-      pid: this.pythonProcess?.pid ?? null,
-      isStarting: this.isStarting,
-      isProcessing: !!this.currentProcessing,
-      queueLength: this.requestQueue.length,
-      currentBatch: this.lastProgress
-        ? {
-            count: this.lastProgress.processed,
-            total: this.lastProgress.total,
-            current: this.lastProgress.current,
-          }
-        : undefined,
+      pid: null, // HTTP client doesn't track PID
+      isStarting: false,
+      isProcessing: this.isProcessing,
+      queueLength: 0, // HTTP client doesn't queue requests internally
+      currentBatch: this.currentBatch ?? undefined,
       lastError: this.lastError ?? undefined,
     };
 
@@ -1301,30 +524,33 @@ class EmbeddingService {
     return status;
   }
 
-  private setupExitHandlers() {
-    // Graceful shutdown: Ensure Python process is killed when Node exits
-    const handleExit = () => {
-      embeddingsLogger.info(
-        EmbeddingComponent.SERVICE,
-        'Node process exiting. Stopping Python process...',
-      );
+  /**
+   * Stop method (no-op for HTTP client, kept for API compatibility)
+   */
+  public stop(): void {
+    embeddingsLogger.info(
+      EmbeddingComponent.SERVICE,
+      'Stop requested, but HTTP client has no persistent processes to stop.',
+    );
+    return;
+  }
 
-      this.isStopping = true; // Prevent restarts during shutdown
-      this.stop();
+  private setupExitHandlers() {
+    // No active processes to kill, but keeping for consistency with original implementation
+    const handleExit = () => {
+      embeddingsLogger.info(EmbeddingComponent.SERVICE, 'Node process exiting.');
     };
+
     process.on('exit', handleExit);
-    // Handle Ctrl+C, kill, etc.
     process.on('SIGINT', () => {
       embeddingsLogger.info(EmbeddingComponent.SERVICE, 'Received SIGINT.');
-
       handleExit();
-      process.exit(0); // Exit Node process after cleanup attempt
+      process.exit(0);
     });
     process.on('SIGTERM', () => {
       embeddingsLogger.info(EmbeddingComponent.SERVICE, 'Received SIGTERM.');
-
       handleExit();
-      process.exit(0); // Exit Node process after cleanup attempt
+      process.exit(0);
     });
     process.on('uncaughtException', (err) => {
       embeddingsLogger.error(
@@ -1333,10 +559,8 @@ class EmbeddingService {
         undefined,
         { error: err, stack: err.stack },
       );
-
-      // Optionally try to stop python before exiting
       handleExit();
-      process.exit(1); // Exit with error code
+      process.exit(1);
     });
     process.on('unhandledRejection', (reason, promise) => {
       embeddingsLogger.error(
@@ -1345,10 +569,8 @@ class EmbeddingService {
         undefined,
         { reason, promise },
       );
-
-      // Optionally try to stop python before exiting
       handleExit();
-      process.exit(1); // Exit with error code
+      process.exit(1);
     });
   }
 }

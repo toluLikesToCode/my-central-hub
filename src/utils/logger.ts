@@ -10,6 +10,7 @@ import chalk from 'chalk'; // Dependency for PrettyFormatter
 import boxen from 'boxen'; // Dependency for PrettyFormatter
 import { Writable } from 'stream';
 import { formatDate } from './dateFormatter'; // Import our new date formatter
+import { config } from '../config/server.config';
 
 // --- Configuration ---
 
@@ -27,6 +28,10 @@ type LogLevel = keyof typeof standardLevels;
 type CustomLevels = Record<string, number>;
 // Combine standard and potential custom levels for type checking
 type AllLogLevels = LogLevel | 'success' | keyof CustomLevels; // Include 'success' explicitly if used often
+
+const APP_LOG_PATH =
+  path.join(process.env.LOG_DIR || '', 'app.log') || path.join(process.cwd(), 'logs', 'app.log');
+const LOG_RUN_HISTORY_LENGTH = 50;
 
 // --- Interfaces ---
 
@@ -53,14 +58,24 @@ export interface Transport {
 
 export class JsonFormatter implements Formatter {
   format(entry: LogEntry): string {
+    // Handle Error message and include its properties in meta
+    let messageValue: any;
+    let metaObj: Record<string, any> | undefined = entry.meta;
+    if (entry.message instanceof Error) {
+      messageValue = entry.message.message;
+      metaObj = { ...entry.meta, name: entry.message.name, stack: entry.message.stack };
+    } else {
+      messageValue = entry.message;
+    }
     const logObject = {
       level: entry.level,
-      message: entry.message,
-      timestamp: formatDate(entry.timestamp), // Use our new human-readable format
+      message: messageValue,
+      timestamp: formatDate(entry.timestamp),
     };
+    // Compact meta JSON for testing expectations
     let metaBlock = '';
-    if (entry.meta && Object.keys(entry.meta).length > 0) {
-      metaBlock = '\nMeta: \n' + JSON.stringify(entry.meta, null, 4);
+    if (metaObj && Object.keys(metaObj).length > 0) {
+      metaBlock = '\n\tMeta: \n' + JSON.stringify(metaObj);
     }
     try {
       // Handle potential circular references and BigInts
@@ -70,16 +85,14 @@ export class JsonFormatter implements Formatter {
         ) + metaBlock
       );
     } catch (error) {
-      // Fallback for stringification errors (e.g., circular refs)
-      return (
-        JSON.stringify({
-          level: entry.level,
-          message: `[Unserializable Object: ${
-            error instanceof Error ? error.message : String(error)
-          }]`,
-          timestamp: formatDate(entry.timestamp), // Use our new human-readable format
-        }) + metaBlock
-      );
+      const fallback = {
+        level: entry.level,
+        message: `[Unserializable Object: ${
+          error instanceof Error ? error.message : String(error)
+        }]`,
+        timestamp: formatDate(entry.timestamp),
+      };
+      return JSON.stringify(fallback) + metaBlock;
     }
   }
 }
@@ -313,10 +326,18 @@ export class PrettyFormatter implements Formatter {
   format(entry: LogEntry): string {
     const { level, message, meta, timestamp } = entry;
     const style = PrettyFormatter.LEVEL_STYLES[level] || PrettyFormatter.LEVEL_STYLES.default;
-    let formattedMessage = typeof message === 'string' ? message : JSON.stringify(message);
+    // Properly handle Error messages
+    let formattedMessage: string;
+    if (typeof message === 'string') {
+      formattedMessage = message;
+    } else if (message instanceof Error) {
+      formattedMessage = this.formatValue(message);
+    } else {
+      formattedMessage = JSON.stringify(message);
+    }
     let metaBlock = '';
     if (meta && Object.keys(meta).length > 0 && meta !== message) {
-      metaBlock = '\nMeta: \n' + JSON.stringify(meta, null, 4);
+      metaBlock = '\n\tMeta: \n' + JSON.stringify(meta, null, 4);
     }
     const timestampStr = this.options.showTimestamp ? `[${formatDate(timestamp)}] ` : ''; // Use our new human-readable format
     const levelStr = `${style.icon} ${level.toUpperCase()} `;
@@ -363,7 +384,7 @@ export class ConsoleTransport implements Transport {
 
 export class FileTransport implements Transport {
   public formatter: Formatter;
-  private stream: Writable;
+  private stream?: Writable;
   private filename: string;
   public level?: string;
 
@@ -373,29 +394,44 @@ export class FileTransport implements Transport {
     this.formatter = options.formatter ?? new JsonFormatter();
     this.level = options.level;
 
-    this.ensureLogDir(this.filename);
-    this.stream = fs.createWriteStream(this.filename, { flags: 'a' });
-    this.stream.on('error', (err) => {
-      console.error(`Error writing to log file ${this.filename}:`, err);
-    });
-    // Handle stream closing gracefully
-    this.stream.on('finish', () => {
-      // console.log(`Log stream closed for ${this.filename}`);
-    });
+    try {
+      this.ensureLogDir(this.filename); // may throw on mkdir failure
+      this.stream = fs.createWriteStream(this.filename, { flags: 'a' });
+
+      // Only attach event handlers if stream was successfully created
+      if (this.stream) {
+        this.stream.on('error', (err) => {
+          console.error(`Error writing to log file ${this.filename}:`, err);
+        });
+        // Handle stream closing gracefully
+        this.stream.on('finish', () => {
+          // console.log(`Log stream closed for ${this.filename}`);
+        });
+      }
+    } catch (err) {
+      console.error(`Failed to create log stream for ${this.filename}:`, err);
+      // Stream remains undefined when directory creation fails
+    }
   }
 
   private ensureLogDir(logPath: string): void {
     const dir = path.dirname(logPath);
-    try {
-      if (!fs.existsSync(dir)) {
+    if (!fs.existsSync(dir)) {
+      try {
         fs.mkdirSync(dir, { recursive: true });
+      } catch (err) {
+        console.error(`Failed to create log directory ${dir}:`, err);
+        throw err;
       }
-    } catch (err) {
-      console.error(`Failed to create log directory ${dir}:`, err);
     }
   }
 
   log(formattedMessage: string, entry: LogEntry): void {
+    // Skip writing if stream is undefined (created during tests with mocked fs)
+    if (!this.stream) {
+      return;
+    }
+
     this.stream.write(formattedMessage + '\n', (err) => {
       if (err) {
         console.error(`Failed to write to log stream ${this.filename}:`, err);
@@ -404,14 +440,32 @@ export class FileTransport implements Transport {
   }
 
   close(): void {
+    // Skip closing if stream is undefined
+    if (!this.stream) {
+      return;
+    }
+
     // Promisify stream end for cleaner shutdown
     new Promise<void>((resolve) => {
-      this.stream.end(() => resolve());
+      this.stream!.end(() => resolve());
     }).catch((err) => {
       console.error(`Error closing log stream ${this.filename}:`, err);
     });
   }
 }
+
+export const sharedAppLogTransport = new FileTransport({
+  filename: APP_LOG_PATH,
+  formatter: new PrettyFormatter({
+    useColors: false,
+    useBoxes: false,
+    showTimestamp: true,
+    maxDepth: 4,
+    stringLengthLimit: 300,
+    arrayLengthLimit: 15,
+  }),
+  level: 'silly',
+});
 
 // --- Logger Core ---
 
@@ -504,10 +558,6 @@ export class Logger {
       new ConsoleTransport({
         formatter: new PrettyFormatter({ useColors: true }),
       }),
-      new FileTransport({
-        filename: path.join(process.cwd(), process.env.LOG_DIR || 'logs', '/app.log'),
-        formatter: new JsonFormatter(),
-      }),
     ];
 
     this.options = {
@@ -518,6 +568,9 @@ export class Logger {
     };
 
     this.transports = this.options.transports;
+    if (!this.transports.includes(sharedAppLogTransport)) {
+      this.transports.push(sharedAppLogTransport);
+    }
 
     // --- Dynamic Method Implementation ---
     // This part still creates the runtime methods, but TypeScript now relies on the explicit signatures above.
@@ -641,38 +694,43 @@ export class Logger {
 
 // --- Backward Compatibility & Default Export ---
 
-const defaultLogFilePath = process.env.LOG_FILE_PATH || path.join(process.cwd(), 'logs/app.log');
-
 const defaultLogger = new Logger({
   level: (process.env.LOG_LEVEL as LogLevel) || 'info',
   transports: [
     new ConsoleTransport({
       formatter: new PrettyFormatter({
-        useColors: false,
+        useColors: true,
         useBoxes: true, // Keep boxes for default console
         showTimestamp: false,
       }),
       level: (process.env.CONSOLE_LOG_LEVEL as LogLevel) || undefined,
     }),
-    new FileTransport({
-      filename: defaultLogFilePath,
-      formatter: new PrettyFormatter({
-        useColors: false,
-        useBoxes: false, // No boxes for file transport
-        showTimestamp: true,
-        maxDepth: 4,
-        stringLengthLimit: 300,
-        arrayLengthLimit: 15,
-        objectKeysLimit: 10,
-        indent: 2,
-      }), // Default file transport to JSON
-      level: (process.env.FILE_LOG_LEVEL as LogLevel) || undefined,
-    }),
   ],
-  // levels definition already includes 'success' mapped to 'info' in the constructor
 });
+
+const APP_LOG_SEPARATOR = `=== RUN STARTED [${formatDate(new Date().toISOString())}] ===`;
+
+function trimAppLogToLastRuns(logPath: string, maxRuns = 10) {
+  try {
+    if (!fs.existsSync(logPath)) return;
+    const content = fs.readFileSync(logPath, 'utf8');
+    const split = content.split(/=== RUN STARTED \[.*?\] ===/g);
+    const matches = content.match(/=== RUN STARTED \[.*?\] ===/g) || [];
+    if (split.length && split[0].trim() === '') split.shift();
+    const keep = Math.max(0, split.length - (maxRuns - 1));
+    let trimmed = '';
+    for (let i = keep; i < split.length; i++) {
+      trimmed += (matches[i] || APP_LOG_SEPARATOR) + split[i];
+    }
+    fs.writeFileSync(logPath, trimmed, 'utf8');
+  } catch (err) {
+    console.error('Failed to trim app.log:', err);
+  }
+}
+
+// Moved run separators here, after Logger is initialized
+trimAppLogToLastRuns(APP_LOG_PATH, LOG_RUN_HISTORY_LENGTH);
+fs.appendFileSync(APP_LOG_PATH, `\n${APP_LOG_SEPARATOR}\n\n`);
 
 export default defaultLogger;
 export { standardLevels };
-
-// --- Usage Examples ---

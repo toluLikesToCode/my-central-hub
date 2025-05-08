@@ -55,7 +55,15 @@ export interface IncomingRequest {
   headersMap?: Map<string, string[]>;
   body?: Buffer;
   raw: string;
+  // ctx is a generic object for passing data between middlewares
+  // and handlers. It can be used to store request-specific data.
+  // data can be accessed by middlewares and handlers
+  // ctx.requestId = req.ctx.requestId || generateRequestId();
+  // the return type of req.ctx.requestId is {} which is a generic object
+  // that converted to a string by calling toString() on it.
+
   ctx?: Record<string, unknown>;
+
   invalid?: boolean;
 
   /**

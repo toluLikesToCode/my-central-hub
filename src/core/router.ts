@@ -19,6 +19,7 @@ import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
 import { sendResponse } from '../entities/sendResponse';
 import logger, { Logger } from '../utils/logger';
+import { requestIdMiddleware } from '../core/middlewares/requestId';
 
 /* ───── Types ─────────────────────────────────────────────────────────── */
 
@@ -63,7 +64,18 @@ class Router {
    */
   use(mw: Middleware) {
     this.middlewares.push(mw);
-    logger.debug('Middleware registered', { middlewareCount: this.middlewares.length });
+    logger.debug('Middleware registered', { middlewareCount: this.middlewares.length, mw });
+    return this; // Enable chaining
+  }
+
+  /**
+   * Reset the router state (useful for testing)
+   * Clears all registered routes and middlewares
+   */
+  reset(): this {
+    this.routes = [];
+    this.middlewares = [];
+    logger.debug('Router state reset');
     return this; // Enable chaining
   }
 
@@ -132,12 +144,11 @@ class Router {
    */
   async handle(req: IncomingRequest, sock: Socket): Promise<void> {
     const startTime = process.hrtime();
-    const requestId = generateRequestId();
+    const requestId = req.ctx?.requestId;
 
     // Create a request-scoped logger with request-specific metadata
     const reqLogger = logger.child({
       requestId,
-      method: req.method,
       path: req.path,
       ip: sock.remoteAddress, // Get remote address from Socket instead of req
       userAgent: req.headers['user-agent'],
@@ -338,13 +349,6 @@ class Router {
 }
 
 /**
- * Generate a unique request ID for tracking requests in logs
- */
-function generateRequestId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).substring(2);
-}
-
-/**
  * Log the completion of a request with duration and status
  */
 function logRequestCompletion(
@@ -413,7 +417,9 @@ function compilePath(pattern: string): { regex: RegExp; keys: string[] } {
  */
 export function createRouter(): Router {
   logger.info('Creating new router instance');
-  return new Router();
+  const router = new Router();
+  router.use(requestIdMiddleware); // Register the request ID middleware
+  return router;
 }
 
 // Export a singleton router instance

@@ -33,6 +33,7 @@ export class HttpRequestParser {
   private isChunked = false;
   private invalid = false;
   private lastHeaderKey: string | null = null;
+  private isBinaryContent = false;
 
   /**
    * Returns the number of pending bytes in the parser buffer.
@@ -133,6 +134,16 @@ export class HttpRequestParser {
               return this._errorResponse();
             }
           }
+
+          // Check for binary content
+          const contentType = this.headers['content-type'] || '';
+          this.isBinaryContent =
+            contentType.includes('application/octet-stream') ||
+            contentType.includes('image/') ||
+            contentType.includes('video/') ||
+            contentType.includes('audio/') ||
+            contentType.includes('multipart/form-data');
+
           // Short-circuit on parse errors
           if (this.invalid) {
             return this._errorResponse();
@@ -231,6 +242,17 @@ export class HttpRequestParser {
           // capture leftover before reset (for pipelining)
           const leftover = this.buffer;
           const finalBody = this.bodyChunks.length ? Buffer.concat(this.bodyChunks) : undefined;
+
+          // Log information about binary content for debugging
+          if (this.isBinaryContent && finalBody) {
+            logger.debug('Parsed binary request', {
+              method: this.method,
+              contentType: this.headers['content-type'],
+              contentLength: finalBody.length,
+              path: this.url.pathname,
+            });
+          }
+
           const request = {
             method: this.method,
             path: this.url.pathname,
@@ -241,7 +263,9 @@ export class HttpRequestParser {
             url: this.url,
             body: finalBody,
             raw: '',
-            ctx: {},
+            ctx: {
+              isBinaryContent: this.isBinaryContent,
+            },
             invalid: this.invalid,
           };
           this.reset();
@@ -300,5 +324,6 @@ export class HttpRequestParser {
     this.isChunked = false;
     this.invalid = false;
     this.lastHeaderKey = null;
+    this.isBinaryContent = false;
   }
 }

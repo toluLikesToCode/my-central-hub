@@ -19,7 +19,7 @@ export const config = {
     : join(process.cwd(), 'public'),
   mediaDir: process.env.MEDIA_DIR
     ? join(process.cwd(), process.env.MEDIA_DIR)
-    : join(process.cwd(), 'media'),
+    : join(process.cwd(), 'public', 'media'),
   headerTimeoutMs: process.env.HEADER_TIMEOUT_MS
     ? Math.max(parseInt(process.env.HEADER_TIMEOUT_MS, 10), 0)
     : 10000,
@@ -30,6 +30,18 @@ export const config = {
    * Path to the SQLite database file. Will be created if missing.
    */
   dbPath: process.env.DB_PATH ? process.env.DB_PATH : join(process.cwd(), 'data', 'metrics.db'),
+  /**
+   * Admin key for privileged operations (cache management, etc.)
+   */
+  adminKey: process.env.ADMIN_KEY || 'admin-secret-key',
+  /**
+   * File caching configuration
+   */
+  fileCache: {
+    enabled: process.env.FILE_CACHE_ENABLED !== 'false', // Default to true
+    maxSize: parseInt(process.env.FILE_CACHE_MAX_SIZE || '209715200', 10), // 200MB default
+    maxAge: parseInt(process.env.FILE_CACHE_MAX_AGE || '600000', 10), // 10 minutes default
+  },
   /**
    * Feature toggles for modularity and configurability
    */
@@ -59,6 +71,11 @@ export const config = {
    */
   embedding: {
     // Python process settings
+    maxRetries: 3,
+    retryDelayMs: 1000,
+    timeoutMs: 30000,
+    // Embedding service settings
+    serviceUrl: process.env.EMBEDDING_SERVICE_URL || 'http://192.168.1.107:3456',
     pythonExecutable: process.env.PYTHON_EXECUTABLE || 'python3',
     pythonScriptPath:
       process.env.PYTHON_SCRIPT_PATH ||
@@ -84,6 +101,7 @@ export const config = {
     inputDir: process.env.EMBED_DIR,
   },
   testMode: true, // Set to true for testing purposes
+  staticDir: process.env.STATIC_DIR || join(process.cwd(), 'static'), // Static files directory
 };
 
 // Only log configuration if logger is defined and we're in test mode
@@ -94,9 +112,15 @@ if (logger && config.testMode) {
     logger.info(`- Port: ${config.port}`);
     logger.info(`- Public Directory: ${config.publicDir}`);
     logger.info(`- Media Directory: ${config.mediaDir}`);
+    logger.info(`- Log Directory: ${config.logging.logDir}`);
+    logger.info(`- Static Directory: ${config.staticDir}`);
     logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
     logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
     logger.info(`- SQLite DB path: ${config.dbPath}`);
+    logger.info(`- Admin Key: ${config.adminKey}`);
+    logger.info(`- File Cache Enabled: ${config.fileCache.enabled}`);
+    logger.info(`- File Cache Max Size: ${config.fileCache.maxSize} bytes`);
+    logger.info(`- File Cache Max Age: ${config.fileCache.maxAge}ms`);
     logger.info(`- Active Features:`, {
       features: Object.entries(config.features)
         .filter(([_, enabled]) => enabled)
