@@ -20,6 +20,8 @@ import { IncomingRequest } from '../entities/http';
 import { sendResponse } from '../entities/sendResponse';
 import logger, { Logger } from '../utils/logger';
 import { requestIdMiddleware } from '../core/middlewares/requestId';
+import { corsMiddleware } from '../core/middlewares/cors';
+import { optionsHandlerMiddleware } from '../core/middlewares/optionsHandler';
 
 /* ───── Types ─────────────────────────────────────────────────────────── */
 
@@ -157,25 +159,6 @@ class Router {
     reqLogger.info(`Request started: ${req.method} ${req.path}`);
 
     try {
-      // Handle OPTIONS requests for CORS support
-      if (req.method === 'OPTIONS') {
-        sendResponse(
-          sock,
-          200,
-          {
-            'Content-Type': 'text/plain',
-            Allow: 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-          },
-          'OK',
-        );
-        reqLogger.debug('Responded to OPTIONS request');
-        logRequestCompletion(reqLogger, startTime, 200);
-        return;
-      }
-
       // Validate request path
       if (!req.path || typeof req.path !== 'string') {
         const status = 400;
@@ -419,6 +402,8 @@ export function createRouter(): Router {
   logger.info('Creating new router instance');
   const router = new Router();
   router.use(requestIdMiddleware); // Register the request ID middleware
+  router.use(optionsHandlerMiddleware); // Register OPTIONS handler middleware
+  router.use(corsMiddleware); // Register the CORS middleware
   return router;
 }
 

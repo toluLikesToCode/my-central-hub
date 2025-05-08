@@ -3,14 +3,16 @@ import { Socket } from 'net';
 import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
 import { FileHostingService } from './fileHostingService';
+import { FileHostingStatsHelper } from './fileHostingStatsHelper';
 import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
 import logger from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
 import { Readable } from 'stream';
 import { formatDate } from '../../utils/dateFormatter';
-// --- NEW: Import zlib for compression ---
+// Import zlib for compression
 import * as zlib from 'zlib';
+import path from 'path';
 
 // Create module-specific logger with metadata
 const fileLogger = logger.child({
@@ -22,7 +24,18 @@ const fileLogger = logger.child({
 // Use staticDir instead of mediaDir for file hosting
 const fileSvc = new FileHostingService(config.staticDir);
 
-// --- NEW: Define compressible MIME types ---
+// Initialize the stats helper with the database path
+const statsHelper = new FileHostingStatsHelper(path.join(process.cwd(), 'data', 'file_stats.db'));
+
+// Initialize the database when the controller is loaded
+statsHelper.initialize().catch((error) => {
+  fileLogger.error('Failed to initialize file stats database', {
+    error: error.message,
+    stack: error.stack,
+  });
+});
+
+// Define compressible MIME types
 const COMPRESSIBLE_MIME_TYPES = new Set([
   'text/plain',
   'text/html',
@@ -91,7 +104,6 @@ export const fileHostingController = {
     // Extract headers
     const ifNoneMatchHeader = getHeader(req, 'if-none-match');
     const ifModifiedSinceHeader = getHeader(req, 'if-modified-since');
-    // --- NEW: Process Accept-Encoding ---
     const acceptEncodingHeader = (getHeader(req, 'accept-encoding') || '').toLowerCase();
     const supportsBrotli = /\bbr\b/.test(acceptEncodingHeader);
     const supportsGzip = /\bgzip\b/.test(acceptEncodingHeader);
@@ -129,7 +141,6 @@ export const fileHostingController = {
         mimeType.includes('audio/') ||
         mimeType.includes('application/octet-stream');
 
-      // --- Handle Conditional Requests (304 Not Modified) ---
       if (
         ifNoneMatchHeader === etag ||
         (ifModifiedSinceHeader && new Date(ifModifiedSinceHeader) >= fileStat.mtime)
@@ -154,8 +165,6 @@ export const fileHostingController = {
         return;
       }
 
-      // --- Handle Range Requests (206 Partial Content) ---
-      // --- NOTE: Compression is NOT applied to range requests ---
       if (rangeHdr) {
         const rangeMatch = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
         if (!rangeMatch) {
@@ -181,7 +190,6 @@ export const fileHostingController = {
           start = parseInt(startStr, 10);
           end = endStr ? parseInt(endStr, 10) : size - 1;
         } else {
-          // Handle suffix range like bytes=-500
           const suffix = parseInt(endStr, 10);
           if (isNaN(suffix) || suffix <= 0) {
             fileLogger.warn('Invalid suffix range header format', {
@@ -191,12 +199,12 @@ export const fileHostingController = {
             sendResponse(
               sock,
               416,
-              { 'Content-Range': `bytes */${size}` }, // Recommended
+              { 'Content-Range': `bytes */${size}` },
               '416 Range Not Satisfiable',
             );
             return;
           }
-          start = Math.max(0, size - suffix); // Ensure start is not negative
+          start = Math.max(0, size - suffix);
           end = size - 1;
         }
 
@@ -218,7 +226,6 @@ export const fileHostingController = {
 
         let stream: Readable;
         try {
-          // Read only the specified range
           stream = await fileSvc.readFile(fileName, { start, end });
           if (!stream) throw new Error('Stream is undefined');
         } catch (streamErr) {
@@ -280,7 +287,7 @@ export const fileHostingController = {
 
         const responseHeaders: Record<string, string> = {
           'Content-Type': mimeType,
-          'Accept-Ranges': 'bytes', // Still advertise support
+          'Accept-Ranges': 'bytes',
           'Content-Range': `bytes ${start}-${end}/${size}`,
           'Content-Length': String(len),
           'Cache-Control': 'public, max-age=86400, stale-while-revalidate=43200',
@@ -288,7 +295,6 @@ export const fileHostingController = {
           'Last-Modified': lastModified,
           'X-Content-Type-Options': 'nosniff',
           'Timing-Allow-Origin': '*',
-          // --- Do NOT add Content-Encoding or Vary for 206 responses ---
         };
 
         try {
@@ -302,7 +308,6 @@ export const fileHostingController = {
           if (!stream.destroyed) stream.destroy();
         }
 
-        // Add completion handler using socket events
         sock.on('finish', () => {
           const duration = Date.now() - requestStart;
           fileLogger.info(`Partial file served: "${fileName}"`, {
@@ -323,29 +328,25 @@ export const fileHostingController = {
           }
         });
 
-        return; // Exit after handling range request
+        return;
       }
 
-      // --- Handle Full File Requests (200 OK) with potential Compression ---
       let responseStream: Readable;
       let sourceStream: Readable;
       const responseHeaders: Record<string, string> = {
         'Content-Type': mimeType,
-        'Accept-Ranges': 'bytes', // Advertise range support
+        'Accept-Ranges': 'bytes',
         'Cache-Control': 'public, max-age=86400, stale-while-revalidate=43200',
         ETag: etag,
         'Last-Modified': lastModified,
         'X-Content-Type-Options': 'nosniff',
         'Timing-Allow-Origin': '*',
-        // Connection: 'close' for large files logic can remain or be adjusted
       };
 
-      // For immutable content like images, add immutable flag (keeping existing logic)
       if (isBinaryContent && mimeType.startsWith('image/')) {
         responseHeaders['Cache-Control'] = 'public, max-age=31536000, immutable';
       }
 
-      // --- NEW: Compression Logic ---
       let compressionEncoding: string | null = null;
       if (isCompressible(mimeType)) {
         if (supportsBrotli) compressionEncoding = 'br';
@@ -354,7 +355,7 @@ export const fileHostingController = {
       }
 
       try {
-        sourceStream = await fileSvc.readFile(fileName); // Get the source stream
+        sourceStream = await fileSvc.readFile(fileName);
         if (!sourceStream) throw new Error('Source stream is undefined');
 
         if (compressionEncoding) {
@@ -364,17 +365,13 @@ export const fileHostingController = {
           } else if (compressionEncoding === 'gzip') {
             compressStream = zlib.createGzip();
           } else {
-            // deflate
             compressStream = zlib.createDeflate();
           }
 
-          // Pipe source through compression
           responseStream = sourceStream.pipe(compressStream);
 
-          // Set compression headers and remove Content-Length
           responseHeaders['Content-Encoding'] = compressionEncoding;
-          responseHeaders['Vary'] = 'Accept-Encoding'; // Crucial for caching
-          // DO NOT set Content-Length for compressed streams
+          responseHeaders['Vary'] = 'Accept-Encoding';
 
           fileLogger.debug(`Serving compressed content (${compressionEncoding})`, {
             fileName,
@@ -382,7 +379,6 @@ export const fileHostingController = {
             originalSize: size,
           });
 
-          // Handle errors on the compression stream as well
           compressStream.on('error', (err: Error) => {
             fileLogger.error(
               `Compression stream error for "${fileName}" (${compressionEncoding})`,
@@ -391,11 +387,10 @@ export const fileHostingController = {
                 stack: err.stack,
               },
             );
-            if (!sourceStream.destroyed) sourceStream.destroy(); // Destroy source if compression fails
-            if (!sock.destroyed) sock.destroy(err); // Destroy socket on compression error
+            if (!sourceStream.destroyed) sourceStream.destroy();
+            if (!sock.destroyed) sock.destroy(err);
           });
         } else {
-          // No compression: use original stream and set Content-Length
           responseStream = sourceStream;
           responseHeaders['Content-Length'] = String(size);
           fileLogger.debug('Serving full content (uncompressed)', {
@@ -419,24 +414,19 @@ export const fileHostingController = {
         return;
       }
 
-      // Handle errors on the source stream
       sourceStream.on('error', (err: Error) => {
         fileLogger.error(`Source stream error for "${fileName}"`, {
           error: err.message,
           stack: err.stack,
         });
-        // If responseStream is different (i.e., compressed), ensure it's also handled/destroyed if needed.
-        // The pipe might handle this, but explicit destruction on source error can be safer.
         if (responseStream !== sourceStream && !responseStream.destroyed) {
           responseStream.destroy(err);
         }
         if (!sock.destroyed) {
-          // Don't try to send 500 if headers might already be sent
           sock.destroy(err);
         }
       });
 
-      // Final socket check
       if (sock.destroyed) {
         fileLogger.warn('Socket closed before sending full content', { fileName });
         if (responseStream && !responseStream.destroyed) responseStream.destroy();
@@ -445,12 +435,10 @@ export const fileHostingController = {
         return;
       }
 
-      // Set appropriate connection header for large files (keeping existing logic)
       if (isBinaryContent && size > 1024 * 1024) {
         responseHeaders['Connection'] = 'close';
       }
 
-      // Send the response (either compressed or original stream)
       try {
         sendResponse(sock, 200, responseHeaders, responseStream);
       } catch (sendErr) {
@@ -463,7 +451,6 @@ export const fileHostingController = {
           sourceStream.destroy();
       }
 
-      // Add completion handler using socket events
       sock.on('finish', () => {
         const duration = Date.now() - requestStart;
         fileLogger.info(`Full file served: "${fileName}"`, {
@@ -475,7 +462,6 @@ export const fileHostingController = {
       });
 
       sock.on('close', () => {
-        // Ensure streams are destroyed if client disconnects prematurely
         if (responseStream && !responseStream.destroyed) {
           responseStream.destroy();
           fileLogger.warn(`Client disconnected during full transfer: "${fileName}"`, {
@@ -483,7 +469,6 @@ export const fileHostingController = {
             encoding: compressionEncoding || 'none',
           });
         }
-        // Ensure source stream is also cleaned up if it wasn't the response stream
         if (sourceStream && responseStream !== sourceStream && !sourceStream.destroyed) {
           sourceStream.destroy();
         }
@@ -552,7 +537,6 @@ export const fileHostingController = {
     });
 
     try {
-      // Check if socket is still connected before proceeding
       if (sock.destroyed) {
         fileLogger.warn('Socket already closed, aborting file listing operation', {
           remoteAddress: sock.remoteAddress,
@@ -560,14 +544,11 @@ export const fileHostingController = {
         return;
       }
 
-      // Get all files first
       const allFiles = await fileSvc.listFiles();
 
-      // Process all files with metadata for filtering
       const filesWithMetadata = await Promise.all(
         allFiles.map(async (fileInfo) => {
           try {
-            // If we already have file metadata from the service, use it
             if (
               !fileInfo.isDirectory &&
               fileInfo.size !== undefined &&
@@ -585,7 +566,6 @@ export const fileHostingController = {
               };
             }
 
-            // Otherwise get stats for the file
             const stats = await fileSvc.stat(fileInfo.path);
             return {
               name: fileInfo.name,
@@ -597,7 +577,6 @@ export const fileHostingController = {
               formattedDate: formatDate(stats.mtime),
             };
           } catch (statErr) {
-            // Don't throw errors for individual files, just report the issue
             fileLogger.warn(`Could not read stats for file: ${fileInfo.path}`, {
               error: (statErr as Error).message,
             });
@@ -615,15 +594,12 @@ export const fileHostingController = {
         }),
       );
 
-      // Apply filtering - only include files, not directories
       let filteredFiles = filesWithMetadata.filter((file) => !file.isDirectory);
 
-      // Filter by file type
       if (filterType) {
         filteredFiles = filteredFiles.filter((file) => file.mimeType.startsWith(filterType));
       }
 
-      // Filter by search term
       if (search) {
         const searchLower = search.toLowerCase();
         filteredFiles = filteredFiles.filter(
@@ -633,7 +609,6 @@ export const fileHostingController = {
         );
       }
 
-      // Filter by date range
       if (dateFrom || dateTo) {
         const fromDate = dateFrom ? new Date(dateFrom) : new Date(0);
         const toDate = dateTo ? new Date(dateTo) : new Date();
@@ -645,7 +620,6 @@ export const fileHostingController = {
         });
       }
 
-      // Filter by size range
       if (sizeFrom || sizeTo) {
         filteredFiles = filteredFiles.filter((file) => {
           if (file.error) return false;
@@ -656,7 +630,6 @@ export const fileHostingController = {
         });
       }
 
-      // Apply sorting
       filteredFiles.sort((a, b) => {
         let comparison = 0;
 
@@ -678,14 +651,12 @@ export const fileHostingController = {
         return order === 'desc' ? -comparison : comparison;
       });
 
-      // Apply pagination
       const totalFiles = filteredFiles.length;
       const totalPages = Math.ceil(totalFiles / limit);
       const startIndex = (page - 1) * limit;
       const endIndex = Math.min(startIndex + limit, totalFiles);
       const paginatedFiles = filteredFiles.slice(startIndex, endIndex);
 
-      // Map to response format
       const fileDetails = paginatedFiles.map((file) => ({
         name: file.name,
         path: file.path,
@@ -711,7 +682,6 @@ export const fileHostingController = {
         duration: `${duration}ms`,
       });
 
-      // Check again if socket is still connected before sending response
       if (sock.destroyed) {
         fileLogger.warn('Socket disconnected during file listing operation', {
           remoteAddress: sock.remoteAddress,
@@ -720,7 +690,6 @@ export const fileHostingController = {
         return;
       }
 
-      // Prepare a more comprehensive response with pagination info
       const response = {
         files: fileDetails,
         pagination: {
@@ -756,14 +725,13 @@ export const fileHostingController = {
         },
       };
 
-      // Use try-catch to handle potential socket errors during response
       try {
         sendResponse(
           sock,
           200,
           {
             'Content-Type': 'application/json',
-            'Cache-Control': 'private, max-age=10', // Short cache for listings
+            'Cache-Control': 'private, max-age=10',
             'X-Total-Count': String(totalFiles),
             'X-Total-Pages': String(totalPages),
           },
@@ -785,7 +753,6 @@ export const fileHostingController = {
         duration: `${duration}ms`,
       });
 
-      // Check if socket is still connected before sending error response
       if (!sock.destroyed) {
         try {
           sendResponse(
@@ -961,6 +928,28 @@ export const fileHostingController = {
 
       await fileSvc.saveFile(fileName, bufferToAsyncIterable(data));
 
+      // Collect and store file stats after successful upload
+      try {
+        const absolutePath = path.join(config.staticDir, fileName);
+        const fileStats = await statsHelper.getFileStats(absolutePath, config.staticDir);
+        await statsHelper.saveFileStats(fileStats);
+
+        fileLogger.debug('File statistics collected and stored', {
+          fileName,
+          mimeType: fileStats.mimeType,
+          size: fileStats.size,
+          width: fileStats.width,
+          height: fileStats.height,
+          duration: fileStats.duration,
+        });
+      } catch (statsErr) {
+        // Log but don't fail the upload if stats collection fails
+        fileLogger.warn('Failed to collect file statistics', {
+          fileName,
+          error: (statsErr as Error).message,
+        });
+      }
+
       const duration = Date.now() - requestStart;
       fileLogger.success(`File "${fileName}" uploaded successfully`, {
         size: fileSize,
@@ -1047,7 +1036,6 @@ export const fileHostingController = {
 
     fileLogger.info('File deletion requested', requestInfo);
 
-    // Check if socket is still connected
     if (sock.destroyed) {
       fileLogger.warn('Socket closed before processing delete request', {
         remoteAddress: sock.remoteAddress,
@@ -1068,7 +1056,6 @@ export const fileHostingController = {
     }
 
     try {
-      // Get file info before deletion for logging
       let fileInfo = {};
       try {
         const stats = await fileSvc.stat(fileName);
@@ -1083,7 +1070,6 @@ export const fileHostingController = {
         });
       }
 
-      // Check if socket is still connected before proceeding with deletion
       if (sock.destroyed) {
         fileLogger.warn('Socket closed before file deletion', {
           fileName,
@@ -1092,8 +1078,22 @@ export const fileHostingController = {
         return;
       }
 
-      // Use the service's deleteFile method for safer deletion
+      // Delete the file
       await fileSvc.deleteFile(fileName);
+
+      // Also remove file statistics from database
+      try {
+        const wasDeleted = await statsHelper.deleteFileStats(fileName);
+        fileLogger.debug(
+          `File statistics ${wasDeleted ? 'deleted' : 'not found'} for file: ${fileName}`,
+        );
+      } catch (statsErr) {
+        // Just log error but don't stop the operation
+        fileLogger.warn('Failed to delete file statistics', {
+          fileName,
+          error: (statsErr as Error).message,
+        });
+      }
 
       const duration = Date.now() - requestStart;
       fileLogger.success(`File "${fileName}" deleted successfully`, {
@@ -1101,7 +1101,6 @@ export const fileHostingController = {
         duration: `${duration}ms`,
       });
 
-      // Check if socket is still connected before sending response
       if (sock.destroyed) {
         fileLogger.warn('Socket closed after deletion but before response', {
           fileName,
@@ -1141,7 +1140,6 @@ export const fileHostingController = {
         ...requestInfo,
       });
 
-      // Check if socket is still connected before sending error response
       if (!sock.destroyed) {
         try {
           sendResponse(

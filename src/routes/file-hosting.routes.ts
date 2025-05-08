@@ -5,6 +5,7 @@
  * - GET /api/files - List all available files with pagination and filtering
  * - GET /api/files/search - Search files with advanced filtering
  * - GET /api/files/cache - Get cache statistics or clear cache (admin only)
+ * - GET /api/files/stats - Get statistics about files in the system
  * - GET /api/files/:filename - Get a specific file
  * - POST /api/files - Upload a new file
  * - POST /api/files/bulk - Bulk operations on files
@@ -25,6 +26,7 @@ import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
 import { sendResponse } from '../entities/sendResponse';
 import { FileHostingService } from '../modules/file-hosting/fileHostingService';
+import path from 'path';
 
 // Create module-specific logger with contextual metadata
 const routeLogger = logger.child({
@@ -135,6 +137,147 @@ if (config.features.fileHosting) {
     // We'll implement this later when we update the controller
     // For now just redirect to listFiles with the search params
     fileHostingController.listFiles(req, sock);
+  });
+
+  // File statistics endpoint - get stats about files in the system
+  router.get('/api/files/stats', async (req, sock) => {
+    const isAdmin = req.headers['x-admin-key'] === config.adminKey;
+    routeLogger.debug('File stats request received', {
+      remoteAddress: sock.remoteAddress,
+      timestamp: formatDate(new Date()),
+      headers: req.headers,
+      query: req.query,
+    });
+
+    try {
+      // Import the stats helper here to avoid circular dependencies
+      const { FileHostingStatsHelper } = await import(
+        '../modules/file-hosting/fileHostingStatsHelper'
+      );
+      const statsHelper = new FileHostingStatsHelper(
+        path.join(process.cwd(), 'data', 'file_stats.db'),
+      );
+
+      // Initialize the helper
+      await statsHelper.initialize();
+
+      // Check for query parameters
+      const operation = (req.query?.operation as string) || 'aggregate';
+
+      if (operation === 'aggregate') {
+        // Get aggregate statistics
+        const stats = await statsHelper.getAggregateStats();
+
+        sendResponse(
+          sock,
+          200,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({
+            success: true,
+            stats,
+          }),
+        );
+      } else if (operation === 'query') {
+        // Only admin can perform complex queries
+        if (!isAdmin) {
+          routeLogger.warn('Unauthorized attempt to query file stats', {
+            remoteAddress: sock.remoteAddress,
+            timestamp: formatDate(new Date()),
+          });
+
+          sendResponse(sock, 403, { 'Content-Type': 'text/plain' }, 'Unauthorized access');
+          return;
+        }
+
+        // Get query parameters
+        const queryOptions = {
+          mimeType: req.query?.mimeType as string,
+          minSize: req.query?.minSize ? parseInt(req.query.minSize as string) : undefined,
+          maxSize: req.query?.maxSize ? parseInt(req.query.maxSize as string) : undefined,
+          hasAudio: req.query?.hasAudio === 'true',
+          hasVideo: req.query?.hasVideo === 'true',
+          minWidth: req.query?.minWidth ? parseInt(req.query.minWidth as string) : undefined,
+          minHeight: req.query?.minHeight ? parseInt(req.query.minHeight as string) : undefined,
+          minDuration: req.query?.minDuration
+            ? parseFloat(req.query.minDuration as string)
+            : undefined,
+          limit: req.query?.limit ? parseInt(req.query.limit as string) : 100,
+          offset: req.query?.offset ? parseInt(req.query.offset as string) : 0,
+        };
+
+        // Query file stats with filters
+        const fileStats = await statsHelper.queryFileStats(queryOptions);
+
+        sendResponse(
+          sock,
+          200,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({
+            success: true,
+            query: queryOptions,
+            results: {
+              count: fileStats.length,
+              items: fileStats,
+            },
+          }),
+        );
+      } else if (operation === 'detail' && req.query?.path) {
+        // Get stats for a specific file
+        const filePath = req.query.path as string;
+        const fileStats = await statsHelper.getStatsByPath(filePath);
+
+        if (fileStats) {
+          sendResponse(
+            sock,
+            200,
+            { 'Content-Type': 'application/json' },
+            JSON.stringify({
+              success: true,
+              stats: fileStats,
+            }),
+          );
+        } else {
+          sendResponse(
+            sock,
+            404,
+            { 'Content-Type': 'application/json' },
+            JSON.stringify({
+              success: false,
+              message: `No statistics found for file: ${filePath}`,
+            }),
+          );
+        }
+      } else {
+        // Invalid operation
+        sendResponse(
+          sock,
+          400,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({
+            success: false,
+            message: `Invalid operation: ${operation}`,
+          }),
+        );
+      }
+
+      // Close the database connection when done
+      await statsHelper.close();
+    } catch (err) {
+      routeLogger.error('Error processing file stats request', {
+        error: (err as Error).message,
+        stack: (err as Error).stack,
+      });
+
+      sendResponse(
+        sock,
+        500,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({
+          success: false,
+          message: 'Failed to retrieve file statistics: ' + (err as Error).message,
+        }),
+      );
+    }
   });
 
   // Upload a file
@@ -462,6 +605,11 @@ if (config.features.fileHosting) {
         method: 'GET',
         path: '/api/files/cache',
         description: 'Get cache statistics or clear cache (admin only)',
+      },
+      {
+        method: 'GET',
+        path: '/api/files/stats',
+        description: 'Get statistics about files in the system',
       },
       { method: 'POST', path: '/api/files', description: 'Upload a file' },
       { method: 'POST', path: '/api/files/bulk', description: 'Bulk operations on files' },
