@@ -239,10 +239,16 @@ export class HttpServer {
     );
 
     // Wait for all sockets to close with a timeout
+    let timeoutId: NodeJS.Timeout | undefined = undefined;
     await Promise.race([
       Promise.all(socketClosePromises),
-      new Promise((resolve) => setTimeout(resolve, 2000)), // 2 second timeout
+      new Promise((resolve) => {
+        timeoutId = setTimeout(resolve, 2000); // 2 second timeout
+      }),
     ]);
+
+    // Clear the timeout to avoid open handles
+    if (timeoutId) clearTimeout(timeoutId);
 
     // Then close the server
     return new Promise<void>((resolve, reject) => {
@@ -273,8 +279,11 @@ export class HttpServer {
   }
 
   public start() {
-    this.server.listen(this.port, () => {
-      logger.info(`🚀 Server running at port ${this.port}`);
+    this.server.listen(this.port, '0.0.0.0', () => {
+      logger.info(
+        `🚀 Server running at http://localhost:${this.port} \n 
+        and at http://192.168.1.145:${this.port}`,
+      );
     });
 
     // graceful shutdown on Ctrl-C / kill

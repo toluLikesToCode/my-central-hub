@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream } from 'fs';
-import { stat, readdir, mkdir, unlink, readFile } from 'fs/promises';
-import { resolve } from 'path';
+import { stat, readdir, mkdir, unlink, readFile, rm } from 'fs/promises';
+import { resolve, dirname, join } from 'path';
 import { Readable } from 'stream';
 import { getMimeType } from '../../utils/helpers';
 import logger from '../../utils/logger';
@@ -29,6 +29,16 @@ interface CacheOptions {
   enabled: boolean; // Whether caching is enabled
 }
 
+// Define the file info structure
+export interface FileInfo {
+  name: string;
+  path: string; // Path relative to root
+  isDirectory: boolean;
+  size?: number;
+  mtime?: Date;
+  mimeType?: string;
+}
+
 // Get cache options from config
 const DEFAULT_CACHE_OPTIONS: CacheOptions = {
   maxSize: config.fileCache?.maxSize || 200 * 1024 * 1024, // 200MB
@@ -41,6 +51,7 @@ const DEFAULT_CACHE_OPTIONS: CacheOptions = {
  *
  * Provides methods for listing, reading, saving, and deleting files
  * with optional caching for better performance of small and medium files.
+ * Supports folder operations and hierarchical file structures.
  */
 export class FileHostingService {
   private fileCache: LRUCacheType<string, CachedFile>;
@@ -86,8 +97,90 @@ export class FileHostingService {
     return abs;
   }
 
-  async listFiles(relDir = '.'): Promise<string[]> {
-    return await readdir(this.resolveSafe(relDir));
+  /**
+   * Lists files in a directory with folder support
+   * @param relDir Relative directory path to list
+   * @param recursive Whether to list files recursively in subdirectories
+   * @returns Promise with an array of FileInfo objects
+   */
+  async listFiles(relDir = '.', recursive = false): Promise<FileInfo[]> {
+    const absDir = this.resolveSafe(relDir);
+    const files = await readdir(absDir, { withFileTypes: true });
+
+    const result: FileInfo[] = [];
+
+    for (const file of files) {
+      const relPath = join(relDir, file.name);
+
+      if (file.isDirectory()) {
+        result.push({
+          name: file.name,
+          path: relPath,
+          isDirectory: true,
+        });
+
+        // Handle recursive listing
+        if (recursive) {
+          const subDirFiles = await this.listFiles(relPath, true);
+          result.push(...subDirFiles);
+        }
+      } else {
+        try {
+          const stats = await stat(this.resolveSafe(relPath));
+          result.push({
+            name: file.name,
+            path: relPath,
+            isDirectory: false,
+            size: stats.size,
+            mtime: stats.mtime,
+            mimeType: getMimeType(file.name) || 'application/octet-stream',
+          });
+        } catch (err) {
+          fileServiceLogger.warn(`Error getting file stats for ${relPath}`, {
+            error: (err as Error).message,
+          });
+          result.push({
+            name: file.name,
+            path: relPath,
+            isDirectory: false,
+          });
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Create a directory
+   * @param relPath Relative directory path to create
+   */
+  async createDirectory(relPath: string): Promise<void> {
+    const absPath = this.resolveSafe(relPath);
+    await mkdir(absPath, { recursive: true });
+    fileServiceLogger.info(`Created directory: ${relPath}`);
+  }
+
+  /**
+   * Delete a directory
+   * @param relPath Relative directory path to delete
+   * @param recursive Whether to delete contents recursively
+   */
+  async deleteDirectory(relPath: string, recursive = true): Promise<void> {
+    const absPath = this.resolveSafe(relPath);
+
+    if (recursive) {
+      await rm(absPath, { recursive: true, force: true });
+    } else {
+      // Check if directory is empty first
+      const files = await readdir(absPath);
+      if (files.length > 0) {
+        throw new Error('Directory is not empty');
+      }
+      await rm(absPath, { recursive: false });
+    }
+
+    fileServiceLogger.info(`Deleted directory: ${relPath}`, { recursive });
   }
 
   async stat(relPath: string) {
@@ -202,9 +295,15 @@ export class FileHostingService {
     return { cleared: itemCount };
   }
 
+  /**
+   * Save a file, creating parent directories if needed
+   */
   async saveFile(relPath: string, data: AsyncIterable<Buffer>): Promise<void> {
     const abs = this.resolveSafe(relPath);
-    await mkdir(resolve(abs, '..'), { recursive: true });
+
+    // Create parent directories
+    await mkdir(dirname(abs), { recursive: true });
+
     const ws = createWriteStream(abs);
     for await (const chunk of data) ws.write(chunk);
     await new Promise<void>((res, rej) => {
@@ -219,6 +318,9 @@ export class FileHostingService {
     }
   }
 
+  /**
+   * Delete a file
+   */
   async deleteFile(relPath: string): Promise<void> {
     const abs = this.resolveSafe(relPath);
     await unlink(abs);
@@ -227,6 +329,46 @@ export class FileHostingService {
     if (this.fileCache.has(relPath)) {
       this.fileCache.delete(relPath);
       fileServiceLogger.debug('Cache entry removed after file deletion', { relPath });
+    }
+  }
+
+  /**
+   * Move a file or directory
+   * @param sourcePath Source relative path
+   * @param destPath Destination relative path
+   */
+  async moveFile(sourcePath: string, destPath: string): Promise<void> {
+    const sourceAbs = this.resolveSafe(sourcePath);
+    const destAbs = this.resolveSafe(destPath);
+
+    // Create destination directory structure
+    await mkdir(dirname(destAbs), { recursive: true });
+
+    // Read source file and write to destination
+    const sourceStream = createReadStream(sourceAbs);
+    const destStream = createWriteStream(destAbs);
+
+    await new Promise<void>((resolve, reject) => {
+      sourceStream.pipe(destStream);
+      destStream.on('finish', resolve);
+      destStream.on('error', reject);
+      sourceStream.on('error', reject);
+    });
+
+    // Delete source file after successful copy
+    await unlink(sourceAbs);
+
+    // Update cache
+    if (this.fileCache.has(sourcePath)) {
+      const cached = this.fileCache.get(sourcePath);
+      if (cached) {
+        this.fileCache.set(destPath, cached);
+      }
+      this.fileCache.delete(sourcePath);
+      fileServiceLogger.debug('Cache entry updated after file move', {
+        source: sourcePath,
+        destination: destPath,
+      });
     }
   }
 }

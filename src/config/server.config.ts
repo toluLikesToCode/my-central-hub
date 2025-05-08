@@ -52,6 +52,7 @@ export const config = {
     embeddingService: true,
     // Add more features here as needed
   },
+
   /**
    * Logging configuration
    */
