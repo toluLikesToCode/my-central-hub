@@ -3,18 +3,25 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
 
+/**
+ * @deprecated This test file tests a deprecated module and will be removed in the future.
+ * The file-streaming module has been replaced by the file-hosting module.
+ * Future tests should use the file-hosting controller tests instead.
+ */
+
 jest.mock('../../../src/entities/sendResponse');
 jest.mock('../../../src/modules/file-hosting/fileHostingService');
 jest.mock('../../../src/utils/logger');
+jest.mock('../../../src/modules/file-hosting/fileHostingController');
 
-// Mock the streamLogger
+// Mock the deprecation logger
 jest.mock('../../../src/modules/file-streaming/fileStreamingController', () => {
   const originalModule = jest.requireActual(
     '../../../src/modules/file-streaming/fileStreamingController',
   );
 
-  // Create a fake streamLogger with all needed methods
-  const mockStreamLogger = {
+  // Create a fake deprecation logger with all needed methods
+  const mockDeprecationLogger = {
     info: jest.fn(),
     warn: jest.fn(),
     error: jest.fn(),
@@ -25,13 +32,14 @@ jest.mock('../../../src/modules/file-streaming/fileStreamingController', () => {
   return {
     fileStreamingController: {
       ...originalModule.fileStreamingController,
-      // Inject our mock streamLogger for tests
-      streamLogger: mockStreamLogger,
+      // Inject our mock logger for tests
+      deprecationLogger: mockDeprecationLogger,
     },
   };
 });
 
 import { fileStreamingController } from '../../../src/modules/file-streaming/fileStreamingController';
+import { fileHostingController } from '../../../src/modules/file-hosting/fileHostingController';
 import { sendResponse } from '../../../src/entities/sendResponse';
 import { FileHostingService } from '../../../src/modules/file-hosting/fileHostingService';
 import logger from '../../../src/utils/logger';
@@ -43,7 +51,7 @@ const createMockReadable = () => {
   return stream;
 };
 
-describe('fileStreamingController.handleStream', () => {
+describe('fileStreamingController.handleStream (DEPRECATED)', () => {
   let req: any;
   let sock: any;
 
@@ -64,100 +72,21 @@ describe('fileStreamingController.handleStream', () => {
     };
   });
 
-  test('responds 400 if no file query provided', async () => {
+  test('logs deprecation warning', async () => {
+    req.query.file = 'test.mp4';
     await fileStreamingController.handleStream(req, sock);
-    expect(sendResponse).toHaveBeenCalledWith(
-      sock,
-      400,
-      { 'Content-Type': 'text/plain' },
-      'Missing required "file" query parameter.',
-    );
-  });
-
-  test('responds 404 if file not found', async () => {
-    req.query.file = 'nonexistent.mp4';
-    (FileHostingService.prototype.stat as jest.Mock).mockRejectedValue(new Error('not found'));
-
-    await fileStreamingController.handleStream(req, sock);
-
-    expect(sendResponse).toHaveBeenCalledWith(
-      sock,
-      404,
-      { 'Content-Type': 'text/plain' },
-      expect.stringContaining('not found'),
-    );
-  });
-
-  test('streams full file with 200 if no range', async () => {
-    req.query.file = 'video.mp4';
-    (FileHostingService.prototype.stat as jest.Mock).mockResolvedValue({ size: 1000 });
-    const stream = createMockReadable();
-    (FileHostingService.prototype.readFile as jest.Mock).mockResolvedValue(stream);
-
-    await fileStreamingController.handleStream(req, sock);
-
-    expect(sendResponse).toHaveBeenCalledWith(
-      sock,
-      200,
+    expect(fileStreamingController.deprecationLogger.warn).toHaveBeenCalledWith(
+      'Using deprecated fileStreamingController.handleStream method',
       expect.objectContaining({
-        'Content-Type': expect.any(String),
-        'Content-Length': '1000',
+        requestPath: '/stream',
+        migration: 'Use fileHostingController.getFile instead',
       }),
-      stream,
     );
   });
 
-  test('streams partial file with 206 if valid range', async () => {
-    req.query.file = 'video.mp4';
-    req.headers.range = 'bytes=0-499';
-    (FileHostingService.prototype.stat as jest.Mock).mockResolvedValue({ size: 1000 });
-    const stream = createMockReadable();
-    (FileHostingService.prototype.readFile as jest.Mock).mockResolvedValue(stream);
-
+  test('delegates to fileHostingController.getFile', async () => {
+    req.query.file = 'test.mp4';
     await fileStreamingController.handleStream(req, sock);
-
-    expect(sendResponse).toHaveBeenCalledWith(
-      sock,
-      206,
-      expect.objectContaining({
-        'Content-Range': 'bytes 0-499/1000',
-        'Content-Length': '500',
-      }),
-      stream,
-    );
+    expect(fileHostingController.getFile).toHaveBeenCalledWith(req, sock);
   });
-
-  test('responds 416 if range invalid', async () => {
-    req.query.file = 'video.mp4';
-    req.headers.range = 'bytes=1500-1600';
-    (FileHostingService.prototype.stat as jest.Mock).mockResolvedValue({ size: 1000 });
-
-    await fileStreamingController.handleStream(req, sock);
-
-    expect(sendResponse).toHaveBeenCalledWith(
-      sock,
-      416,
-      { 'Content-Type': 'text/plain' },
-      '416 Range Not Satisfiable',
-    );
-    expect(sock.end).toHaveBeenCalled();
-  });
-
-  // test('responds 500 if stream emits error', async () => {
-  //   req.query.file = 'video.mp4';
-  //   (FileHostingService.prototype.stat as jest.Mock).mockResolvedValue({ size: 1000 });
-  //   const stream = createMockReadable();
-  //   (FileHostingService.prototype.readFile as jest.Mock).mockResolvedValue(stream);
-
-  //   await fileStreamingController.handleStream(req, sock);
-  //   stream.emit('error', new Error('stream fail'));
-
-  //   expect(logger.error).toHaveBeenCalled();
-  //   expect(sendResponse).toHaveBeenCalledWith(
-  //     sock,
-  //     500,
-  //     { 'Content-Type': 'text/plain' },
-  //     'Internal Server Error',
-  //   );
-  // });
 });
