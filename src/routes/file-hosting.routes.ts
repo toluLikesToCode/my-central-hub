@@ -7,6 +7,7 @@
  * - GET /api/files/cache - Get cache statistics or clear cache (admin only)
  * - GET /api/files/stats - Get statistics about files in the system
  * - GET /api/files/:filename - Get a specific file
+ * - GET /api/files/:filename/stats - Get detailed statistics for a specific file
  * - POST /api/files - Upload a new file
  * - POST /api/files/bulk - Bulk operations on files
  * - DELETE /api/files/:filename - Delete a file
@@ -14,6 +15,7 @@
  * - DELETE /api/folders/:path - Delete a folder
  * - GET /api/folders/:path - List files in a folder
  * - POST /api/files/move - Move a file to a different location
+ * - HEAD /api/files/:filename - Get file metadata via headers
  *
  * @module routes/file-hosting.routes
  */
@@ -34,6 +36,33 @@ const routeLogger = logger.child({
   feature: 'file-hosting',
   component: 'route-handler',
 });
+
+// Helper functions for formatting stats
+function formatFileSize(sizeInBytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = sizeInBytes;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex++;
+  }
+
+  return `${size.toFixed(2)} ${units[unitIndex]}`;
+}
+
+function formatDuration(durationInSeconds: number): string {
+  const hours = Math.floor(durationInSeconds / 3600);
+  const minutes = Math.floor((durationInSeconds % 3600) / 60);
+  const seconds = Math.floor(durationInSeconds % 60);
+  const milliseconds = Math.floor((durationInSeconds % 1) * 1000);
+
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  } else {
+    return `${minutes}:${seconds.toString().padStart(2, '0')}.${milliseconds.toString().padStart(3, '0')}`;
+  }
+}
 
 // Record startup time using human-readable format
 const startupTime = formatDate(new Date());
@@ -98,7 +127,7 @@ if (config.features.fileHosting) {
   });
 
   // List all files with pagination and filtering
-  router.get('/api/files', (req, sock) => {
+  router.get('/api/files', (req: IncomingRequest, sock: Socket) => {
     // This is a file listing request
     routeLogger.debug('List files request received', {
       remoteAddress: sock.remoteAddress,
@@ -126,7 +155,7 @@ if (config.features.fileHosting) {
   });
 
   // Add new search endpoint with advanced filtering
-  router.get('/api/files/search', (req, sock) => {
+  router.get('/api/files/search', (req: IncomingRequest, sock: Socket) => {
     routeLogger.debug('File search request received', {
       remoteAddress: sock.remoteAddress,
       timestamp: formatDate(new Date()),
@@ -140,7 +169,7 @@ if (config.features.fileHosting) {
   });
 
   // File statistics endpoint - get stats about files in the system
-  router.get('/api/files/stats', async (req, sock) => {
+  router.get('/api/files/stats', async (req: IncomingRequest, sock: Socket) => {
     const isAdmin = req.headers['x-admin-key'] === config.adminKey;
     routeLogger.debug('File stats request received', {
       remoteAddress: sock.remoteAddress,
@@ -264,6 +293,149 @@ if (config.features.fileHosting) {
       await statsHelper.close();
     } catch (err) {
       routeLogger.error('Error processing file stats request', {
+        error: (err as Error).message,
+        stack: (err as Error).stack,
+      });
+
+      sendResponse(
+        sock,
+        500,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({
+          success: false,
+          message: 'Failed to retrieve file statistics: ' + (err as Error).message,
+        }),
+      );
+    }
+  });
+
+  // Get detailed file statistics for a specific file
+  router.get('/api/files/:filename/stats', async (req: IncomingRequest, sock: Socket) => {
+    // Extract filename from URL path
+    const pathMatch = req.path.match(/\/api\/files\/([^/]+)\/stats$/);
+    const filename = pathMatch ? decodeURIComponent(pathMatch[1]) : '';
+
+    routeLogger.debug('File stats detail request received', {
+      filename,
+      remoteAddress: sock.remoteAddress,
+      timestamp: formatDate(new Date()),
+      headers: req.headers,
+    });
+
+    if (!filename) {
+      sendResponse(
+        sock,
+        400,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({
+          success: false,
+          message: 'Missing filename parameter',
+        }),
+      );
+      return;
+    }
+
+    try {
+      // Import the stats helper
+      const { FileHostingStatsHelper } = await import(
+        '../modules/file-hosting/fileHostingStatsHelper'
+      );
+      const statsHelper = new FileHostingStatsHelper(
+        path.join(process.cwd(), 'data', 'file_stats.db'),
+      );
+
+      // Initialize the helper
+      await statsHelper.initialize();
+
+      // First check if the file exists
+      try {
+        await fileSvc.stat(filename);
+      } catch {
+        // File doesn't exist
+        sendResponse(
+          sock,
+          404,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({
+            success: false,
+            message: `File not found: ${filename}`,
+          }),
+        );
+        await statsHelper.close();
+        return;
+      }
+
+      // Try to get existing stats from the database
+      let fileStats = await statsHelper.getStatsByPath(filename);
+
+      // If stats don't exist or are outdated, collect them now
+      if (!fileStats) {
+        try {
+          const absolutePath = path.join(config.staticDir, filename);
+          fileStats = await statsHelper.getFileStats(absolutePath, config.staticDir);
+          await statsHelper.saveFileStats(fileStats);
+
+          routeLogger.debug('Generated new file statistics', {
+            filename,
+            mime: fileStats.mimeType,
+          });
+        } catch (statsErr) {
+          routeLogger.error('Failed to collect file statistics', {
+            filename,
+            error: (statsErr as Error).message,
+          });
+
+          sendResponse(
+            sock,
+            500,
+            { 'Content-Type': 'application/json' },
+            JSON.stringify({
+              success: false,
+              message: `Error collecting file statistics: ${(statsErr as Error).message}`,
+            }),
+          );
+          await statsHelper.close();
+          return;
+        }
+      }
+
+      // Add more human-readable versions of some properties
+      const enhancedStats = {
+        ...fileStats,
+        sizeFormatted: formatFileSize(fileStats.size),
+        lastModifiedFormatted: formatDate(fileStats.lastModified),
+        durationFormatted: fileStats.duration ? formatDuration(fileStats.duration) : undefined,
+      };
+
+      // Send the response
+      sendResponse(
+        sock,
+        200,
+        {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'max-age=60',
+        },
+        JSON.stringify({
+          success: true,
+          fileName: filename,
+          stats: enhancedStats,
+          _links: {
+            self: `/api/files/${encodeURIComponent(filename)}/stats`,
+            file: `/api/files/${encodeURIComponent(filename)}`,
+            head: {
+              href: `/api/files/${encodeURIComponent(filename)}`,
+              method: 'HEAD',
+              description: 'Get basic file metadata via headers without downloading content',
+            },
+          },
+        }),
+      );
+
+      // Close the database connection
+      await statsHelper.close();
+    } catch (err) {
+      routeLogger.error('Error processing file stats detail request', {
+        filename,
         error: (err as Error).message,
         stack: (err as Error).stack,
       });
@@ -569,6 +741,29 @@ if (config.features.fileHosting) {
     fileHostingController.getFile(req, sock);
   });
 
+  // Handle HEAD requests for file metadata
+  router.get('/api/files/:filename', (req: IncomingRequest, sock: Socket) => {
+    // Only handle HEAD requests in this handler
+    if (req.method !== 'HEAD') return;
+
+    // Extract filename from URL path
+    const pathMatch = req.path.match(/\/api\/files\/([^/]+)$/);
+    const filename = pathMatch ? decodeURIComponent(pathMatch[1]) : '';
+
+    routeLogger.debug('HEAD request received for file metadata', {
+      filename,
+      remoteAddress: sock.remoteAddress,
+      timestamp: formatDate(new Date()),
+      headers: req.headers,
+    });
+
+    // Add filename as query parameter for controller compatibility
+    req.query = req.query || {};
+    req.query.file = filename;
+
+    fileHostingController.headFile(req, sock);
+  });
+
   // Delete a specific file - Extract filename from path
   router.del('/api/files/:filename', (req, sock) => {
     // Extract filename from URL path using regex instead of req.params
@@ -619,6 +814,16 @@ if (config.features.fileHosting) {
         description: 'Move a file to a different location',
       },
       { method: 'GET', path: '/api/files/:filename', description: 'Get file by path parameter' },
+      {
+        method: 'GET',
+        path: '/api/files/:filename/stats',
+        description: 'Get detailed statistics for a specific file',
+      },
+      {
+        method: 'HEAD',
+        path: '/api/files/:filename',
+        description: 'Get file metadata via headers',
+      },
       { method: 'DELETE', path: '/api/files/:filename', description: 'Delete a file' },
       { method: 'POST', path: '/api/folders', description: 'Create a new folder' },
       { method: 'GET', path: '/api/folders/:path', description: 'List files in a folder' },

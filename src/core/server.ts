@@ -1,11 +1,13 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 import { createServer, Socket } from 'net';
 
 import { HttpRequestParser } from './httpParser';
 import router from './router';
+// Register application routes as a side-effect
+import '../routes';
 import logger from '../utils/logger';
 import { sendResponse } from '../entities/sendResponse';
 import { config } from '../config/server.config'; // Assuming config is imported from a config file
+import { initializeFileStats } from '../modules/file-hosting/FileStatsInitializer';
 
 export class HttpServer {
   private server = createServer();
@@ -24,7 +26,6 @@ export class HttpServer {
     this.server.on('connection', (socket: Socket) => {
       this.connections.add(socket);
       const parser = new HttpRequestParser();
-      let isSocketReused = false;
 
       // --- ⏰ Idle Timeout (Protection) ---
       const HEADER_TIMEOUT_MS = config.headerTimeoutMs;
@@ -133,8 +134,6 @@ export class HttpServer {
 
           // Handle all pipelined requests in buffer
           do {
-            isSocketReused = true;
-
             // If this is a body-bearing method, start body timeout
             if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
               refreshBodyTimeout();
@@ -226,7 +225,7 @@ export class HttpServer {
 
     // First destroy all sockets to ensure they close immediately
     const socketClosePromises = Array.from(this.connections).map(
-      (sock) =>
+      (sock: Socket) =>
         new Promise<void>((resolve) => {
           // Add a close listener to know when the socket is fully closed
           sock.once('close', () => resolve());
@@ -278,28 +277,34 @@ export class HttpServer {
     this.connections.forEach((socket) => socket.destroy());
   }
 
-  public start() {
-    this.server.listen(this.port, '0.0.0.0', () => {
-      logger.info(
-        `🚀 Server running at http://localhost:${this.port} \n 
-        and at http://192.168.1.145:${this.port}`,
+  public async start(): Promise<import('net').Server> {
+    logger.info('Initializing file stats database');
+    await initializeFileStats();
+    return new Promise((resolve, reject) => {
+      // Listen for the server 'listening' event
+      this.server.once('listening', () => {
+        logger.info(`🚀 Server listening on port ${this.port}`);
+        resolve(this.server);
+      });
+      // Propagate listen errors
+      this.server.once('error', (err: NodeJS.ErrnoException) => {
+        reject(err);
+      });
+      // Start listening
+      this.server.listen(this.port, '0.0.0.0');
+      // Graceful shutdown hooks
+      ['SIGINT', 'SIGTERM'].forEach((sig) =>
+        process.on(sig as NodeJS.Signals, () => {
+          this.stop()
+            .then(() => process.exit(0))
+            .catch(() => process.exit(1));
+        }),
+      );
+      ['SIGUSR2'].forEach((sig) =>
+        process.once(sig as NodeJS.Signals, () => {
+          this.stop().then(() => process.kill(process.pid, sig));
+        }),
       );
     });
-
-    // graceful shutdown on Ctrl-C / kill
-    ['SIGINT', 'SIGTERM'].forEach((sig) =>
-      process.on(sig as NodeJS.Signals, () => {
-        this.stop()
-          .then(() => process.exit(0))
-          .catch(() => process.exit(1));
-      }),
-    );
-
-    // src/core/server.ts  – inside start() after existing SIGINT/SIGTERM hooks
-    ['SIGUSR2'].forEach((sig) =>
-      process.once(sig as NodeJS.Signals, () => {
-        this.stop().then(() => process.kill(process.pid, sig));
-      }),
-    );
   }
 }

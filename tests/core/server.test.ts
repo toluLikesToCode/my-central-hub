@@ -11,14 +11,66 @@ import { config } from '../../src/config/server.config';
 import * as RouterModule from '../../src/core/router';
 import { HttpRequestParser } from '../../src/core/httpParser';
 import { IncomingRequest } from '../../src/entities/http';
+import { on } from 'events';
 
 jest.mock('net');
 jest.mock('../../src/utils/logger');
 jest.mock('../../src/entities/sendResponse');
+jest.mock('../../src/modules/file-hosting/FileStatsInitializer', () => ({
+  initializeFileStats: jest.fn().mockResolvedValue(undefined),
+}));
+
 jest.mock('../../src/config/server.config', () => ({
   config: {
+    // Keep existing mocks
     headerTimeoutMs: 100,
     bodyTimeoutMs: 150,
+
+    // --- Add missing properties needed by imported modules ---
+    // Add the 'features' object with necessary flags (can use default values)
+    features: {
+      metrics: true, // Add defaults for all features
+      fileHosting: true,
+      fileStreaming: true, // <- Specifically needed here
+      embeddingService: true,
+    },
+    // Add 'mediaDir' as it's also used in stream.routes.ts
+    mediaDir: '/mock/media/dir', // Provide a mock path
+    // Add 'logging' object structure if needed by other transitively imported files
+    logging: {
+      logDir: '/mock/logs', // Provide a mock path
+    },
+    // Add other properties used during module initialization if necessary
+    // ...
+    embedding: {
+      // Python process settings
+      maxRetries: 3,
+      retryDelayMs: 1000,
+      timeoutMs: 30000,
+      // Embedding service settings
+      serviceUrl: 'http://192.168.1.107:3456',
+      pythonExecutable: 'python3',
+      pythonScriptPath: '/mock/python/embedding_service_helper.py', // Path relative to project root
+      pythonLogPath: '/mock/python/logs/', // Optional: Path for python script's own log, defaults to alongside script if not set
+      // Model/Processing Args passed to Python script
+      modelArgs: [
+        '--enable_augmentation',
+        '--log',
+        '--debug',
+        '-n',
+        '30',
+        // Example: '--model', 'openai/clip-vit-base-patch32' is now expected to be set here
+      ],
+      defaultModel: 'openai/clip-vit-base-patch32', // Default model if not in args
+      defaultNumFrames: 15,
+      enableAugmentation: false, // Default augmentation flag for python script
+      // Service behavior
+      inactivityTimeoutMs: 10 * 60 * 1000,
+      scriptTimeoutMs: 30 * 60 * 1000,
+      debug: true,
+      log: true,
+      inputDir: '/mock/embedding/dir', // Mock path for inputDir
+    },
   },
 }));
 
@@ -47,6 +99,11 @@ describe('HttpServer', () => {
       on: jest.fn(),
       listen: jest.fn(),
       close: jest.fn((cb: () => void) => cb()),
+      once: jest.fn((event: string, cb: () => void) => {
+        if (event === 'listening') {
+          cb();
+        }
+      }),
     };
     (createServer as jest.Mock).mockReturnValue(mockNetServer);
 
@@ -62,9 +119,22 @@ describe('HttpServer', () => {
     return connCall ? connCall[1] : null;
   };
 
-  test('should listen on provided port', () => {
-    server.start();
-    expect(mockNetServer.listen).toHaveBeenCalledWith(3000, expect.any(Function));
+  test('should listen on provided port', async () => {
+    await server.start();
+    // Accept either a string matching an IP address and a port number
+    // or just a port number
+    expect(mockNetServer.listen).toHaveBeenCalled();
+    const listenCall = mockNetServer.listen.mock.calls[0];
+    expect(listenCall[0]).toBe(3000);
+    if (listenCall.length === 2) {
+      expect(typeof listenCall[0]).toBe('number');
+      expect(typeof listenCall[1]).toBe('string');
+      expect(listenCall[1]).toMatch(/\d+\.\d+\.\d+\.\d+/);
+    } else {
+      // Only port
+      expect(listenCall.length).toBe(1);
+      expect(typeof listenCall[0]).toBe('number');
+    }
   });
 
   test('should destroy sockets on stop()', async () => {

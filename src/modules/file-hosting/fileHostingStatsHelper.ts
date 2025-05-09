@@ -170,6 +170,27 @@ export class FileHostingStatsHelper {
   }
 
   /**
+   * Check if statistics exist for a given file path
+   * @param filePath Path to the file
+   */
+  async checkStatsExist(filePath: string): Promise<boolean> {
+    if (!this.initialized) await this.initialize();
+    if (!this.db) throw new Error('Database not initialized');
+    try {
+      const result = await this.db.get(
+        'SELECT COUNT(*) as count FROM file_stats WHERE file_path = ?',
+        [filePath],
+      );
+      if (result && result.count > 0) {
+        return true;
+      }
+      return false;
+    } catch (error) {
+      statsLogger.error(`Failed to check stats for file: ${filePath}`, { error: error });
+      return false;
+    }
+  }
+  /**
    * Get image-specific statistics
    * @param filePath Path to the image file
    * @param fileStats Stats object to populate

@@ -22,6 +22,108 @@ import logger, { Logger } from '../utils/logger';
 import { requestIdMiddleware } from '../core/middlewares/requestId';
 import { corsMiddleware } from '../core/middlewares/cors';
 import { optionsHandlerMiddleware } from '../core/middlewares/optionsHandler';
+//import { stringify } from 'node:querystring';
+// import { stringify } from 'node:querystring'; use this later if needed
+// here is a short example of how to use it:
+/*
+Example usage of querystring.stringify:
+
+const params = { foo: 'bar', baz: 'qux' };
+const queryString = stringify(params); // "foo=bar&baz=qux"
+*/
+
+// more below
+
+// ```typescript
+// import { IncomingRequest } from '../../entities/http';
+// import { Socket } from 'net';
+// import { sendResponse } from '../../entities/sendResponse';
+// import logger from '../../utils/logger';
+
+// /**
+//  * Authentication middleware that validates JWT tokens in the Authorization header
+//  */
+// export const authMiddleware: Middleware = async (
+//   req: IncomingRequest,
+//   sock: Socket,
+//   next: () => Promise<void>
+// ) => {
+//   const authHeader = req.headers['authorization'];
+
+//   // Skip auth check for public routes
+//   if (req.path.startsWith('/public/') || req.path === '/login') {
+//     return await next();
+//   }
+
+//   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+//     logger.warn('Authentication failed: Missing or invalid Authorization header');
+//     sendResponse(
+//       sock,
+//       401,
+//       { 'Content-Type': 'application/json' },
+//       JSON.stringify({ error: 'Unauthorized: Missing or invalid token' })
+//     );
+//     return;
+//   }
+
+//   const token = authHeader.split(' ')[1];
+
+//   try {
+//     // In a real app, you would validate the token here
+//     // const userData = verifyJwtToken(token);
+//     const userData = { id: '123', username: 'exampleUser', role: 'admin' };
+
+//     // Set user data in request context for handlers to use
+//     (req.ctx ??= {}).user = userData;
+
+//     // Log successful authentication
+//     logger.debug('User authenticated', { userId: userData.id });
+
+//     // Continue to the next middleware or route handler
+//     await next();
+//   } catch (error) {
+//     logger.error('Token validation failed', { error });
+//     sendResponse(
+//       sock,
+//       401,
+//       { 'Content-Type': 'application/json' },
+//       JSON.stringify({ error: 'Unauthorized: Invalid token' })
+//     );
+//   }
+// };
+// ```
+
+// Now you can register this middleware with your router:
+
+// ```typescript
+// import router from './core/router';
+// import { authMiddleware } from './core/middlewares/auth';
+
+// // Register the auth middleware - will run on all requests
+// router.use(authMiddleware);
+
+// // Protected route that requires authentication
+// router.get('/api/profile', async (req, sock) => {
+//   // The user data is now available in req.ctx.user
+//   const userData = req.ctx?.user;
+
+//   sendResponse(
+//     sock,
+//     200,
+//     { 'Content-Type': 'application/json' },
+//     JSON.stringify({
+//       profile: userData,
+//       message: 'Profile accessed successfully'
+//     })
+//   );
+// });
+// ```
+
+// This example demonstrates how the middleware:
+// 1. Intercepts each request
+// 2. Checks for authentication
+// 3. Either rejects unauthorized requests or enriches the request context with user data
+// 4. Passes control to the next middleware or handler using the `next()` function
 
 /* ───── Types ─────────────────────────────────────────────────────────── */
 
@@ -146,14 +248,27 @@ class Router {
    */
   async handle(req: IncomingRequest, sock: Socket): Promise<void> {
     const startTime = process.hrtime();
-    const requestId = req.ctx?.requestId;
+    const requestId =
+      req.ctx?.requestId || req.headers['x-request-id'] || req.headers['request-id'];
+
+    if (!requestId) {
+      const newRequestId = crypto.randomUUID();
+      req.ctx = { ...req.ctx, requestId: newRequestId };
+      req.headers['x-request-id'] = newRequestId;
+      req.headers['request-id'] = newRequestId;
+      logger.warn('Request ID not found in headers or context, creating a new one', {
+        'new id': newRequestId,
+      });
+    }
 
     // Create a request-scoped logger with request-specific metadata
     const reqLogger = logger.child({
-      requestId,
+      requestId: requestId ? requestId : 'unknown',
       path: req.path,
       ip: sock.remoteAddress, // Get remote address from Socket instead of req
-      userAgent: req.headers['user-agent'],
+      headers: req.headers,
+      body: req.body,
+      ctx: req.ctx,
     });
 
     reqLogger.info(`Request started: ${req.method} ${req.path}`);
@@ -175,6 +290,23 @@ class Router {
         );
         reqLogger.warn('Invalid request path', { path: req.path });
         logRequestCompletion(reqLogger, startTime, status);
+        return;
+      }
+
+      // Special handling for OPTIONS requests (for CORS preflight)
+      if (req.method === 'OPTIONS') {
+        reqLogger.debug('Handling OPTIONS request');
+        const headers = {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          Allow: 'GET, POST, PUT, DELETE, OPTIONS',
+          'Content-Type': 'text/plain',
+        };
+
+        sendResponse(sock, 204, headers, 'No Content');
+        reqLogger.debug('Responded to OPTIONS request');
+        logRequestCompletion(reqLogger, startTime, 204);
         return;
       }
 

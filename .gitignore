@@ -56,3 +56,5 @@ Makefile
 my-central-hub.xml
 data/metrics.db
 .gitignore
+docs/EmbeddingsAPIReference.md
+Makefile

@@ -8,7 +8,6 @@
  *
  * @module main
  */
-import './routes';
 import { HttpServer } from './core/server';
 import { config } from './config/server.config';
 import { Logger, ConsoleTransport, PrettyFormatter, FileTransport } from './utils/logger';

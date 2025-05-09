@@ -52,7 +52,10 @@ describe('FileHostingService', () => {
     (fsPromises.readdir as jest.Mock).mockResolvedValue(['file1.txt']);
     const result = await service.listFiles('.');
     expect(result).toEqual(['file1.txt']);
-    expect(fsPromises.readdir).toHaveBeenCalledWith(expect.stringContaining('/mock/root'));
+    expect(fsPromises.readdir).toHaveBeenCalledWith(
+      expect.stringContaining('/mock/root'),
+      expect.any(Object),
+    );
   });
 
   test('stat returns file stats from safe path', async () => {

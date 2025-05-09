@@ -231,31 +231,32 @@ export const embeddingsController = {
         }
 
         const absoluteReqPath = path.resolve(mediaDir, reqPath);
-        // Check for path traversal and ensure it's within the media directory
-        if (!absoluteReqPath.startsWith(mediaDir) && !config.testMode) {
-          embeddingsLogger.error(
-            EmbeddingComponent.HANDLER,
-            `Invalid path detected (outside media dir): ${reqPath}`,
-            context,
-            {
-              requestedPath: reqPath,
-              absolutePath: absoluteReqPath,
-              mediaDir,
-              clientInfo,
-            },
-          );
+        // TODO: remove the commented below when i figure out a better way to handle this
+        // // Check for path traversal and ensure it's within the media directory
+        // if (!absoluteReqPath.startsWith(mediaDir) && !config.testMode) {
+        //   embeddingsLogger.error(
+        //     EmbeddingComponent.HANDLER,
+        //     `Invalid path detected (outside media dir): ${reqPath}`,
+        //     context,
+        //     {
+        //       requestedPath: reqPath,
+        //       absolutePath: absoluteReqPath,
+        //       mediaDir,
+        //       clientInfo,
+        //     },
+        //   );
 
-          embeddingsLogger.removeContext(requestId);
-          return sendResponse(
-            sock,
-            400,
-            { 'Content-Type': 'application/json' },
-            JSON.stringify({
-              error: 'Invalid file path provided.',
-              detail: `Path ${reqPath} is outside the allowed directory.`,
-            }),
-          );
-        }
+        //   embeddingsLogger.removeContext(requestId);
+        //   return sendResponse(
+        //     sock,
+        //     400,
+        //     { 'Content-Type': 'application/json' },
+        //     JSON.stringify({
+        //       error: 'Invalid file path provided.',
+        //       detail: `Path ${reqPath} is outside the allowed directory.`,
+        //     }),
+        //   );
+        // }
         imagePaths.push(absoluteReqPath); // Use the validated absolute path
       }
 

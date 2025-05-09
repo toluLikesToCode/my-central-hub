@@ -48,8 +48,8 @@ export const parser = {
 
     /* -------- URL + query -------- */
     const url = isOptionsStar
-      ? new URL('http://placeholder')
-      : new URL(fullPath, 'http://placeholder');
+      ? new URL('http://coolcat.com')
+      : new URL(fullPath, 'http://coolcat.com'); // Fixed URL creation for non-options requests
     const query: Record<string, string> = {};
     url.searchParams.forEach((v, k) => (query[k] = v));
 

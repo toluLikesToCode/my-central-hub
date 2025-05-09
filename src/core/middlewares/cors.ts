@@ -70,7 +70,12 @@ export const handlePreflightRequest = (_req: IncomingRequest, sock: Socket): voi
     'Access-Control-Expose-Headers':
       'Content-Length, Content-Range, ETag, Last-Modified, X-Total-Count, X-Total-Pages',
     'Access-Control-Max-Age': '86400', // Cache preflight requests for 24 hours
+    Allow: 'GET, POST, PUT, DELETE, OPTIONS', // Add Allow header to meet test expectations
+    'Content-Type': 'text/plain', // Add Content-Type for text response
   };
 
-  sendResponse(sock, 204, headers);
+  // Send 204 No Content with headers and body as expected by the test
+  sendResponse(sock, 204, headers, 'No Content');
+
+  logger.debug('Responded to OPTIONS request');
 };

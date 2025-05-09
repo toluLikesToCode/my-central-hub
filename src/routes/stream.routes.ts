@@ -18,12 +18,11 @@ import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
 import { formatDate } from '../utils/dateFormatter';
 
-// Create a module-specific logger with metadata
-const streamLogger = logger.child({
-  module: 'stream-routes',
-  feature: 'media-streaming',
-  deprecated: true,
-});
+// Create a module-specific logger with metadata; if logger.child is unavailable (e.g. auto-mocked), use no-op
+const streamLogger =
+  logger && typeof logger.child === 'function'
+    ? logger.child({ module: 'stream-routes', feature: 'media-streaming', deprecated: true })
+    : { warn: (): void => {}, info: (): void => {}, error: (): void => {} };
 
 // Log when stream routes are registered during startup
 streamLogger.warn('Registering deprecated streaming routes', {

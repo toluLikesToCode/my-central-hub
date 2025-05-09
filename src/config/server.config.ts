@@ -101,7 +101,7 @@ export const config = {
     log: true,
     inputDir: process.env.EMBED_DIR,
   },
-  testMode: true, // Set to true for testing purposes
+  testMode: false, // Set to true for testing purposes
   staticDir: process.env.STATIC_DIR || join(process.cwd(), 'static'), // Static files directory
 };
 

@@ -69,7 +69,7 @@ export class HttpRequestParser {
           this.method = method;
           this.httpVersion = version;
           try {
-            this.url = new URL(reqPath, 'http://placeholder');
+            this.url = new URL(reqPath, 'http://coolcat.com');
           } catch {
             this._setError('Malformed URL: ' + reqPath);
             continue;
@@ -318,7 +318,7 @@ export class HttpRequestParser {
     this.bodyChunks = [];
     this.method = '';
     this.httpVersion = '';
-    this.url = new URL('http://placeholder');
+    this.url = new URL('http://coolcat.com');
     this.contentLength = 0;
     this.remainingBody = 0;
     this.isChunked = false;

@@ -1,10 +1,8 @@
-dev d:
+dev, d:
 	npm run dev
 start, s:
 	npm run build
 	npm run start
-build b:		
-	npm run build
 test, t:
 	npm run test
 lint:

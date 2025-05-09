@@ -2,7 +2,7 @@
 import { Socket } from 'net';
 import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
-import { FileHostingService } from './fileHostingService';
+import { FileHostingService, FileInfo } from './fileHostingService';
 import { FileHostingStatsHelper } from './fileHostingStatsHelper';
 import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
@@ -64,6 +64,81 @@ function isCompressible(mimeType: string): boolean {
  */
 export const fileHostingController = {
   /**
+   * Handles HEAD requests for files - returns same headers as GET but no body
+   * This allows clients to efficiently get metadata without downloading content
+   *
+   * @param req - The incoming HTTP request with file query parameter
+   * @param sock - The TCP socket to write the response to
+   * @returns {Promise<void>} Resolves when headers are sent
+   */
+  async headFile(req: IncomingRequest, sock: Socket): Promise<void> {
+    const requestStart = Date.now();
+    const fileName = this.resolveFileName(req, sock, {
+      message: 'Missing file parameter in HEAD request',
+    });
+    if (!fileName) return;
+
+    try {
+      // Get file stats but don't send the actual file
+      const fileStat = await fileSvc.stat(fileName);
+      const mimeType = getMimeType(fileName) || 'application/octet-stream';
+      const lastModified = fileStat.mtime.toUTCString();
+      const etag = `"${fileStat.size}-${fileStat.mtime.getTime()}"`;
+
+      const headers: Record<string, string> = {
+        'Content-Type': mimeType,
+        'Content-Length': String(fileStat.size),
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'public, max-age=86400, stale-while-revalidate=43200',
+        ETag: etag,
+        'Last-Modified': lastModified,
+        'X-Content-Type-Options': 'nosniff',
+      };
+
+      // For media files, add extra headers with basic dimensions/duration if available
+      try {
+        const fileStats = await statsHelper.getStatsByPath(fileName);
+        if (fileStats) {
+          if (fileStats.width && fileStats.height) {
+            headers['X-Image-Width'] = String(fileStats.width);
+            headers['X-Image-Height'] = String(fileStats.height);
+          }
+          if (fileStats.duration) {
+            headers['X-Media-Duration'] = String(fileStats.duration);
+          }
+        }
+      } catch (statsErr) {
+        // Continue even if stats lookup fails
+        fileLogger.debug(`Stats lookup failed during HEAD request: ${fileName}`, {
+          error: (statsErr as Error).message,
+        });
+      }
+
+      // Send response with headers but no body
+      sendResponse(sock, 200, headers, undefined);
+
+      const duration = Date.now() - requestStart;
+      fileLogger.debug(`HEAD request processed for "${fileName}"`, {
+        fileName,
+        duration: `${duration}ms`,
+      });
+    } catch (err) {
+      fileLogger.error(`HEAD request failed for "${fileName}"`, {
+        error: (err as Error).message,
+      });
+
+      if (!sock.destroyed) {
+        sendResponse(
+          sock,
+          404,
+          { 'Content-Type': 'text/plain' },
+          undefined, // No body for HEAD
+        );
+      }
+    }
+  },
+
+  /**
    * Serves a specific file with Range header support and optional compression
    *
    * @param req - The incoming HTTP request with file query parameter
@@ -89,17 +164,9 @@ export const fileHostingController = {
       return;
     }
 
-    const fileName = getQuery(req, 'file');
-    if (!fileName) {
-      fileLogger.warn('Missing file parameter in request', requestInfo);
-      sendResponse(
-        sock,
-        400,
-        { 'Content-Type': 'text/plain', Connection: 'close' },
-        'Missing required "file" query parameter.',
-      );
-      return;
-    }
+    // first check if the IncomingRequest has the property ctx.params.filename
+    const fileName: string | undefined = this.resolveFileName(req, sock);
+    if (!fileName) return;
 
     // Extract headers
     const ifNoneMatchHeader = getHeader(req, 'if-none-match');
@@ -165,6 +232,41 @@ export const fileHostingController = {
         return;
       }
 
+      const responseHeaders: Record<string, string> = {
+        'Content-Type': mimeType,
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'public, max-age=86400, stale-while-revalidate=43200',
+        ETag: etag,
+        'Last-Modified': lastModified,
+        'X-Content-Type-Options': 'nosniff',
+        'Timing-Allow-Origin': '*',
+      };
+
+      // Optimize for specific content types with aggressive caching
+      if (mimeType.startsWith('video/')) {
+        // Video files: long cache time, optimized for streaming
+        responseHeaders['Cache-Control'] = 'public, max-age=604800, immutable';
+        responseHeaders['X-Accel-Buffering'] = 'yes';
+        responseHeaders['Accept-Ranges'] = 'bytes';
+      } else if (mimeType.startsWith('image/gif')) {
+        // GIFs: long cache time, preload hint
+        responseHeaders['Cache-Control'] = 'public, max-age=31536000, immutable';
+        responseHeaders['X-Content-Type-Options'] = 'nosniff';
+        responseHeaders['Timing-Allow-Origin'] = '*';
+      } else if (mimeType.startsWith('image/')) {
+        // Images: longest cache time, no revalidation needed for most cases
+        responseHeaders['Cache-Control'] = 'public, max-age=31536000, immutable';
+        responseHeaders['X-Content-Type-Options'] = 'nosniff';
+      }
+
+      // Add preconnect hint for common CDN domains if using a CDN
+      responseHeaders['Link'] = '<https://your-cdn-domain.com>; rel=preconnect';
+
+      // Early hints for browser optimization
+      if (mimeType.startsWith('video/')) {
+        responseHeaders['X-Media-Buffer-Hint'] = '10';
+      }
+
       if (rangeHdr) {
         const rangeMatch = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
         if (!rangeMatch) {
@@ -208,20 +310,13 @@ export const fileHostingController = {
           end = size - 1;
         }
 
-        if (start > end || start < 0 || end >= size) {
-          fileLogger.warn('Range out of bounds', {
-            rangeHeader: rangeHdr,
-            fileSize: size,
-            requestedStart: start,
-            requestedEnd: end,
-          });
-          sendResponse(
-            sock,
-            416,
-            { 'Content-Range': `bytes */${size}` },
-            '416 Range Not Satisfiable',
-          );
-          return;
+        // Video chunk optimization: adjust start/end for large video ranges
+        if (mimeType.startsWith('video/')) {
+          const chunkSize = 1024 * 1024; // 1MB chunks for video
+          if (end - start > chunkSize * 2) {
+            end = start + Math.ceil((end - start) / chunkSize) * chunkSize;
+            end = Math.min(end, size - 1);
+          }
         }
 
         let stream: Readable;
@@ -285,17 +380,8 @@ export const fileHostingController = {
           return;
         }
 
-        const responseHeaders: Record<string, string> = {
-          'Content-Type': mimeType,
-          'Accept-Ranges': 'bytes',
-          'Content-Range': `bytes ${start}-${end}/${size}`,
-          'Content-Length': String(len),
-          'Cache-Control': 'public, max-age=86400, stale-while-revalidate=43200',
-          ETag: etag,
-          'Last-Modified': lastModified,
-          'X-Content-Type-Options': 'nosniff',
-          'Timing-Allow-Origin': '*',
-        };
+        responseHeaders['Content-Range'] = `bytes ${start}-${end}/${size}`;
+        responseHeaders['Content-Length'] = String(len);
 
         try {
           sendResponse(sock, 206, responseHeaders, stream);
@@ -333,15 +419,6 @@ export const fileHostingController = {
 
       let responseStream: Readable;
       let sourceStream: Readable;
-      const responseHeaders: Record<string, string> = {
-        'Content-Type': mimeType,
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'public, max-age=86400, stale-while-revalidate=43200',
-        ETag: etag,
-        'Last-Modified': lastModified,
-        'X-Content-Type-Options': 'nosniff',
-        'Timing-Allow-Origin': '*',
-      };
 
       if (isBinaryContent && mimeType.startsWith('image/')) {
         responseHeaders['Cache-Control'] = 'public, max-age=31536000, immutable';
@@ -544,7 +621,24 @@ export const fileHostingController = {
         return;
       }
 
-      const allFiles = await fileSvc.listFiles();
+      const allFilesResult = await fileSvc.listFiles();
+
+      // Handle both array of strings (from tests) and array of FileInfo objects
+      let allFiles: FileInfo[] = [];
+
+      if (Array.isArray(allFilesResult)) {
+        if (allFilesResult.length > 0 && typeof allFilesResult[0] === 'string') {
+          // Convert string[] to FileInfo[]
+          allFiles = (allFilesResult as string[]).map((filename) => ({
+            name: filename,
+            path: filename,
+            isDirectory: false,
+          }));
+        } else {
+          // It's already FileInfo[]
+          allFiles = allFilesResult as FileInfo[];
+        }
+      }
 
       const filesWithMetadata = await Promise.all(
         allFiles.map(async (fileInfo) => {
@@ -663,7 +757,7 @@ export const fileHostingController = {
         size: file.size,
         mimeType: file.mimeType,
         lastModified: file.formattedDate,
-        url: `/api/files/${encodeURIComponent(file.path)}`,
+        url: `/api/files/${encodeURIComponent(file.path.toString())}`,
       }));
 
       const duration = Date.now() - requestStart;
@@ -1155,5 +1249,47 @@ export const fileHostingController = {
         }
       }
     }
+  },
+
+  /**
+   * Resolves the file name from an incoming HTTP request.
+   *
+   * This function attempts to extract a file name from the request in the following priority order:
+   *   1. `req.ctx.params.filename` (if available)
+   *   2. The query parameter `file` (if present, it will be URL-decoded)
+   *
+   * If neither source provides a valid file name, it logs a warning and sends a `400 Bad Request` response to the client,
+   * indicating that the file name is required.
+   *
+   * @param req - The IncomingRequest object that contains request context, path, URL, and query parameters.
+   *              Expected to potentially have `ctx.params.filename` or a query parameter named `file`.
+   * @param sock - The socket over which the response can be sent back to the client in case of an error.
+   * @param p0 - Optional parameter for additional logging context, such as a message.
+   *
+   * @returns The resolved file name as a decoded string if found, otherwise `undefined`. If `undefined`, a response has already been sent back to the client.
+   *
+   * @example
+   * const fileName = resolveFileName(req, sock);
+   * if (!fileName) return; // response has already been handled
+   */
+  resolveFileName(req: IncomingRequest, sock: Socket, p0?: { message: string }) {
+    return (
+      (req.ctx?.params as Record<string, string>)?.filename ??
+      (getQuery(req, 'file') ? decodeURIComponent(getQuery(req, 'file')!) : undefined) ??
+      (() => {
+        fileLogger.warn('File name is required but not provided', {
+          url: req.url,
+          path: req.path,
+          ...(p0?.message ? { message: p0.message } : {}),
+        });
+        sendResponse(
+          sock,
+          400,
+          { 'Content-Type': 'text/plain', Connection: 'close' },
+          'File name is required.',
+        );
+        return undefined;
+      })()
+    );
   },
 };

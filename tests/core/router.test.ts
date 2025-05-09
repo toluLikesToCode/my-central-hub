@@ -258,7 +258,7 @@ describe('Router', () => {
 
     expect(sendResponse).toHaveBeenCalledWith(
       socket,
-      200,
+      204,
       expect.objectContaining({
         Allow: 'GET, POST, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Origin': '*',
@@ -266,12 +266,12 @@ describe('Router', () => {
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Content-Type': 'text/plain',
       }),
-      'OK',
+      'No Content',
     );
     expect(mockChildLogger.debug).toHaveBeenCalledWith('Responded to OPTIONS request');
     expect(mockChildLogger.info).toHaveBeenCalledWith(
       expect.stringContaining('Request completed'),
-      expect.objectContaining({ status: 200 }),
+      expect.objectContaining({ status: 204 }),
     );
   });
 
