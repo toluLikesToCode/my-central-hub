@@ -90,6 +90,8 @@ describe('HttpServer', () => {
       write: jest.fn(),
       end: jest.fn(),
       destroy: jest.fn(),
+      setMaxListeners: jest.fn(),
+      getMaxListeners: jest.fn().mockReturnValue(10),
       remoteAddress: '127.0.0.1',
     } as unknown as Socket;
 

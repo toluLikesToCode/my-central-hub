@@ -14,6 +14,9 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
+// Add at top of file after existing imports
+let shutdownHandlersRegistered = false;
+
 // Create dedicated logger for metrics service with comprehensive performance tracking
 const metricsServiceLogger = new Logger({
   metadata: {
@@ -241,6 +244,45 @@ export async function initDb(): Promise<Database> {
       status: 'connected',
       newDatabase: newDbCreated,
     });
+
+    // Register shutdown handlers once after DB is ready
+    if (!shutdownHandlersRegistered) {
+      shutdownHandlersRegistered = true;
+      process.on('SIGINT', async () => {
+        metricsServiceLogger.info(`SIGINT received. Initiating graceful shutdown`, {
+          event: 'SIGINT',
+        });
+        try {
+          await db?.close();
+          metricsServiceLogger.success(`SQLite connection closed successfully`, {
+            event: 'SIGINT',
+          });
+        } catch (err) {
+          metricsServiceLogger.error(`Error closing SQLite connection`, {
+            error: (err as Error).message,
+            event: 'SIGINT',
+          });
+        }
+        process.exit(0);
+      });
+      process.on('SIGTERM', async () => {
+        metricsServiceLogger.info(`SIGTERM received. Initiating graceful shutdown`, {
+          event: 'SIGTERM',
+        });
+        try {
+          await db?.close();
+          metricsServiceLogger.success(`SQLite connection closed successfully`, {
+            event: 'SIGTERM',
+          });
+        } catch (err) {
+          metricsServiceLogger.error(`Error closing SQLite connection`, {
+            error: (err as Error).message,
+            event: 'SIGTERM',
+          });
+        }
+        process.exit(0);
+      });
+    }
 
     return db;
   } catch (err) {
@@ -964,92 +1006,3 @@ function calculatePercentile(values: number[], percentile: number): number {
   const index = Math.ceil((percentile / 100) * sorted.length) - 1;
   return sorted[index];
 }
-
-// Graceful shutdown with enhanced logging
-process.on('SIGINT', async () => {
-  metricsServiceLogger.info(`SIGINT received. Initiating graceful shutdown`, {
-    pid: process.pid,
-    time: formatDate(new Date()),
-    hostname: os.hostname(),
-  });
-
-  if (db) {
-    metricsServiceLogger.debug(`Attempting to close SQLite connection`, {
-      dbPath: config.dbPath,
-      connectionOpen: !!db,
-    });
-
-    try {
-      await db.close();
-      metricsServiceLogger.success(`SQLite connection closed successfully`, {
-        event: 'SIGINT',
-        dbPath: config.dbPath,
-        closed: true,
-      });
-    } catch (err) {
-      const error = err as Error;
-      metricsServiceLogger.error(`Error closing SQLite connection`, {
-        error: error.message,
-        stack: error.stack,
-        event: 'SIGINT',
-      });
-    }
-  } else {
-    metricsServiceLogger.warn(`No database connection found during shutdown`, {
-      event: 'SIGINT',
-      hasDb: false,
-    });
-  }
-
-  metricsServiceLogger.info(`Exiting process`, {
-    event: 'SIGINT',
-    pid: process.pid,
-    exitTime: formatDate(new Date()),
-  });
-
-  process.exit(0);
-});
-
-process.on('SIGTERM', async () => {
-  metricsServiceLogger.info(`SIGTERM received. Initiating graceful shutdown`, {
-    pid: process.pid,
-    time: formatDate(new Date()),
-    hostname: os.hostname(),
-  });
-
-  if (db) {
-    metricsServiceLogger.debug(`Attempting to close SQLite connection`, {
-      dbPath: config.dbPath,
-      connectionOpen: !!db,
-    });
-
-    try {
-      await db.close();
-      metricsServiceLogger.success(`SQLite connection closed successfully`, {
-        event: 'SIGTERM',
-        dbPath: config.dbPath,
-        closed: true,
-      });
-    } catch (err) {
-      const error = err as Error;
-      metricsServiceLogger.error(`Error closing SQLite connection`, {
-        error: error.message,
-        stack: error.stack,
-        event: 'SIGTERM',
-      });
-    }
-  } else {
-    metricsServiceLogger.warn(`No database connection found during shutdown`, {
-      event: 'SIGTERM',
-      hasDb: false,
-    });
-  }
-
-  metricsServiceLogger.info(`Exiting process`, {
-    event: 'SIGTERM',
-    pid: process.pid,
-    exitTime: formatDate(new Date()),
-  });
-
-  process.exit(0);
-});

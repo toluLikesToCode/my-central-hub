@@ -1,10 +1,10 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { open, Database } from 'sqlite';
 import sqlite3 from 'sqlite3';
 import { promises as fs } from 'fs';
 import path from 'path';
 import logger from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
-import { formatDate } from '../../utils/dateFormatter';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -28,13 +28,83 @@ export interface FileStats {
   height?: number;
   duration?: number;
   bitrate?: number;
-  encoding?: string;
-  codec?: string;
+  encoding?: string; // e.g., codec long name, pixel format
+  codec?: string; // e.g., h264, mp3
   frameRate?: number;
   audioChannels?: number;
   sampleRate?: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+// Helper functions for safe parsing of ffprobe output
+function safeParseInt(value: any, radix: number = 10): number | undefined {
+  if (value === null || value === undefined || String(value).toUpperCase() === 'N/A') {
+    return undefined;
+  }
+  const parsed = parseInt(String(value), radix);
+  return isNaN(parsed) ? undefined : parsed;
+}
+
+function safeParseFloat(value: any): number | undefined {
+  if (value === null || value === undefined || String(value).toUpperCase() === 'N/A') {
+    return undefined;
+  }
+  const parsed = parseFloat(String(value));
+  return isNaN(parsed) ? undefined : parsed;
+}
+
+function parseFrameRate(frameRateStr?: string): number | undefined {
+  if (!frameRateStr) return undefined;
+  if (frameRateStr.includes('/')) {
+    const [numStr, denStr] = frameRateStr.split('/');
+    const num = parseInt(numStr, 10);
+    const den = parseInt(denStr, 10);
+    if (!isNaN(num) && !isNaN(den) && den !== 0) {
+      return num / den;
+    }
+  } else {
+    const fr = safeParseFloat(frameRateStr);
+    return fr && fr > 0 ? fr : undefined;
+  }
+  return undefined;
+}
+
+interface FFProbeStream {
+  index: number;
+  codec_name?: string;
+  codec_long_name?: string;
+  codec_type?: 'video' | 'audio' | 'subtitle' | 'data' | 'attachment';
+  width?: number;
+  height?: number;
+  duration?: string; // Can be string
+  bit_rate?: string; // Can be string
+  r_frame_rate?: string; // e.g., "25/1"
+  channels?: number;
+  channel_layout?: string;
+  sample_rate?: string; // Can be string
+  pix_fmt?: string;
+  // ... other stream properties
+}
+
+interface FFProbeFormat {
+  filename: string;
+  nb_streams: number;
+  nb_programs: number;
+  format_name: string;
+  format_long_name: string;
+  start_time?: string;
+  duration?: string; // Can be string
+  size?: string; // Can be string
+  bit_rate?: string; // Can be string
+  probe_score?: number;
+  // ... other format_tags
+  tags?: Record<string, string>;
+}
+
+interface FFProbeOutput {
+  streams: FFProbeStream[];
+  format: FFProbeFormat;
 }
 
 /**
@@ -67,17 +137,14 @@ export class FileHostingStatsHelper {
     if (this.initialized) return;
 
     try {
-      // Ensure directory exists
       const dir = path.dirname(this.dbPath);
       await fs.mkdir(dir, { recursive: true });
 
-      // Open database connection
       this.db = await open({
         filename: this.dbPath,
         driver: sqlite3.Database,
       });
 
-      // Create the file_stats table if it doesn't exist
       await this.db.exec(`
         CREATE TABLE IF NOT EXISTS file_stats (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,6 +193,26 @@ export class FileHostingStatsHelper {
     }
   }
 
+  private async getMediaInfo(filePath: string): Promise<FFProbeOutput | null> {
+    try {
+      const { stdout } = await execFileAsync('ffprobe', [
+        '-v',
+        'error',
+        '-show_format',
+        '-show_streams',
+        '-print_format',
+        'json',
+        filePath,
+      ]);
+      return JSON.parse(stdout) as FFProbeOutput;
+    } catch (error) {
+      statsLogger.warn(`Failed to execute ffprobe for ${filePath}`, {
+        error: (error as Error).message,
+      });
+      return null;
+    }
+  }
+
   /**
    * Get detailed statistics for a file using appropriate tools based on file type
    * @param filePath Full path to the file
@@ -140,7 +227,6 @@ export class FileHostingStatsHelper {
       const fileName = path.basename(filePath);
       const mimeType = getMimeType(fileName) || 'application/octet-stream';
 
-      // Basic file stats that apply to all files
       const fileStats: FileStats = {
         fileName,
         filePath: relativePath,
@@ -151,13 +237,28 @@ export class FileHostingStatsHelper {
         updatedAt: new Date(),
       };
 
-      // Get extended stats based on file type
-      if (mimeType.startsWith('image/')) {
-        await this.getImageStats(filePath, fileStats);
-      } else if (mimeType.startsWith('video/')) {
-        await this.getVideoStats(filePath, fileStats);
-      } else if (mimeType.startsWith('audio/')) {
-        await this.getAudioStats(filePath, fileStats);
+      const mediaInfo = await this.getMediaInfo(filePath);
+
+      if (mediaInfo) {
+        if (mimeType.startsWith('image/')) {
+          this.populateImageStats(mediaInfo, fileStats);
+        } else if (mimeType.startsWith('video/')) {
+          this.populateVideoStats(mediaInfo, fileStats);
+        } else if (mimeType.startsWith('audio/')) {
+          this.populateAudioStats(mediaInfo, fileStats);
+        }
+
+        // Common properties from format if not already set or to override
+        if (mediaInfo.format) {
+          if (fileStats.duration === undefined) {
+            fileStats.duration = safeParseFloat(mediaInfo.format.duration);
+          }
+          // Overall bitrate is often preferred
+          const formatBitrate = safeParseInt(mediaInfo.format.bit_rate);
+          if (formatBitrate !== undefined) {
+            fileStats.bitrate = formatBitrate;
+          }
+        }
       }
 
       return fileStats;
@@ -181,147 +282,89 @@ export class FileHostingStatsHelper {
         'SELECT COUNT(*) as count FROM file_stats WHERE file_path = ?',
         [filePath],
       );
-      if (result && result.count > 0) {
-        return true;
-      }
+      return !!(result && result.count > 0);
+    } catch (error) {
+      statsLogger.error(`Failed to check stats for file: ${filePath}`, {
+        error: (error as Error).message,
+      });
       return false;
-    } catch (error) {
-      statsLogger.error(`Failed to check stats for file: ${filePath}`, { error: error });
-      return false;
     }
   }
-  /**
-   * Get image-specific statistics
-   * @param filePath Path to the image file
-   * @param fileStats Stats object to populate
-   */
-  private async getImageStats(filePath: string, fileStats: FileStats): Promise<void> {
-    try {
-      // Use ffprobe to get image dimensions
-      const { stdout } = await execFileAsync('ffprobe', [
-        '-v',
-        'error',
-        '-select_streams',
-        'v:0',
-        '-show_entries',
-        'stream=width,height',
-        '-of',
-        'csv=p=0',
-        filePath,
-      ]);
 
-      const [width, height] = stdout.trim().split(',');
-
-      if (width && height) {
-        fileStats.width = parseInt(width, 10);
-        fileStats.height = parseInt(height, 10);
+  private populateImageStats(mediaInfo: FFProbeOutput, fileStats: FileStats): void {
+    const imageStream = mediaInfo.streams.find((s) => s.codec_type === 'video');
+    if (imageStream) {
+      fileStats.width = safeParseInt(imageStream.width);
+      fileStats.height = safeParseInt(imageStream.height);
+      fileStats.codec = imageStream.codec_name;
+      fileStats.encoding = imageStream.codec_long_name || imageStream.pix_fmt; // Use codec_long_name or pix_fmt for encoding
+      // Bitrate for single images is often not applicable or not provided by ffprobe stream
+      // It might be in format.bit_rate if the image is in a container format
+      const streamBitrate = safeParseInt(imageStream.bit_rate);
+      if (fileStats.bitrate === undefined && streamBitrate !== undefined) {
+        fileStats.bitrate = streamBitrate;
       }
-    } catch (error) {
-      statsLogger.warn(`Could not get image dimensions for ${filePath}`, {
-        error: (error as Error).message,
-      });
-      // Continue without image dimensions
     }
   }
 
-  /**
-   * Get video-specific statistics
-   * @param filePath Path to the video file
-   * @param fileStats Stats object to populate
-   */
-  private async getVideoStats(filePath: string, fileStats: FileStats): Promise<void> {
-    try {
-      // Use ffprobe to get comprehensive video info
-      const { stdout } = await execFileAsync('ffprobe', [
-        '-v',
-        'error',
-        '-select_streams',
-        'v:0',
-        '-show_entries',
-        'stream=width,height,codec_name,r_frame_rate,duration,bit_rate',
-        '-of',
-        'csv=p=0',
-        filePath,
-      ]);
+  private populateVideoStats(mediaInfo: FFProbeOutput, fileStats: FileStats): void {
+    const videoStream = mediaInfo.streams.find((s) => s.codec_type === 'video');
+    const audioStream = mediaInfo.streams.find((s) => s.codec_type === 'audio');
 
-      const [width, height, codec, frameRate, duration, bitrate] = stdout.trim().split(',');
+    if (videoStream) {
+      fileStats.width = safeParseInt(videoStream.width);
+      fileStats.height = safeParseInt(videoStream.height);
+      fileStats.codec = videoStream.codec_name;
+      fileStats.encoding = videoStream.codec_long_name || videoStream.pix_fmt;
+      fileStats.duration = safeParseFloat(videoStream.duration); // Stream duration
+      fileStats.frameRate = parseFrameRate(videoStream.r_frame_rate);
 
-      if (width) fileStats.width = parseInt(width, 10);
-      if (height) fileStats.height = parseInt(height, 10);
-      if (codec) fileStats.codec = codec;
-      if (duration) fileStats.duration = parseFloat(duration);
-      if (bitrate) fileStats.bitrate = parseInt(bitrate, 10);
-
-      // Calculate frame rate from fraction like "30000/1001"
-      if (frameRate && frameRate.includes('/')) {
-        const [numerator, denominator] = frameRate.split('/').map(Number);
-        if (!isNaN(numerator) && !isNaN(denominator) && denominator !== 0) {
-          fileStats.frameRate = numerator / denominator;
-        }
+      const videoBitrate = safeParseInt(videoStream.bit_rate);
+      if (videoBitrate !== undefined) {
+        fileStats.bitrate = videoBitrate; // Prefer video stream bitrate for video files if format.bit_rate is not specific enough
       }
+    }
 
-      // Get audio stream info if available
-      try {
-        const { stdout: audioStdout } = await execFileAsync('ffprobe', [
-          '-v',
-          'error',
-          '-select_streams',
-          'a:0',
-          '-show_entries',
-          'stream=channels,sample_rate',
-          '-of',
-          'csv=p=0',
-          filePath,
-        ]);
+    if (audioStream) {
+      fileStats.audioChannels = safeParseInt(audioStream.channels);
+      fileStats.sampleRate = safeParseInt(audioStream.sample_rate);
+      // codec, encoding, bitrate on FileStats are typically for the primary (video) stream.
+      // If separate audio codec/bitrate is needed, FileStats interface should be extended.
+    }
 
-        const [channels, sampleRate] = audioStdout.trim().split(',');
-        if (channels) fileStats.audioChannels = parseInt(channels, 10);
-        if (sampleRate) fileStats.sampleRate = parseInt(sampleRate, 10);
-      } catch {
-        // Video might not have audio stream, continue
-      }
-    } catch (error) {
-      statsLogger.warn(`Could not get video metadata for ${filePath}`, {
-        error: (error as Error).message,
-      });
-      // Continue without video metadata
+    // Prefer format duration and bitrate if available and more general
+    if (mediaInfo.format) {
+      const formatDuration = safeParseFloat(mediaInfo.format.duration);
+      if (formatDuration !== undefined) fileStats.duration = formatDuration;
+
+      const formatBitrate = safeParseInt(mediaInfo.format.bit_rate);
+      if (formatBitrate !== undefined) fileStats.bitrate = formatBitrate; // Override with overall bitrate
     }
   }
 
-  /**
-   * Get audio-specific statistics
-   * @param filePath Path to the audio file
-   * @param fileStats Stats object to populate
-   */
-  private async getAudioStats(filePath: string, fileStats: FileStats): Promise<void> {
-    try {
-      // Use ffprobe to get audio information
-      const { stdout } = await execFileAsync('ffprobe', [
-        '-v',
-        'error',
-        '-select_streams',
-        'a:0',
-        '-show_entries',
-        'stream=codec_name,channels,sample_rate,duration,bit_rate',
-        '-of',
-        'csv=p=0',
-        filePath,
-      ]);
+  private populateAudioStats(mediaInfo: FFProbeOutput, fileStats: FileStats): void {
+    const audioStream = mediaInfo.streams.find((s) => s.codec_type === 'audio');
+    if (audioStream) {
+      fileStats.codec = audioStream.codec_name;
+      fileStats.encoding = audioStream.codec_long_name;
+      fileStats.audioChannels = safeParseInt(audioStream.channels);
+      fileStats.sampleRate = safeParseInt(audioStream.sample_rate);
+      fileStats.duration = safeParseFloat(audioStream.duration);
+      fileStats.bitrate = safeParseInt(audioStream.bit_rate);
+    }
 
-      const [codec, channels, sampleRate, duration, bitrate] = stdout.trim().split(',');
+    // Prefer format duration and bitrate if available and more general
+    if (mediaInfo.format) {
+      const formatDuration = safeParseFloat(mediaInfo.format.duration);
+      if (formatDuration !== undefined) fileStats.duration = formatDuration;
 
-      if (codec) fileStats.codec = codec;
-      if (channels) fileStats.audioChannels = parseInt(channels, 10);
-      if (sampleRate) fileStats.sampleRate = parseInt(sampleRate, 10);
-      if (duration) fileStats.duration = parseFloat(duration);
-      if (bitrate) fileStats.bitrate = parseInt(bitrate, 10);
-    } catch (error) {
-      statsLogger.warn(`Could not get audio metadata for ${filePath}`, {
-        error: (error as Error).message,
-      });
-      // Continue without audio metadata
+      const formatBitrate = safeParseInt(mediaInfo.format.bit_rate);
+      if (formatBitrate !== undefined) fileStats.bitrate = formatBitrate; // Override with overall bitrate
     }
   }
+
+  // getImageStats, getVideoStats, getAudioStats are replaced by the new populate methods
+  // and the generic getMediaInfo call in getFileStats.
 
   /**
    * Store file statistics in the database
@@ -332,17 +375,40 @@ export class FileHostingStatsHelper {
     if (!this.db) throw new Error('Database not initialized');
 
     try {
-      const now = formatDate(new Date());
+      const now = new Date(); // Use current date for updatedAt
 
-      // Use upsert operation (INSERT OR REPLACE)
+      // Ensure createdAt is set, if not (e.g. direct call to saveFileStats), set it.
+      const createdAt = fileStats.createdAt instanceof Date ? fileStats.createdAt : new Date();
+
       const result = await this.db.run(
         `
-        INSERT OR REPLACE INTO file_stats (
+        INSERT INTO file_stats (
           file_name, file_path, mime_type, size, last_modified,
           width, height, duration, bitrate, encoding,
           codec, frame_rate, audio_channels, sample_rate,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (
+          ?, ?, ?, ?, ?, 
+          ?, ?, ?, ?, ?, 
+          ?, ?, ?, ?, ?, 
+          ?
+        )
+        ON CONFLICT(file_path) DO UPDATE SET
+          file_name = excluded.file_name,
+          mime_type = excluded.mime_type,
+          size = excluded.size,
+          last_modified = excluded.last_modified,
+          width = excluded.width,
+          height = excluded.height,
+          duration = excluded.duration,
+          bitrate = excluded.bitrate,
+          encoding = excluded.encoding,
+          codec = excluded.codec,
+          frame_rate = excluded.frame_rate,
+          audio_channels = excluded.audio_channels,
+          sample_rate = excluded.sample_rate,
+          -- created_at is NOT updated on conflict, keep original
+          updated_at = excluded.updated_at 
       `,
         [
           fileStats.fileName,
@@ -359,18 +425,26 @@ export class FileHostingStatsHelper {
           fileStats.frameRate,
           fileStats.audioChannels,
           fileStats.sampleRate,
-          fileStats.createdAt.toISOString(),
-          now,
+          createdAt.toISOString(), // For new inserts
+          now.toISOString(), // For new inserts and updates
         ],
       );
 
       statsLogger.debug(`Stats saved for file: ${fileStats.fileName}`, {
         path: fileStats.filePath,
         size: fileStats.size,
-        id: result.lastID,
+        id: result.lastID, // lastID is for INSERTs. For UPSERTs, changes indicates success.
+        changes: result.changes,
       });
 
-      return result.lastID || 0;
+      // If lastID is 0 but changes were made, it was an update. We might need to fetch the ID.
+      // For simplicity, returning lastID (for inserts) or a placeholder if it was an update.
+      // The prompt does not specify behavior for return value on update.
+      // If ID is crucial on update, a SELECT would be needed post-UPSERT.
+      return (
+        result.lastID ||
+        (result.changes ? (await this.getStatsByPath(fileStats.filePath))?.id || 0 : 0)
+      );
     } catch (error) {
       statsLogger.error(`Failed to save stats for file: ${fileStats.fileName}`, {
         error: (error as Error).message,
@@ -389,7 +463,7 @@ export class FileHostingStatsHelper {
     if (!this.db) throw new Error('Database not initialized');
 
     try {
-      const row = await this.db.get(
+      const row = await this.db.get<FileStatsDbRow>( // Use a type for DB row
         `
         SELECT * FROM file_stats WHERE file_path = ?
       `,
@@ -398,25 +472,7 @@ export class FileHostingStatsHelper {
 
       if (!row) return null;
 
-      return {
-        id: row.id,
-        fileName: row.file_name,
-        filePath: row.file_path,
-        mimeType: row.mime_type,
-        size: row.size,
-        lastModified: new Date(row.last_modified),
-        width: row.width,
-        height: row.height,
-        duration: row.duration,
-        bitrate: row.bitrate,
-        encoding: row.encoding,
-        codec: row.codec,
-        frameRate: row.frame_rate,
-        audioChannels: row.audio_channels,
-        sampleRate: row.sample_rate,
-        createdAt: new Date(row.created_at),
-        updatedAt: new Date(row.updated_at),
-      };
+      return this.mapDbRowToFileStats(row);
     } catch (error) {
       statsLogger.error(`Failed to retrieve stats for file: ${filePath}`, {
         error: (error as Error).message,
@@ -468,6 +524,8 @@ export class FileHostingStatsHelper {
       minDuration?: number;
       limit?: number;
       offset?: number;
+      sortBy?: keyof FileStats; // Allow sorting
+      sortOrder?: 'ASC' | 'DESC';
     } = {},
   ): Promise<FileStats[]> {
     if (!this.initialized) await this.initialize();
@@ -481,74 +539,73 @@ export class FileHostingStatsHelper {
         conditions.push('mime_type LIKE ?');
         params.push(`${options.mimeType}%`);
       }
-
+      // ... (other conditions from original code are fine)
       if (options.minSize !== undefined) {
         conditions.push('size >= ?');
         params.push(options.minSize);
       }
-
       if (options.maxSize !== undefined) {
         conditions.push('size <= ?');
         params.push(options.maxSize);
       }
-
       if (options.hasAudio) {
-        conditions.push('audio_channels IS NOT NULL');
+        conditions.push('audio_channels IS NOT NULL AND audio_channels > 0');
       }
-
       if (options.hasVideo) {
         conditions.push('width IS NOT NULL AND height IS NOT NULL');
       }
-
       if (options.minWidth !== undefined) {
         conditions.push('width >= ?');
         params.push(options.minWidth);
       }
-
       if (options.minHeight !== undefined) {
         conditions.push('height >= ?');
         params.push(options.minHeight);
       }
-
       if (options.minDuration !== undefined) {
         conditions.push('duration >= ?');
         params.push(options.minDuration);
       }
 
       const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
-      const offsetClause = options.offset ? `OFFSET ${options.offset}` : '';
 
-      const rows = await this.db.all(
+      const validSortColumns: (keyof FileStats)[] = [
+        // Whitelist sortable columns
+        'fileName',
+        'mimeType',
+        'size',
+        'lastModified',
+        'width',
+        'height',
+        'duration',
+        'bitrate',
+        'createdAt',
+        'updatedAt',
+      ];
+      const sortBy =
+        options.sortBy && validSortColumns.includes(options.sortBy)
+          ? options.sortBy
+          : 'last_modified';
+      // Map FileStats key to DB column name if different (e.g. fileName -> file_name)
+      const dbSortBy = sortBy === 'lastModified' ? 'last_modified' : sortBy; // Add other mappings if needed
+      const sortOrder = options.sortOrder === 'ASC' ? 'ASC' : 'DESC';
+      const orderByClause = `ORDER BY ${dbSortBy} ${sortOrder}`;
+
+      const limitClause = options.limit ? `LIMIT ${safeParseInt(options.limit) || 10}` : ''; // Default limit if needed
+      const offsetClause = options.offset ? `OFFSET ${safeParseInt(options.offset) || 0}` : '';
+
+      const rows = await this.db.all<FileStatsDbRow[]>( // Use a type for DB row
         `
         SELECT * FROM file_stats
         ${whereClause}
-        ORDER BY last_modified DESC
+        ${orderByClause}
         ${limitClause}
         ${offsetClause}
       `,
         params,
       );
 
-      return rows.map((row) => ({
-        id: row.id,
-        fileName: row.file_name,
-        filePath: row.file_path,
-        mimeType: row.mime_type,
-        size: row.size,
-        lastModified: new Date(row.last_modified),
-        width: row.width,
-        height: row.height,
-        duration: row.duration,
-        bitrate: row.bitrate,
-        encoding: row.encoding,
-        codec: row.codec,
-        frameRate: row.frame_rate,
-        audioChannels: row.audio_channels,
-        sampleRate: row.sample_rate,
-        createdAt: new Date(row.created_at),
-        updatedAt: new Date(row.updated_at),
-      }));
+      return rows.map(this.mapDbRowToFileStats);
     } catch (error) {
       statsLogger.error('Failed to query file stats', {
         error: (error as Error).message,
@@ -566,20 +623,24 @@ export class FileHostingStatsHelper {
     totalSize: number;
     avgFileSize: number;
     byMimeType: { mimeType: string; count: number; totalSize: number }[];
-    largestFiles: FileStats[];
+    largestFiles: FileStats[]; // This should be sorted by size by default
   }> {
     if (!this.initialized) await this.initialize();
     if (!this.db) throw new Error('Database not initialized');
 
     try {
-      // Get total files and size
-      const totals = await this.db.get(`
+      const totals = await this.db.get<{
+        total_files: number;
+        total_size: number;
+        avg_size: number;
+      }>(`
         SELECT COUNT(*) as total_files, SUM(size) as total_size, AVG(size) as avg_size
         FROM file_stats
       `);
 
-      // Get stats by mime type
-      const byMimeType = await this.db.all(`
+      const byMimeType = await this.db.all<
+        { mime_type: string; count: number; total_size: number }[]
+      >(`
         SELECT 
           mime_type,
           COUNT(*) as count,
@@ -589,24 +650,23 @@ export class FileHostingStatsHelper {
         ORDER BY total_size DESC
       `);
 
-      // Get largest files
-      const largestFiles = await this.queryFileStats({
+      // Get largest files by querying with sort options
+      const largestFilesRaw = await this.queryFileStats({
+        sortBy: 'size',
+        sortOrder: 'DESC',
         limit: 10,
       });
 
-      // Sort by size descending
-      largestFiles.sort((a, b) => b.size - a.size);
-
       return {
-        totalFiles: totals.total_files || 0,
-        totalSize: totals.total_size || 0,
-        avgFileSize: totals.avg_size || 0,
+        totalFiles: totals?.total_files || 0,
+        totalSize: totals?.total_size || 0,
+        avgFileSize: totals?.avg_size || 0,
         byMimeType: byMimeType.map((row) => ({
           mimeType: row.mime_type,
           count: row.count,
           totalSize: row.total_size,
         })),
-        largestFiles: largestFiles.slice(0, 10),
+        largestFiles: largestFilesRaw,
       };
     } catch (error) {
       statsLogger.error('Failed to get aggregate stats', {
@@ -615,4 +675,48 @@ export class FileHostingStatsHelper {
       throw error;
     }
   }
+
+  // Helper to map database row to FileStats object
+  private mapDbRowToFileStats(row: FileStatsDbRow): FileStats {
+    return {
+      id: row.id,
+      fileName: row.file_name,
+      filePath: row.file_path,
+      mimeType: row.mime_type,
+      size: row.size,
+      lastModified: new Date(row.last_modified),
+      width: row.width === null ? undefined : row.width, // handle null from DB
+      height: row.height === null ? undefined : row.height,
+      duration: row.duration === null ? undefined : row.duration,
+      bitrate: row.bitrate === null ? undefined : row.bitrate,
+      encoding: row.encoding === null ? undefined : row.encoding,
+      codec: row.codec === null ? undefined : row.codec,
+      frameRate: row.frame_rate === null ? undefined : row.frame_rate,
+      audioChannels: row.audio_channels === null ? undefined : row.audio_channels,
+      sampleRate: row.sample_rate === null ? undefined : row.sample_rate,
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at),
+    };
+  }
+}
+
+// Define a type for the database row structure for better type safety
+interface FileStatsDbRow {
+  id: number;
+  file_name: string;
+  file_path: string;
+  mime_type: string;
+  size: number;
+  last_modified: string; // ISO Date String
+  width: number | null;
+  height: number | null;
+  duration: number | null;
+  bitrate: number | null;
+  encoding: string | null;
+  codec: string | null;
+  frame_rate: number | null;
+  audio_channels: number | null;
+  sample_rate: number | null;
+  created_at: string; // ISO Date String
+  updated_at: string; // ISO Date String
 }

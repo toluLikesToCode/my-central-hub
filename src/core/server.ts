@@ -22,8 +22,13 @@ export class HttpServer {
     this.setupServer();
   }
 
+  public getServer() {
+    return this.server;
+  }
+
   private setupServer() {
     this.server.on('connection', (socket: Socket) => {
+      socket.setMaxListeners(0);
       this.connections.add(socket);
       const parser = new HttpRequestParser();
 
