@@ -181,5 +181,6 @@ describe('GET /api/files with filters', () => {
 });
 
 afterAll(async () => {
+  setTimeout(() => {}, 5000); // Set a timeout of 5000 milliseconds for the server to stop
   await httpServer.stop();
 });

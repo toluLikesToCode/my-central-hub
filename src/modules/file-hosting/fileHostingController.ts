@@ -10,20 +10,18 @@ import { FileHostingService, FileInfo } from './fileHostingService';
 import { FileHostingStatsHelper } from './fileHostingStatsHelper';
 import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
-import logger from '../../utils/logger';
 import { getMimeType } from '../../utils/helpers';
 import { formatDate } from '../../utils/dateFormatter';
 import { evaluateFilter } from './file-utils/FileFilter';
+import getLoggerInstance from './file-utils/fileHostingLogger';
+
+const log = getLoggerInstance({
+  context: 'fileHostingController',
+});
 
 /* -------------------------------------------------- */
 /*                     BOILER‑PLATE                   */
 /* -------------------------------------------------- */
-
-const log = logger.child({
-  module: 'file-hosting',
-  component: 'controller',
-  feature: 'media-files',
-});
 
 /** Shared helpers that kept re‑appearing everywhere */
 const utils = {
@@ -241,8 +239,8 @@ export const fileHostingController = {
     await utils
       .withTiming('LIST files', { url: req.url }, async () => {
         const p = utils.parseListParams(req);
+        log.info('LIST params', { ...p, url: req.url });
 
-        // combine DB query + optional filesystem fallback
         const queryOpts: Record<string, unknown> = {
           limit: p.limit * 2,
           offset: (p.page - 1) * p.limit,
@@ -252,7 +250,42 @@ export const fileHostingController = {
         if (p.sizeFrom) queryOpts.minSize ??= p.sizeFrom;
         if (p.sizeTo) queryOpts.maxSize ??= p.sizeTo;
 
-        let results = await stats.queryFileStats(queryOpts);
+        // unified data source: DB query or filesystem fallback
+        let raw = await stats.queryFileStats(queryOpts);
+        log.debug('LIST raw data', { count: raw.length, queryOpts });
+        if (raw.length) {
+          log.info(
+            'RAW FILES',
+            raw.map((f) => ({
+              fileName: f.fileName,
+              mimeType: f.mimeType,
+              size: f.size,
+              lastModified: f.lastModified,
+            })),
+          );
+        }
+        if (!raw.length) {
+          const fsList = await fileSvc.listFiles();
+          log.debug('LIST fs data', { count: fsList.length });
+          raw = (fsList as FileInfo[])
+            .filter((f) => !f.isDirectory)
+            .map((f) => ({
+              fileName: f.name,
+              filePath: f.path,
+              size: f.size ?? 0,
+              mimeType: getMimeType(f.name) || 'application/octet-stream',
+              lastModified: f.mtime ?? new Date(),
+              createdAt: f.mtime ?? new Date(),
+              updatedAt: f.mtime ?? new Date(),
+            }));
+        } else {
+          log.debug('Sample mapped file data:', {
+            fileName: raw[0].fileName,
+            mimeType: raw[0].mimeType,
+            // Add more files or properties if needed
+          });
+        }
+        let results = raw;
 
         // extra filtering / sorting in JS (search, date range, etc.)
         const searchLower = p.search?.toLowerCase();
@@ -270,9 +303,24 @@ export const fileHostingController = {
         }
         // advanced filter options via JSON filter param
         if (p.filterOptions && Object.keys(p.filterOptions).length) {
-          results = results.filter((f) => evaluateFilter(f, p.filterOptions));
+          const filtered: typeof results = [];
+          const failed: { fileName: string; mimeType: string }[] = [];
+          results.forEach((f) => {
+            if (evaluateFilter(f, p.filterOptions)) {
+              filtered.push(f);
+            } else {
+              failed.push({ fileName: f.fileName, mimeType: f.mimeType });
+            }
+          });
+          log.info(
+            'FILTERED FILES',
+            filtered.map((f) => ({ fileName: f.fileName, mimeType: f.mimeType })),
+          );
+          log.info('FILES FAILED FILTER', failed);
+          results = filtered;
         }
 
+        // sorting
         results.sort((a, b) => {
           const cmp = (key: keyof typeof a) =>
             key === 'fileName' || key === 'mimeType'
@@ -291,28 +339,12 @@ export const fileHostingController = {
           return p.order === 'desc' ? -diff : diff;
         });
 
-        if (!results.length) {
-          /* Fallback to filesystem if DB empty */
-          const fsList = await fileSvc.listFiles();
-          results = (fsList as FileInfo[])
-            .filter((f) => !f.isDirectory)
-            .map((f) => ({
-              fileName: f.name,
-              filePath: f.path,
-              size: f.size ?? 0,
-              mimeType: getMimeType(f.name) || 'application/octet-stream',
-              lastModified: f.mtime ?? new Date(),
-              createdAt: f.mtime ?? new Date(),
-              updatedAt: f.mtime ?? new Date(),
-            }));
-        }
-
+        // pagination calculations
         const total = results.length;
         const totalPages = Math.ceil(total / p.limit);
-        // hasNextPage if more items beyond current page
         const hasNextPage = p.page * p.limit < total;
 
-        // Slice results for current page based on sorted full result set
+        // Slice results for current page and build response page data
         const pageData = results.slice((p.page - 1) * p.limit, p.page * p.limit).map((f) => ({
           name: f.fileName,
           path: f.filePath,
@@ -466,5 +498,23 @@ export const fileHostingController = {
     utils.safeSend(sock, 206, headers, source);
   },
 };
+
+/* -------------------------------------------------- */
+/*                     SHUTDOWN                     */
+/* -------------------------------------------------- */
+const shutdown = async () => {
+  try {
+    await log.close();
+    process.exit(0);
+  } catch (error) {
+    log.error('Error closing logger', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    process.exit(1);
+  }
+};
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
 
 /* eof */

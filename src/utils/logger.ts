@@ -396,7 +396,18 @@ export class FileTransport implements Transport {
 
     try {
       this.ensureLogDir(this.filename); // may throw on mkdir failure
+      //const isNewFile = !fs.existsSync(this.filename) || fs.statSync(this.filename).size === 0;
       this.stream = fs.createWriteStream(this.filename, { flags: 'a' });
+
+      // Prepend separator if file is new or empty
+      // if (isNewFile && this.stream) {
+      //   this.stream.write(APP_LOG_SEPARATOR + '\n\n');
+      // }
+
+      // Always prepend separator for new runs
+      if (this.stream) {
+        this.stream.write(APP_LOG_SEPARATOR + '\n\n');
+      }
 
       // Only attach event handlers if stream was successfully created
       if (this.stream) {
@@ -405,7 +416,7 @@ export class FileTransport implements Transport {
         });
         // Handle stream closing gracefully
         this.stream.on('finish', () => {
-          // console.log(`Log stream closed for ${this.filename}`);
+          console.log(`Log stream closed for ${this.filename}`);
         });
       }
     } catch (err) {
@@ -568,9 +579,10 @@ export class Logger {
     };
 
     this.transports = this.options.transports;
-    if (!this.transports.includes(sharedAppLogTransport)) {
-      this.transports.push(sharedAppLogTransport);
-    }
+    // if (!this.transports.includes(sharedAppLogTransport)) {
+    //   this.transports.push(sharedAppLogTransport);
+    // }
+    this.transports.push(sharedAppLogTransport); // Always include the shared transport
 
     // --- Dynamic Method Implementation ---
     // This part still creates the runtime methods, but TypeScript now relies on the explicit signatures above.
@@ -669,9 +681,9 @@ export class Logger {
   /**
    * Flushes and closes all transports, ensuring streams are ended gracefully.
    */
-  close(): void {
+  async close(): Promise<void> {
     // Use Promise.all to wait for all streams to close
-    Promise.all(
+    await Promise.all(
       this.transports.map((transport) => {
         if (typeof transport.close === 'function') {
           try {

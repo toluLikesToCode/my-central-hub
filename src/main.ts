@@ -104,6 +104,7 @@ function setupGracefulShutdown(server: HttpServer) {
     try {
       await server.stop();
       logger.info('Server stopped successfully');
+      await logger.close();
       process.exit(0);
     } catch (error) {
       logger.error('Error during server shutdown', {
