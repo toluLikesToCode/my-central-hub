@@ -564,79 +564,95 @@ export class FileHostingStatsHelper {
     }
   }
 
+  // Method to be replaced in your FileHostingStatsHelper.ts class
+
   /**
    * Query file statistics with optional filtering, sorting, and pagination.
+   * This method applies simple filters at the database level.
+   * Complex filtering (and/or/not/regex) is expected to be handled
+   * by the calling layer (e.g., FileHostingController) after an initial data fetch.
    */
   async queryFileStats(
     options: {
-      mimeType?: string;
+      // Simple filters based on direct properties
+      mimeType?: string; // Filter by MIME type prefix (e.g., "image/", "video/mp4")
       minSize?: number;
       maxSize?: number;
-      hasAudio?: boolean;
-      hasVideo?: boolean;
+      hasAudio?: boolean; // True if file should have audio channels
+      hasVideo?: boolean; // True if file should have width and height
       minWidth?: number;
       minHeight?: number;
-      minDuration?: number;
+      minDuration?: number; // In seconds
+
+      // Pagination and Sorting
       limit?: number;
       offset?: number;
-      sortBy?: keyof FileStats;
+      sortBy?: keyof FileStats; // Property of FileStats to sort by
       sortOrder?: 'ASC' | 'DESC';
+
+      // Note: This method does NOT process complex nested filter objects
+      // (like 'and', 'or', 'not', 'regex' from the FileFilter interface)
+      // directly into its SQL query. Those are handled by the controller.
+      // If such properties are present in `options` due to spreading, they are ignored here.
     } = {},
   ): Promise<FileStats[]> {
     if (!this.initialized || !this.db) {
-      await this.initialize();
-      if (!this.db) throw new Error('Database initialization failed or not complete.');
+      await this.initialize(); // Ensure DB is initialized
+      if (!this.db) {
+        statsLogger.error('Database not available for queryFileStats.');
+        throw new Error('Database initialization failed or not complete.');
+      }
     }
 
-    const {
-      mimeType,
-      minSize,
-      maxSize,
-      hasAudio,
-      hasVideo,
-      minWidth,
-      minHeight,
-      minDuration,
-      limit = 20,
-      offset = 0, // Default limit and offset
-    } = options;
-
-    const conditions: string[] = [];
     const params: any[] = [];
+    const conditions: string[] = [];
 
-    if (mimeType) {
-      conditions.push('mime_type LIKE ?');
-      params.push(`${mimeType}%`); // Allows "image/" to match "image/jpeg"
+    // Build WHERE clause from simple, top-level options
+    if (options.mimeType) {
+      // Handle common cases: exact match or prefix match
+      if (options.mimeType.endsWith('/')) {
+        conditions.push('mime_type LIKE ?');
+        params.push(`${options.mimeType}%`); // e.g., "image/%"
+      } else if (options.mimeType.includes('/')) {
+        conditions.push('mime_type = ?'); // e.g., "image/jpeg"
+        params.push(options.mimeType);
+      } else {
+        // If just "image" or "video", treat as prefix for the major type
+        conditions.push('mime_type LIKE ?');
+        params.push(`${options.mimeType}/%`);
+      }
     }
-    if (minSize !== undefined) {
+    if (options.minSize !== undefined) {
       conditions.push('size >= ?');
-      params.push(minSize);
+      params.push(options.minSize);
     }
-    if (maxSize !== undefined) {
+    if (options.maxSize !== undefined && options.maxSize > 0) {
+      // Ensure maxSize is meaningful
       conditions.push('size <= ?');
-      params.push(maxSize);
+      params.push(options.maxSize);
     }
-    if (hasAudio) {
+    if (options.hasAudio) {
       conditions.push('audio_channels IS NOT NULL AND audio_channels > 0');
     }
-    if (hasVideo) {
+    if (options.hasVideo) {
       conditions.push('(width IS NOT NULL AND width > 0) AND (height IS NOT NULL AND height > 0)');
     }
-    if (minWidth !== undefined) {
+    if (options.minWidth !== undefined) {
       conditions.push('width >= ?');
-      params.push(minWidth);
+      params.push(options.minWidth);
     }
-    if (minHeight !== undefined) {
+    if (options.minHeight !== undefined) {
       conditions.push('height >= ?');
-      params.push(minHeight);
+      params.push(options.minHeight);
     }
-    if (minDuration !== undefined) {
+    if (options.minDuration !== undefined) {
       conditions.push('duration >= ?');
-      params.push(minDuration);
+      params.push(options.minDuration);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
+    // Sorting logic (maps FileStats camelCase keys to DB snake_case columns)
     const validSortKeys = [
       'id',
       'fileName',
@@ -678,28 +694,45 @@ export class FileHostingStatsHelper {
       updatedAt: 'updated_at',
     };
 
-    // Default sort key is 'lastModified' (maps to 'last_modified' in DB)
     const sortByKey: ValidSortKey =
       options.sortBy && (validSortKeys as readonly string[]).includes(options.sortBy)
         ? options.sortBy
-        : 'lastModified';
+        : 'fileName'; // Default sort to fileName if not specified
     const dbSortColumn = sortKeyMap[sortByKey];
-    const sortOrder = options.sortOrder?.toUpperCase() === 'ASC' ? 'ASC' : 'DESC'; // Default to DESC
-    const orderByClause = `ORDER BY "${dbSortColumn}" ${sortOrder}, id ${sortOrder}`; // Secondary sort by ID for stable order
+    const sortOrder = options.sortOrder?.toUpperCase() === 'ASC' ? 'ASC' : 'DESC'; // Default to DESC if invalid
+    // Add secondary sort by ID for stable pagination, especially when primary sort key might have duplicates
+    const orderByClause = `ORDER BY "${dbSortColumn}" ${sortOrder}, "id" ${sortOrder}`;
 
-    const query = `SELECT * FROM file_stats ${whereClause} ${orderByClause} LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
+    // Pagination
+    // The controller might pass a large limit (MAX_RECORDS_FOR_JS_FILTERING) or a smaller one.
+    const limit = Math.max(1, safeParseInt(options.limit, 10) || 20); // Default limit
+    const offset = Math.max(0, safeParseInt(options.offset, 10) || 0); // Default offset
+
+    const sqlQuery = `
+      SELECT * FROM file_stats
+      ${whereClause}
+      ${orderByClause}
+      LIMIT ? OFFSET ?
+    `;
+    const finalParams = [...params, limit, offset];
+
+    statsLogger.debug('Executing queryFileStats SQL', {
+      query: sqlQuery,
+      params: finalParams,
+      originalOptions: options,
+    });
 
     try {
-      const rows = await this.db.all<FileStatsDbRow[]>(query, params);
-      return rows.map(this.mapDbRowToFileStats);
+      const rows = await this.db.all<FileStatsDbRow[]>(sqlQuery, finalParams);
+      return rows.map(this.mapDbRowToFileStats.bind(this)); // Use bind if mapDbRowToFileStats uses `this`
     } catch (error) {
-      statsLogger.error('Failed to query file stats', {
+      statsLogger.error('Failed to query file stats from database', {
         error: (error as Error).message,
-        query,
-        params,
+        stack: (error as Error).stack,
+        sql: sqlQuery,
+        params: finalParams,
       });
-      throw error;
+      throw error; // Re-throw the error to be handled by the controller
     }
   }
 

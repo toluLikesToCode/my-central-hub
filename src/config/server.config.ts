@@ -46,7 +46,7 @@ export const config = {
    * Feature toggles for modularity and configurability
    */
   features: {
-    metrics: true,
+    metrics: false,
     fileHosting: true,
     fileStreaming: true,
     embeddingService: true,

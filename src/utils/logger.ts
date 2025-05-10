@@ -579,10 +579,10 @@ export class Logger {
     };
 
     this.transports = this.options.transports;
-    // if (!this.transports.includes(sharedAppLogTransport)) {
-    //   this.transports.push(sharedAppLogTransport);
-    // }
-    this.transports.push(sharedAppLogTransport); // Always include the shared transport
+    if (!this.transports.includes(sharedAppLogTransport)) {
+      this.transports.push(sharedAppLogTransport);
+    }
+    //this.transports.push(sharedAppLogTransport); // Always include the shared transport
 
     // --- Dynamic Method Implementation ---
     // This part still creates the runtime methods, but TypeScript now relies on the explicit signatures above.
