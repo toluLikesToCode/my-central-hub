@@ -19,7 +19,7 @@ const FileHostingLogger = new Logger({
       level: 'info',
     }),
     new FileTransport({
-      filename: path.join(config.logging.logDir, 'file-hosting-module.log'),
+      filename: path.join(config.logging?.logDir ?? '', 'file-hosting-module.log'),
       formatter: new PrettyFormatter({
         useColors: false,
         useBoxes: false,

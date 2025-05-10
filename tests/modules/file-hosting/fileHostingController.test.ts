@@ -1,21 +1,6 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
-
 import { PassThrough } from 'stream';
-
-// Mock dependencies first, before any imports
-jest.mock('../../../src/utils/logger', () => ({
-  __esModule: true,
-  default: {
-    child: jest.fn(() => ({
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
-      debug: jest.fn(),
-      success: jest.fn(),
-    })),
-  },
-}));
 
 jest.mock('../../../src/config/server.config', () => ({
   config: {

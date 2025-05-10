@@ -55,7 +55,10 @@ jest.mock('../../src/utils/logger', () => {
     info: createLevelLogger('info'),
     error: createLevelLogger('error'),
     warn: createLevelLogger('warn'),
-    debug: createLevelLogger('debug'), // This will be used by withTiming
+    //debug: createLevelLogger('debug'), // This will be used by withTiming
+    debug: jest.fn(() => {
+      // do nothing
+    }),
     success: createLevelLogger('success'),
     child: jest.fn(), // We'll make child return the same instance for simplicity
   };
@@ -181,6 +184,5 @@ describe('GET /api/files with filters', () => {
 });
 
 afterAll(async () => {
-  setTimeout(() => {}, 5000); // Set a timeout of 5000 milliseconds for the server to stop
   await httpServer.stop();
 });

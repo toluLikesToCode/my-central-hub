@@ -8,25 +8,17 @@
  * The file-streaming module has been replaced by the file-hosting module.
  * Future tests should use the file-hosting controller tests instead.
  */
-
 jest.mock('../../../src/entities/sendResponse');
 jest.mock('../../../src/modules/file-hosting/fileHostingService');
-jest.mock('../../../src/utils/logger', () => ({
-  __esModule: true,
-  default: {
-    child: jest.fn(() => ({
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
-      debug: jest.fn(),
-    })),
-  },
-}));
 jest.mock('../../../src/modules/file-hosting/fileHostingController');
 
 // Import the modules after mock setup
 import { fileStreamingController } from '../../../src/modules/file-streaming/fileStreamingController';
-import { fileHostingController } from '../../../src/modules/file-hosting/fileHostingController';
+import {
+  fileHostingController,
+  __fileHostingStatsHelper,
+  __fileHostingStatsHelperInit,
+} from '../../../src/modules/file-hosting/fileHostingController';
 import { sendResponse } from '../../../src/entities/sendResponse';
 import { FileHostingService } from '../../../src/modules/file-hosting/fileHostingService';
 import logger from '../../../src/utils/logger';
@@ -37,6 +29,13 @@ const createMockReadable = () => {
   stream._read = () => {};
   return stream;
 };
+
+beforeAll(async () => {
+  // Ensure fileHostingStatsHelper is initialized before tests
+  if (__fileHostingStatsHelperInit) {
+    await __fileHostingStatsHelperInit;
+  }
+});
 
 describe('fileStreamingController.handleStream (DEPRECATED)', () => {
   let req: any;
@@ -73,4 +72,12 @@ describe('fileStreamingController.handleStream (DEPRECATED)', () => {
     await fileStreamingController.handleStream(req, sock);
     expect(fileHostingController.getFile).toHaveBeenCalledWith(req, sock);
   });
+});
+
+afterAll(async () => {
+  // Clean up logger and stats helper
+  await logger.close();
+  if (__fileHostingStatsHelper && typeof __fileHostingStatsHelper.close === 'function') {
+    await __fileHostingStatsHelper.close();
+  }
 });

@@ -134,7 +134,14 @@ const utils = {
 
 const fileSvc = new FileHostingService(config.staticDir);
 const stats = new FileHostingStatsHelper(path.join(process.cwd(), 'data', 'file_stats.db'));
-stats.initialize().catch((e) => log.error('Failed to init file‑stats DB', { error: e.message }));
+
+// Export stats for test control and robust async handling
+export const __fileHostingStatsHelper = stats;
+
+const statsInitPromise = stats
+  .initialize()
+  .catch((e) => log.error('Failed to init file‑stats DB', { error: e.message }));
+export const __fileHostingStatsHelperInit = statsInitPromise;
 
 const COMPRESSIBLE_MIME_TYPES = new Set([
   'text/plain',
@@ -677,23 +684,5 @@ export const fileHostingController = {
     utils.safeSend(sock, 206, headers, source); // HTTP 206 Partial Content
   },
 };
-
-/* -------------------------------------------------- */
-/* SHUTDOWN                     */
-/* -------------------------------------------------- */
-const shutdown = async () => {
-  try {
-    await log.close(); // Assuming logger has a close method
-    await stats.close(); // Assuming statsHelper has a close method
-    // Add other cleanup tasks here
-    process.exit(0);
-  } catch (error) {
-    console.error('Error during shutdown:', error); // Use console.error if logger is closed
-    process.exit(1);
-  }
-};
-
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
 
 /* eof */

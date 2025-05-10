@@ -16,17 +16,6 @@ import { Socket } from 'net';
 jest.mock('../src/modules/file-hosting/fileHostingService');
 jest.mock('../src/modules/file-hosting/fileHostingController');
 jest.mock('../src/entities/sendResponse');
-jest.mock('../src/utils/logger', () => ({
-  __esModule: true,
-  default: {
-    child: jest.fn().mockReturnValue({
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
-      debug: jest.fn(),
-    }),
-  },
-}));
 
 describe('File Streaming Stress Test (DEPRECATED)', () => {
   const dummyStream = () => {

@@ -49,7 +49,7 @@ export interface Formatter {
 export interface Transport {
   log(formattedMessage: string, entry: LogEntry): void;
   level?: string;
-  close?(): void;
+  close?(): Promise<void>;
   // Add formatter property to the interface for type safety
   formatter: Formatter;
 }
@@ -450,14 +450,14 @@ export class FileTransport implements Transport {
     });
   }
 
-  close(): void {
+  async close(): Promise<void> {
     // Skip closing if stream is undefined
     if (!this.stream) {
       return;
     }
 
     // Promisify stream end for cleaner shutdown
-    new Promise<void>((resolve) => {
+    await new Promise<void>((resolve) => {
       this.stream!.end(() => resolve());
     }).catch((err) => {
       console.error(`Error closing log stream ${this.filename}:`, err);
@@ -684,16 +684,14 @@ export class Logger {
   async close(): Promise<void> {
     // Use Promise.all to wait for all streams to close
     await Promise.all(
-      this.transports.map((transport) => {
+      this.transports.map(async (transport) => {
         if (typeof transport.close === 'function') {
           try {
-            return transport.close(); // Assuming close might return a promise or be synchronous
+            await transport.close(); // Assuming close might return a promise or be synchronous
           } catch (err) {
             console.error(`Error closing transport ${transport.constructor.name}:`, err);
-            return Promise.resolve(); // Resolve even if one fails to close others
           }
         }
-        return Promise.resolve();
       }),
     ).catch((err) => {
       console.error('Error during logger close:', err);

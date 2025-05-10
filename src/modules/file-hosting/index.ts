@@ -3,3 +3,4 @@ export * from './fileHostingController';
 export * from './fileHostingService';
 export * from './fileHostingStatsHelper';
 export * from './file-utils/FileFilter';
+export * from './file-utils/fileHostingLogger';
