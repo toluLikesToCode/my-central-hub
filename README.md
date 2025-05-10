@@ -23,20 +23,40 @@ My Central Hub is a robust, modular platform for managing and serving media file
 
 ```
 src/
-  config/           # Server and feature configuration
-  core/             # HTTP parser, router, server
-  entities/         # HTTP request/response types
+  config/             # Server and feature configuration
+  core/               # HTTP parser, router, server, middlewares
+  entities/           # HTTP request/response types, helpers
   modules/
-    app-metrics/    # Metrics endpoints (per-app)
-    file-hosting/   # File management (list, upload, download, delete)
-    file-streaming/ # Streaming controller (deprecated, see file-hosting)
-  routes/           # Route registration (RESTful API)
-  utils/            # Helpers, logger, mime types
-tests/              # Unit and integration tests
-stress/             # Stress tests
-public/             # Static/public files
-data/               # SQLite database (metrics)
+    app-metrics/      # Metrics endpoints (per-app)
+    embeddings/       # Embedding logic and API integration
+    file-hosting/     # File management (list, upload, download, delete)
+    file-streaming/   # Streaming controller (deprecated, see file-hosting)
+  routes/             # Route registration (RESTful API)
+    embeddings.routes.ts   # Embeddings API routes
+    file-hosting.routes.ts # File hosting API routes
+    files.routes.ts        # File listing/filtering API (deprecated, see file-hosting)
+    metrics.routes.ts      # Metrics API routes
+    stream.routes.ts       # Streaming API routes
+    index.ts               # Route aggregator
+  utils/              # Helpers, logger, mime types, date formatting
+services/
+  embedding-service/  # Python FastAPI CLIP embedding microservice
+schemas/              # JSON schema definitions for validation
+public/
+  media/              # Uploaded media files (images, videos, gifs, audio, etc.)
+data/                 # SQLite databases (metrics, file stats, etc.)
+stress/               # Stress tests
+logs/                 # Application and service logs
+build-logs/           # Build and deployment logs
+tests/                # Unit, integration, and end-to-end tests
 ```
+
+- Deprecated modules are marked as such. See `modules/file-streaming/`.
+- Embedding microservice is in `services/embedding-service/` (Python).
+- All API routes are in `src/routes/`.
+- Media files are stored in `public/media/`.
+- Database files are in `data/`.
+- JSON schemas for validation are in `schemas/`.
 
 ## Embedding Microservice (CLIP)
 
