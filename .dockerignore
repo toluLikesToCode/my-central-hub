@@ -9,52 +9,64 @@ __pycache__/
 *.ipynb
 
 
-# # Ignore logs
-# logs
-# *.log
+# Ignore logs
+logs
+*.log
 
-# # Ignore build artifacts
-# dist
+# Ignore build artifacts
+dist
 
-# # Ignore environment files
-# .env
+# Ignore environment files
+.env*
 
-# # Ignore other unnecessary files
-# Dockerfile
-# .dockerignore
-
-
-# # .dockerignore
-
-# # Ignore Git directory
-# .git
-# .gitignore
-
-# # Ignore Node dependencies (they are installed inside the container)
-# node_modules
-
-# # Ignore build output (it's generated inside the container)
-# dist
-# build
-
-# # Ignore Docker files
-# Dockerfile
-# .dockerignore
-
-# # Ignore environment files (these are passed during runtime)
-# .env*
-
-# # Ignore log files and directories
-# *.log
-# logs/
-
-# # Ignore OS-specific files
-# .DS_Store
-# Thumbs.db
-
-# #Ignore local data/media if they exist in the repo structure (use volumes instead)
-# media/
-# data/
-# # (Uncomment if these contain large files you don't want in the image)
+# Ignore other unnecessary files
+Dockerfile
+.dockerignore
 
 
+# Ignore Git directory
+.git
+.gitignore
+
+# Ignore Node dependencies (they are installed inside the container)
+node_modules
+
+# Ignore build output (it's generated inside the container)
+dist
+build
+
+# Ignore coverage reports
+coverage/
+# Ignore test files
+tests/
+stress/
+
+#ignore scripts
+request.sh
+run_embedding_service_and_test.sh
+compress-central-hub.sh
+
+#ignore markdown files
+*.md
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+#Ignore local data/media if they exist in the repo structure (use volumes instead)
+media/
+data/
+# (Uncomment if these contain large files you don't want in the image)
+
+
+# Misc
+my-central-hub.xml
+.husky/
+
+# Ignore mocks
+__mocks__/
+src/utils/__mocks__/
+
+#ignore python files
+python/
+.venv/
