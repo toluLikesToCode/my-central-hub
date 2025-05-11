@@ -564,8 +564,6 @@ export class FileHostingStatsHelper {
     }
   }
 
-  // Method to be replaced in your FileHostingStatsHelper.ts class
-
   /**
    * Query file statistics with optional filtering, sorting, and pagination.
    * This method applies simple filters at the database level.
@@ -733,6 +731,85 @@ export class FileHostingStatsHelper {
         params: finalParams,
       });
       throw error; // Re-throw the error to be handled by the controller
+    }
+  }
+
+  /**
+   * Count file statistics with optional filtering (mirrors queryFileStats filters).
+   * Returns the total number of files matching the filters (ignores pagination).
+   */
+  async countFileStats(
+    options: {
+      mimeType?: string;
+      minSize?: number;
+      maxSize?: number;
+      hasAudio?: boolean;
+      hasVideo?: boolean;
+      minWidth?: number;
+      minHeight?: number;
+      minDuration?: number;
+    } = {},
+  ): Promise<number> {
+    if (!this.initialized || !this.db) {
+      await this.initialize();
+      if (!this.db) throw new Error('Database initialization failed or not complete.');
+    }
+
+    const params: any[] = [];
+    const conditions: string[] = [];
+
+    if (options.mimeType) {
+      if (options.mimeType.endsWith('/')) {
+        conditions.push('mime_type LIKE ?');
+        params.push(`${options.mimeType}%`);
+      } else if (options.mimeType.includes('/')) {
+        conditions.push('mime_type = ?');
+        params.push(options.mimeType);
+      } else {
+        conditions.push('mime_type LIKE ?');
+        params.push(`${options.mimeType}/%`);
+      }
+    }
+    if (options.minSize !== undefined) {
+      conditions.push('size >= ?');
+      params.push(options.minSize);
+    }
+    if (options.maxSize !== undefined && options.maxSize > 0) {
+      conditions.push('size <= ?');
+      params.push(options.maxSize);
+    }
+    if (options.hasAudio) {
+      conditions.push('audio_channels IS NOT NULL AND audio_channels > 0');
+    }
+    if (options.hasVideo) {
+      conditions.push('(width IS NOT NULL AND width > 0) AND (height IS NOT NULL AND height > 0)');
+    }
+    if (options.minWidth !== undefined) {
+      conditions.push('width >= ?');
+      params.push(options.minWidth);
+    }
+    if (options.minHeight !== undefined) {
+      conditions.push('height >= ?');
+      params.push(options.minHeight);
+    }
+    if (options.minDuration !== undefined) {
+      conditions.push('duration >= ?');
+      params.push(options.minDuration);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const sql = `SELECT COUNT(*) as count FROM file_stats ${whereClause}`;
+
+    try {
+      const row = await this.db.get<{ count: number }>(sql, params);
+      return row?.count ?? 0;
+    } catch (error) {
+      statsLogger.error('Failed to count file stats', {
+        error: (error as Error).message,
+        sql,
+        params,
+      });
+      throw error;
     }
   }
 

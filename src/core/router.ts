@@ -235,6 +235,13 @@ class Router {
   }
 
   /**
+   * Register a HEAD route
+   */
+  head(path: string, h: Handler) {
+    return this.add('HEAD', path, h);
+  }
+
+  /**
    * Register a route that handles any HTTP method
    */
   any(path: string, h: Handler) {
@@ -298,9 +305,9 @@ class Router {
         reqLogger.debug('Handling OPTIONS request');
         const headers = {
           'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, HEAD',
           'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-          Allow: 'GET, POST, PUT, DELETE, OPTIONS',
+          Allow: 'GET, POST, PUT, DELETE, OPTIONS, HEAD',
           'Content-Type': 'text/plain',
         };
 
@@ -428,6 +435,11 @@ class Router {
           } else {
             sendResponse(sock, status, { 'Content-Type': 'text/plain' }, '500 Server Error');
           }
+
+          // waif for socket to finish before logging
+          await new Promise((resolve) => {
+            sock.on('finish', resolve);
+          });
 
           logRequestCompletion(reqLogger, startTime, status);
         }

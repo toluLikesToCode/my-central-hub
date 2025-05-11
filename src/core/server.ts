@@ -296,7 +296,7 @@ export class HttpServer {
         reject(err);
       });
       // Start listening
-      this.server.listen(this.port, '0.0.0.0');
+      this.server.listen(this.port, 'localhost');
       // Graceful shutdown hooks
       ['SIGINT', 'SIGTERM'].forEach((sig) =>
         process.on(sig as NodeJS.Signals, () => {

@@ -1,6 +1,7 @@
 import { IncomingRequest } from '../entities/http';
 import { URL } from 'url';
 import logger from '../utils/logger';
+import { config } from '../config/server.config';
 
 enum ParserState {
   REQUEST_LINE,
@@ -69,7 +70,7 @@ export class HttpRequestParser {
           this.method = method;
           this.httpVersion = version;
           try {
-            this.url = new URL(reqPath, 'http://coolcat.com');
+            this.url = new URL(reqPath, `http://${process.env.LOCAL_IP}:${config.port}`);
           } catch {
             this._setError('Malformed URL: ' + reqPath);
             continue;

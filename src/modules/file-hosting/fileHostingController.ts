@@ -6,7 +6,7 @@ import path from 'path';
 
 import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
-import { FileHostingService, FileInfo } from './fileHostingService';
+import { FileHostingService } from './fileHostingService';
 import {
   FileHostingStatsHelper,
   FileStats, // Assuming FileStats is exported
@@ -68,6 +68,7 @@ const utils = {
       { 'Content-Type': 'application/json', ...headers },
       JSON.stringify(data),
     );
+    log.debug('JSON response sent', { 'Content-Type': 'application/json', ...headers });
   },
 
   /** Plain‑text sender with a “close” connection header */
@@ -172,6 +173,8 @@ export const fileHostingController = {
           'Content-Length': String(statResult.size),
           'Accept-Ranges': 'bytes',
           'X-Content-Type-Options': 'nosniff',
+          'X-Frame-Options': 'DENY',
+          'Referrer-Policy': 'no-referrer',
           ...utils.buildCacheHeaders(statResult.size, statResult.mtime),
         };
 
@@ -220,6 +223,8 @@ export const fileHostingController = {
           'Content-Type': mime,
           'Accept-Ranges': 'bytes',
           'X-Content-Type-Options': 'nosniff',
+          'X-Frame-Options': 'DENY',
+          'Referrer-Policy': 'no-referrer',
           'Timing-Allow-Origin': '*',
           ...cacheHeaders,
         };
@@ -257,7 +262,6 @@ export const fileHostingController = {
         const p = utils.parseListParams(req);
         log.info('LIST params', { ...p, url: req.url });
 
-        // Determine if a complex filter is present that requires JS-side processing on a larger dataset
         const hasComplexFilter =
           p.filterOptions &&
           Object.keys(p.filterOptions).length > 0 &&
@@ -267,210 +271,210 @@ export const fileHostingController = {
             p.filterOptions.regex);
 
         const queryOptsForDB: Record<string, unknown> = {
-          // sortBy and sortOrder are for the DB query if it does the final sort
-          // If JS sorts later, DB sort is just for a consistent large batch
           sortBy: p.sort,
           sortOrder: p.order,
         };
 
-        // If complex JS filtering will be done, fetch a larger dataset without DB pagination
-        // but still try to pre-filter with simple conditions at DB level if possible.
+        let filesFromDB: FileStats[] = [];
+        let totalMatchingFiles = 0;
+
         if (hasComplexFilter) {
-          log.debug('Complex filter detected. Fetching larger dataset for JS filtering.', {
-            filterOptions: p.filterOptions,
-          });
+          // For complex filters, fetch a large batch, filter in JS, then paginate in JS
           queryOptsForDB.limit = MAX_RECORDS_FOR_JS_FILTERING;
-          queryOptsForDB.offset = 0; // Start from the beginning for JS filtering
-          // Pass simple top-level filters to queryFileStats if they exist
+          queryOptsForDB.offset = 0;
           if (p.filterType) queryOptsForDB.mimeType = p.filterType;
           if (p.sizeFrom) queryOptsForDB.minSize = p.sizeFrom;
           if (p.sizeTo) queryOptsForDB.maxSize = p.sizeTo;
-          // Note: queryFileStats currently does not use p.filterOptions directly for its SQL
-          // It only uses the explicit simple keys like mimeType, minSize.
-          // We are now relying on fetching a large batch and then using evaluateFilter in JS.
+
+          try {
+            filesFromDB = await stats.queryFileStats(queryOptsForDB);
+            // JS filtering
+            let jsFilteredResults = filesFromDB;
+            const searchTermLower = p.search?.toLowerCase();
+            if (searchTermLower) {
+              jsFilteredResults = jsFilteredResults.filter(
+                (f) =>
+                  f.fileName.toLowerCase().includes(searchTermLower) ||
+                  f.mimeType.toLowerCase().includes(searchTermLower),
+              );
+            }
+            if (p.dateFrom || p.dateTo) {
+              const from = p.dateFrom ? new Date(p.dateFrom) : new Date(0);
+              const to = p.dateTo ? new Date(p.dateTo) : new Date(Date.now() + 8640000000);
+              jsFilteredResults = jsFilteredResults.filter((f) => {
+                const lm =
+                  f.lastModified instanceof Date ? f.lastModified : new Date(f.lastModified);
+                return lm >= from && lm <= to;
+              });
+            }
+            if (p.filterOptions && Object.keys(p.filterOptions).length > 0) {
+              jsFilteredResults = jsFilteredResults.filter((f) =>
+                evaluateFilter(f, p.filterOptions as FileFilter),
+              );
+            }
+            // Sort
+            type SortableFileStatsKey = keyof Pick<
+              FileStats,
+              | 'fileName'
+              | 'filePath'
+              | 'mimeType'
+              | 'size'
+              | 'lastModified'
+              | 'createdAt'
+              | 'updatedAt'
+            >;
+            const sortKey: SortableFileStatsKey = (
+              [
+                'fileName',
+                'filePath',
+                'mimeType',
+                'size',
+                'lastModified',
+                'createdAt',
+                'updatedAt',
+              ].includes(p.sort)
+                ? p.sort
+                : 'fileName'
+            ) as SortableFileStatsKey;
+            jsFilteredResults.sort((a, b) => {
+              const valA = a[sortKey];
+              const valB = b[sortKey];
+              let comparison = 0;
+              if (typeof valA === 'string' && typeof valB === 'string') {
+                comparison = valA.localeCompare(valB);
+              } else if (valA instanceof Date && valB instanceof Date) {
+                comparison = valA.getTime() - valB.getTime();
+              } else if (typeof valA === 'number' && typeof valB === 'number') {
+                comparison = valA - valB;
+              } else {
+                comparison = String(valA ?? '').localeCompare(String(valB ?? ''));
+              }
+              return p.order === 'desc' ? -comparison : comparison;
+            });
+            totalMatchingFiles = jsFilteredResults.length;
+            const totalPages = Math.ceil(totalMatchingFiles / p.limit);
+            const startIndex = (p.page - 1) * p.limit;
+            const endIndex = startIndex + p.limit;
+            const pageDataArray = jsFilteredResults.slice(startIndex, endIndex);
+            const pageData = pageDataArray.map((f) => ({
+              name: f.fileName,
+              path: f.filePath,
+              size: f.size,
+              mimeType: f.mimeType,
+              lastModified: formatDate(f.lastModified),
+              width: f.width || 'N/A',
+              height: f.height || 'N/A',
+              url: `/api/files/${encodeURIComponent(f.filePath)}`,
+            }));
+            const hasNextPage = p.page < totalPages;
+            const urlObj = new URL(req.url);
+            urlObj.searchParams.set('page', String(p.page + 1));
+            const nextLink = hasNextPage ? urlObj.toString() : null;
+            urlObj.searchParams.set('page', String(p.page - 1));
+            const prevLink = p.page > 1 ? urlObj.toString() : null;
+            const headers: Record<string, string> = {
+              'X-Content-Type-Options': 'nosniff',
+              'X-Frame-Options': 'DENY',
+              'Referrer-Policy': 'no-referrer',
+            };
+            utils.json(
+              sock,
+              200,
+              {
+                files: pageData,
+                pagination: {
+                  page: p.page,
+                  limit: p.limit,
+                  totalFiles: totalMatchingFiles,
+                  totalPages,
+                  hasNextPage,
+                  hasPrevPage: p.page > 1,
+                },
+                _links: {
+                  self: req.url,
+                  next: nextLink,
+                  prev: prevLink,
+                },
+              },
+              headers,
+            );
+            return;
+          } catch (dbError) {
+            log.error('Failed to query file stats from DB', {
+              error: (dbError as Error).message,
+              queryOptsForDB,
+            });
+            utils.plain(sock, 500, 'Failed to list files');
+            return;
+          }
         } else {
-          // No complex filter, or simple filter that queryFileStats can handle.
-          // Fetch a limited set for the current page (e.g., p.limit * 2 as before).
-          // The `evaluateFilter` will still run, but on a smaller, pre-filtered (by DB) set.
-          queryOptsForDB.limit = p.limit * 2; // Fetch a bit more for potential filtering
+          // No complex filter: rely on DB for pagination and filtering
+          queryOptsForDB.limit = p.limit;
           queryOptsForDB.offset = (p.page - 1) * p.limit;
           if (p.filterType) queryOptsForDB.mimeType = p.filterType;
-          // Spread p.filterOptions if it contains simple key-value pairs queryFileStats might understand
-          // (e.g., if filter={"mimeType":"image/"} was passed instead of type=image/)
-          // However, the main `filterOptions` are for `evaluateFilter`.
-          if (p.filterOptions && Object.keys(p.filterOptions).length > 0 && !hasComplexFilter) {
-            // If filterOptions are simple (e.g. {mimeType: 'image/', minSize: 100}), spread them
-            // This relies on queryFileStats being able to pick up these simple top-level keys
+          if (p.filterOptions && Object.keys(p.filterOptions).length > 0) {
             Object.assign(queryOptsForDB, p.filterOptions);
           }
           if (p.sizeFrom) queryOptsForDB.minSize = p.sizeFrom;
           if (p.sizeTo) queryOptsForDB.maxSize = p.sizeTo;
-        }
-
-        let allPotentiallyMatchingFiles: FileStats[];
-        try {
-          allPotentiallyMatchingFiles = await stats.queryFileStats(queryOptsForDB);
-          log.debug('LIST raw data from DB', {
-            count: allPotentiallyMatchingFiles.length,
-            queryOptsForDB,
-          });
-        } catch (dbError) {
-          log.error('Failed to query file stats from DB', {
-            error: (dbError as Error).message,
-            queryOptsForDB,
-          });
-          allPotentiallyMatchingFiles = []; // Proceed with empty if DB fails
-        }
-
-        if (allPotentiallyMatchingFiles.length === 0 && !hasComplexFilter && !p.filterType) {
-          // Fallback to filesystem list if DB is empty AND no significant filters were applied that might explain empty results
-          log.info(
-            'DB returned no results and no major filters applied, attempting filesystem fallback.',
-          );
-          const fsList = await fileSvc.listFiles('.', false); // Non-recursive for root, adjust if needed
-          allPotentiallyMatchingFiles = (fsList as FileInfo[])
-            .filter((f) => !f.isDirectory)
-            .map((f) => ({
-              // Map to FileStats structure
-              fileName: f.name,
-              filePath: f.path,
-              size: f.size ?? 0,
-              mimeType: getMimeType(f.name) || 'application/octet-stream',
-              lastModified: f.mtime ?? new Date(),
-              createdAt: f.mtime ?? new Date(), // Approx
-              updatedAt: f.mtime ?? new Date(), // Approx
-              // width, height, duration etc. would be undefined from basic FS listing
+          try {
+            [filesFromDB, totalMatchingFiles] = await Promise.all([
+              stats.queryFileStats(queryOptsForDB),
+              stats.countFileStats(queryOptsForDB),
+            ]);
+            const totalPages = Math.ceil(totalMatchingFiles / p.limit);
+            const pageData = filesFromDB.map((f) => ({
+              name: f.fileName,
+              path: f.filePath,
+              size: f.size,
+              mimeType: f.mimeType,
+              lastModified: formatDate(f.lastModified),
+              width: f.width || 'N/A',
+              height: f.height || 'N/A',
+              url: `/api/files/${encodeURIComponent(f.filePath)}`,
             }));
-          log.debug('Filesystem fallback data', { count: allPotentiallyMatchingFiles.length });
-        }
-
-        log.info('RAW FILES passed to JS filtering', {
-          count: allPotentiallyMatchingFiles.length,
-          firstFew: allPotentiallyMatchingFiles
-            .slice(0, 3)
-            .map((f) => ({ fN: f.fileName, mT: f.mimeType })),
-        });
-
-        let jsFilteredResults = allPotentiallyMatchingFiles;
-
-        // Apply simple text search (if any)
-        const searchTermLower = p.search?.toLowerCase();
-        if (searchTermLower) {
-          jsFilteredResults = jsFilteredResults.filter(
-            (f) =>
-              f.fileName.toLowerCase().includes(searchTermLower) ||
-              f.mimeType.toLowerCase().includes(searchTermLower),
-          );
-        }
-
-        // Apply date range filtering (if any)
-        if (p.dateFrom || p.dateTo) {
-          const from = p.dateFrom ? new Date(p.dateFrom) : new Date(0); // начало времен
-          const to = p.dateTo ? new Date(p.dateTo) : new Date(Date.now() + 8640000000); // Далекое будущее
-          jsFilteredResults = jsFilteredResults.filter((f) => {
-            const lm = f.lastModified instanceof Date ? f.lastModified : new Date(f.lastModified);
-            return lm >= from && lm <= to;
-          });
-        }
-
-        // Apply complex filter options using evaluateFilter
-        if (p.filterOptions && Object.keys(p.filterOptions).length > 0) {
-          const initialCount = jsFilteredResults.length;
-          jsFilteredResults = jsFilteredResults.filter((f) =>
-            evaluateFilter(f, p.filterOptions as FileFilter),
-          );
-          log.debug('JS filtering applied', {
-            initialCount,
-            finalCount: jsFilteredResults.length,
-            filter: p.filterOptions,
-          });
-        }
-        log.info('FILTERED FILES after JS evaluateFilter', {
-          count: jsFilteredResults.length,
-          firstFew: jsFilteredResults.slice(0, 3).map((f) => ({ fN: f.fileName, mT: f.mimeType })),
-        });
-        // Define allowed sort keys and their types for FileStats
-        type SortableFileStatsKey = keyof Pick<
-          FileStats,
-          'fileName' | 'filePath' | 'mimeType' | 'size' | 'lastModified' | 'createdAt' | 'updatedAt'
-        >;
-
-        // Ensure the sort key is valid, fallback to 'fileName' if not
-        const sortKey: SortableFileStatsKey = (
-          [
-            'fileName',
-            'filePath',
-            'mimeType',
-            'size',
-            'lastModified',
-            'createdAt',
-            'updatedAt',
-          ].includes(p.sort)
-            ? p.sort
-            : 'fileName'
-        ) as SortableFileStatsKey;
-
-        // Sort the JS-filtered results using type-safe access
-        jsFilteredResults.sort((a, b) => {
-          const valA = a[sortKey];
-          const valB = b[sortKey];
-
-          let comparison = 0;
-          if (typeof valA === 'string' && typeof valB === 'string') {
-            comparison = valA.localeCompare(valB);
-          } else if (valA instanceof Date && valB instanceof Date) {
-            comparison = valA.getTime() - valB.getTime();
-          } else if (typeof valA === 'number' && typeof valB === 'number') {
-            comparison = valA - valB;
-          } else {
-            // Fallback for undefined or mismatched types
-            comparison = String(valA ?? '').localeCompare(String(valB ?? ''));
+            const hasNextPage = p.page < totalPages;
+            const urlObj = new URL(req.url);
+            urlObj.searchParams.set('page', String(p.page + 1));
+            const nextLink = hasNextPage ? urlObj.toString() : null;
+            urlObj.searchParams.set('page', String(p.page - 1));
+            const prevLink = p.page > 1 ? urlObj.toString() : null;
+            const headers: Record<string, string> = {
+              'X-Content-Type-Options': 'nosniff',
+              'X-Frame-Options': 'DENY',
+              'Referrer-Policy': 'no-referrer',
+            };
+            utils.json(
+              sock,
+              200,
+              {
+                files: pageData,
+                pagination: {
+                  page: p.page,
+                  limit: p.limit,
+                  totalFiles: totalMatchingFiles,
+                  totalPages,
+                  hasNextPage,
+                  hasPrevPage: p.page > 1,
+                },
+                _links: {
+                  self: req.url,
+                  next: nextLink,
+                  prev: prevLink,
+                },
+              },
+              headers,
+            );
+            return;
+          } catch (dbError) {
+            log.error('Failed to query file stats from DB', {
+              error: (dbError as Error).message,
+              queryOptsForDB,
+            });
+            utils.plain(sock, 500, 'Failed to list files');
+            return;
           }
-          return p.order === 'desc' ? -comparison : comparison;
-        });
-
-        // Paginate the JS-filtered and sorted results
-        const totalFilteredFiles = jsFilteredResults.length;
-        const totalPages = Math.ceil(totalFilteredFiles / p.limit);
-        const startIndex = (p.page - 1) * p.limit;
-        const endIndex = startIndex + p.limit;
-        const pageDataArray = jsFilteredResults.slice(startIndex, endIndex);
-
-        const pageData = pageDataArray.map((f) => ({
-          name: f.fileName,
-          path: f.filePath,
-          size: f.size,
-          mimeType: f.mimeType,
-          lastModified: formatDate(f.lastModified),
-          url: `/api/files/${encodeURIComponent(f.filePath)}`, // Ensure filePath is valid for URL
-        }));
-
-        const hasNextPage = p.page < totalPages;
-        const urlObj = new URL(req.url); // Use full req.url
-        urlObj.searchParams.set('page', String(p.page + 1));
-        // Preserve other query params for next/prev links
-        // No need to set limit, sort, order again if they are already in urlObj.searchParams
-
-        const nextLink = hasNextPage ? urlObj.toString() : null; // Use full URL for link
-        urlObj.searchParams.set('page', String(p.page - 1));
-        const prevLink = p.page > 1 ? urlObj.toString() : null;
-
-        utils.json(sock, 200, {
-          files: pageData,
-          pagination: {
-            page: p.page,
-            limit: p.limit,
-            totalFiles: totalFilteredFiles,
-            totalPages,
-            hasNextPage,
-            hasPrevPage: p.page > 1,
-          },
-          _links: {
-            self: req.url, // Current request URL
-            next: nextLink,
-            prev: prevLink,
-          },
-        });
+        }
       })
       .catch((err) => {
         log.error('LIST files failed', {

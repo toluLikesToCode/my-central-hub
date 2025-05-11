@@ -721,36 +721,13 @@ if (config.features.fileHosting) {
     }
   });
 
-  // Get a specific file - Extract filename from path
-  router.get('/api/files/:filename', (req, sock) => {
+  // Get a specific file or file metadata (GET or HEAD)
+  router.any('/api/files/:filename', (req: IncomingRequest, sock: Socket) => {
     // Extract filename from URL path using regex instead of req.params
-    const pathMatch = req.path.match(/\/api\/files\/([^/]+)$/);
-    const filename = pathMatch ? pathMatch[1] : '';
-
-    routeLogger.debug('File retrieval request received (path parameter)', {
-      filename,
-      remoteAddress: sock.remoteAddress,
-      timestamp: formatDate(new Date()),
-      headers: req.headers,
-    });
-
-    // Add filename as query parameter for controller compatibility
-    req.query = req.query || {};
-    req.query.file = filename;
-
-    fileHostingController.getFile(req, sock);
-  });
-
-  // Handle HEAD requests for file metadata
-  router.get('/api/files/:filename', (req: IncomingRequest, sock: Socket) => {
-    // Only handle HEAD requests in this handler
-    if (req.method !== 'HEAD') return;
-
-    // Extract filename from URL path
     const pathMatch = req.path.match(/\/api\/files\/([^/]+)$/);
     const filename = pathMatch ? decodeURIComponent(pathMatch[1]) : '';
 
-    routeLogger.debug('HEAD request received for file metadata', {
+    routeLogger.debug(`${req.method} request received for file`, {
       filename,
       remoteAddress: sock.remoteAddress,
       timestamp: formatDate(new Date()),
@@ -761,7 +738,27 @@ if (config.features.fileHosting) {
     req.query = req.query || {};
     req.query.file = filename;
 
-    fileHostingController.headFile(req, sock);
+    if (req.method === 'HEAD') {
+      fileHostingController.headFile(req, sock);
+    } else if (req.method === 'GET') {
+      fileHostingController.getFile(req, sock);
+    } else {
+      // Respond with 405 Method Not Allowed for other methods
+      sendResponse(
+        sock,
+        405,
+        {
+          'Content-Type': 'application/json',
+          Allow: 'GET, HEAD, DELETE',
+        },
+        JSON.stringify({
+          success: false,
+          message: 'Method not allowed',
+          allowedMethods: 'GET, HEAD, DELETE',
+          requestedMethod: req.method,
+        }),
+      );
+    }
   });
 
   // Delete a specific file - Extract filename from path
