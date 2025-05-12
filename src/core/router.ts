@@ -274,7 +274,7 @@ class Router {
       path: req.path,
       ip: sock.remoteAddress, // Get remote address from Socket instead of req
       headers: req.headers,
-      body: req.body,
+      body: req.body?.byteLength || 0,
       ctx: req.ctx,
     });
 

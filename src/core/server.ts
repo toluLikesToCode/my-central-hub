@@ -45,8 +45,7 @@ export class HttpServer {
 
       // Set socket timeout if available
       if (typeof socket.setTimeout === 'function') {
-        // Increase timeout from 30 seconds to 2 minutes for long-running operations
-        socket.setTimeout(120000);
+        socket.setTimeout(120000); // Default 2 min
       }
 
       const refreshTimeout = () => {
@@ -135,37 +134,64 @@ export class HttpServer {
             req.headers['connection'] = 'keep-alive';
           }
 
-          const isKeepAlive = req.headers['connection'].toLowerCase() !== 'close';
+          // --- PATCH: Disable socket timeout for embeddings POST requests ---
+          if (
+            req.method === 'POST' &&
+            req.path &&
+            req.path.startsWith('/api/embeddings') &&
+            typeof socket.setTimeout === 'function'
+          ) {
+            socket.setTimeout(0); // Disable socket timeout for this socket
+          }
 
           // Handle all pipelined requests in buffer
           do {
-            // If this is a body-bearing method, start body timeout
-            if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+            // Ignore invalid requests (invalid: true)
+            if (req.invalid) {
+              req = parser.feed(Buffer.alloc(0));
+              continue;
+            }
+
+            const isKeepAlive = req.headers['connection'].toLowerCase() !== 'close';
+
+            // PATCH: Detect embeddings POST and skip body timeout
+            const isEmbeddingsRequest =
+              req.method === 'POST' && req.path && req.path.startsWith('/api/embeddings');
+
+            if (
+              (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') &&
+              !isEmbeddingsRequest
+            ) {
               refreshBodyTimeout();
+            } else if (isEmbeddingsRequest) {
+              // For embeddings, clear any body timeout so the socket stays open
+              if (bodyTimer) clearTimeout(bodyTimer);
             }
 
             await this.router.handle(req, socket);
             clearTimeout(bodyTimer);
 
-            // now pull the next request from any leftover bytes
             req = parser.feed(Buffer.alloc(0));
+
+            if (!isKeepAlive) {
+              if (!socket.destroyed) {
+                if (process.env.NODE_ENV === 'test') {
+                  socket.end();
+                } else {
+                  setTimeout(() => {
+                    if (!socket.destroyed) socket.end();
+                  }, 10);
+                }
+              }
+              break;
+            }
           } while (req);
 
           const pending = parser.getPendingBytes();
 
           if (pending > 0) {
-            // more pipelined data waiting—keep alive
             refreshTimeout();
-          } else if (!isKeepAlive) {
-            // If Connection: close was specified, end the socket
-            if (!socket.destroyed) {
-              // Give a small delay to ensure all data is flushed
-              setTimeout(() => {
-                if (!socket.destroyed) socket.end();
-              }, 10);
-            }
           } else {
-            // Keep-alive: reset timeout for next request
             refreshTimeout();
           }
         } catch (err) {
@@ -296,7 +322,7 @@ export class HttpServer {
         reject(err);
       });
       // Start listening
-      this.server.listen(this.port, 'localhost');
+      this.server.listen(this.port);
       // Graceful shutdown hooks
       ['SIGINT', 'SIGTERM'].forEach((sig) =>
         process.on(sig as NodeJS.Signals, () => {

@@ -19,6 +19,8 @@ import { promisify } from 'util';
 import imageSize from 'image-size';
 import { createReadStream } from 'fs'; // Use streams for raw byte upload
 const execFileAsync = promisify(execFile);
+import { FileHostingStatsHelper } from '../file-hosting';
+import { getMimeType } from '../../utils/helpers';
 
 // Default retry configuration
 const DEFAULT_RETRY_COUNT = 3;
@@ -26,7 +28,7 @@ const DEFAULT_RETRY_DELAY_MS = 1000;
 
 // Timeout configuration
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes default
-const HEALTH_CHECK_TIMEOUT_MS = 5 * 1000; // 10 seconds for health checks
+const HEALTH_CHECK_TIMEOUT_MS = 30 * 1000; // 30 seconds for health checks
 const MIN_TIMEOUT_MS = 30 * 1000; // 30 seconds minimum timeout
 const MAX_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes maximum timeout
 const VIDEO_TIMEOUT_MULTIPLIER = 4; // Videos get 4x the timeout of images
@@ -146,6 +148,17 @@ try {
   // Create a dummy validator that always returns true if schema compilation fails
   // This is a fallback to allow the system to function even with schema issues
   validateClipCacheEntry = (() => true) as unknown as ValidateFunction<ClipCacheEntry>;
+}
+
+// Singleton instance for FileHostingStatsHelper
+let fileStatsHelper: FileHostingStatsHelper | null = null;
+async function getFileStatsHelper(): Promise<FileHostingStatsHelper> {
+  if (!fileStatsHelper) {
+    const dbPath = path.join(process.cwd(), 'data', 'file_stats.db');
+    fileStatsHelper = new FileHostingStatsHelper(dbPath);
+    await fileStatsHelper.initialize();
+  }
+  return fileStatsHelper;
 }
 
 /**
@@ -400,7 +413,7 @@ export class EmbeddingHttpClient {
         );
 
         // Get file metadata
-        const metadata = await this.getFileMetadata(filePath);
+        const metadata = await this.getFileMetadata(filePath, true);
 
         // Calculate appropriate timeout based on file metadata
         const calculatedTimeout = this.calculateTimeout({
@@ -654,16 +667,7 @@ export class EmbeddingHttpClient {
 
         // Determine MIME type from metadata.filename or path
         const fileExtension = path.extname(metadata?.filename || filePath).toLowerCase();
-        let contentType = 'application/octet-stream';
-        if (metadata?.mediaType === 'image') {
-          if (['.jpg', '.jpeg'].includes(fileExtension)) contentType = 'image/jpeg';
-          else if (fileExtension === '.png') contentType = 'image/png';
-          else if (fileExtension === '.webp') contentType = 'image/webp';
-        } else if (metadata?.mediaType === 'video') {
-          if (fileExtension === '.mp4') contentType = 'video/mp4';
-          else if (fileExtension === '.webm') contentType = 'video/webm';
-          else if (fileExtension === '.mov') contentType = 'video/quicktime';
-        }
+        const contentType = getMimeType(metadata?.filename || filePath);
 
         // sanitize filename for HTTP header
         const rawFilename = metadata?.filename || path.basename(filePath);
@@ -703,7 +707,48 @@ export class EmbeddingHttpClient {
         return response.data;
       } catch (error: any) {
         lastError = error;
-        // ...existing retry and error handling...
+        if (attempt <= this.maxRetries) {
+          embeddingsLogger.warn(
+            EmbeddingComponent.SERVICE,
+            `Attempt ${attempt} failed for ${filePath}: ${error.message}`,
+            requestId,
+            {
+              filePath,
+              error: error.message,
+              attempt,
+              timeout: currentTimeout,
+            },
+          );
+        } else {
+          embeddingsLogger.error(
+            EmbeddingComponent.SERVICE,
+            `All attempts failed for ${filePath}: ${error.message}`,
+            requestId,
+            {
+              filePath,
+              error: error.message,
+              attempt,
+              timeout: currentTimeout,
+            },
+          );
+        }
+        // If it's a network error, we might want to retry
+        if (error.code && ['ECONNABORTED', 'ECONNREFUSED'].includes(error.code)) {
+          // Retry logic for network errors
+          continue;
+        }
+        // If it's a service error, we might not want to retry
+        if (error.response && error.response.status >= 400 && error.response.status < 500) {
+          // Don't retry on client errors (4xx)
+          break;
+        }
+        // If it's a server error (5xx), we might want to retry
+        if (error.response && error.response.status >= 500) {
+          // Retry on server errors (5xx)
+          continue;
+        }
+        // For any other error, we won't retry
+        break;
       }
     }
 
@@ -718,31 +763,63 @@ export class EmbeddingHttpClient {
   /**
    * Extract metadata from a file
    * @param filePath Path to the file
+   * @param useStatsHelper Whether to use the stats helper for metadata extraction
    * @returns File metadata
    */
-  private async getFileMetadata(filePath: string): Promise<{
+  private async getFileMetadata(
+    filePath: string,
+    useStatsHelper: boolean,
+  ): Promise<{
     mtime: number;
     fileSize: number;
     dimensions: { width: number; height: number };
     duration: number | null;
     mediaType: 'image' | 'video';
-    filename: string; // Add filename
+    filename: string;
   }> {
+    if (useStatsHelper) {
+      try {
+        const statsHelper = await getFileStatsHelper();
+        // Use mediaDir as basePath for relative path calculation
+        const mediaDir = config.mediaDir || path.join(process.cwd(), 'public', 'media');
+        const relPath = path.relative(mediaDir, filePath);
+        const fileStats = await statsHelper.getStatsByPath(relPath);
+        if (fileStats) {
+          // Map FileStats to the expected return type
+          return {
+            mtime:
+              fileStats.lastModified instanceof Date
+                ? fileStats.lastModified.getTime()
+                : new Date(fileStats.lastModified).getTime(),
+            fileSize: fileStats.size,
+            dimensions: {
+              width: fileStats.width || 1,
+              height: fileStats.height || 1,
+            },
+            duration: typeof fileStats.duration === 'number' ? fileStats.duration : null,
+            mediaType: fileStats.mimeType.startsWith('video/') ? 'video' : 'image',
+            filename: fileStats.fileName,
+          };
+        }
+      } catch (err) {
+        embeddingsLogger.warn(
+          EmbeddingComponent.SERVICE,
+          `StatsHelper DB lookup failed for ${filePath}: ${(err as Error).message}`,
+          undefined,
+          { filePath, error: err },
+        );
+        // Fallback to original logic
+      }
+    }
+    // Fallback to original implementation if not found in DB or not using stats helper
     try {
-      // Get file stats
       const stats = await fs.stat(filePath);
-
-      // Determine media type based on extension
       const ext = path.extname(filePath).toLowerCase();
       const mediaType = ['.mp4', '.mov', '.webm', '.avi', '.mkv', '.wmv', '.m4v'].includes(ext)
         ? 'video'
         : 'image';
-
-      // Default values for dimensions
       const dimensions = { width: 1, height: 1 };
       let duration: number | null = null;
-
-      // For videos, use ffprobe to get accurate duration and dimensions
       if (mediaType === 'video') {
         try {
           // Use ffprobe to get video metadata
@@ -816,7 +893,7 @@ export class EmbeddingHttpClient {
         dimensions,
         duration,
         mediaType,
-        filename: path.basename(filePath), // Add filename
+        filename: path.basename(filePath),
       };
     } catch (error: any) {
       embeddingsLogger.warn(

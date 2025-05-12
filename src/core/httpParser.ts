@@ -70,7 +70,10 @@ export class HttpRequestParser {
           this.method = method;
           this.httpVersion = version;
           try {
-            this.url = new URL(reqPath, `http://${process.env.LOCAL_IP}:${config.port}`);
+            // Use defaults for LOCAL_IP and config.port if not set (for test environments)
+            const localIp = process.env.LOCAL_IP || 'localhost';
+            const port = config.port || 3000;
+            this.url = new URL(reqPath, `http://${localIp}:${port}`);
           } catch {
             this._setError('Malformed URL: ' + reqPath);
             continue;
@@ -271,6 +274,7 @@ export class HttpRequestParser {
           };
           this.reset();
           this.buffer = leftover; // restore leftover for next request
+          this.state = ParserState.REQUEST_LINE; // ensure ready for next pipelined request
           return request;
         }
         // ERROR
