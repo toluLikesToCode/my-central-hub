@@ -26,7 +26,7 @@ import logger from '../utils/logger';
 import { formatDate } from '../utils/dateFormatter';
 import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
-import { sendResponse } from '../entities/sendResponse';
+import { sendWithContext } from '../entities/sendResponse';
 import { FileHostingService } from '../modules/file-hosting/fileHostingService';
 import path from 'path';
 
@@ -93,7 +93,7 @@ if (config.features.fileHosting) {
         headers: req.headers,
       });
 
-      sendResponse(sock, 403, { 'Content-Type': 'text/plain' }, 'Unauthorized access');
+      sendWithContext(req, sock, 403, { 'Content-Type': 'text/plain' }, 'Unauthorized access');
       return;
     }
 
@@ -101,7 +101,8 @@ if (config.features.fileHosting) {
 
     if (action === 'clear') {
       const result = fileSvc.clearCache();
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         200,
         { 'Content-Type': 'application/json' },
@@ -114,7 +115,8 @@ if (config.features.fileHosting) {
     } else {
       // Default: return cache stats
       const stats = fileSvc.getCacheStats();
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         200,
         { 'Content-Type': 'application/json' },
@@ -127,31 +129,45 @@ if (config.features.fileHosting) {
   });
 
   // List all files with pagination and filtering
-  router.get('/api/files', (req: IncomingRequest, sock: Socket) => {
-    // This is a file listing request
-    routeLogger.debug('List files request received', {
-      remoteAddress: sock.remoteAddress,
-      timestamp: formatDate(new Date()),
-      headers: req.headers,
-      query: req.query,
-    });
+  router.get('/api/files', async (req: IncomingRequest, sock: Socket) => {
+    const startTime = Date.now();
+    routeLogger.info('File listing request started with query params:', req.query);
+    try {
+      routeLogger.debug('List files request received', {
+        remoteAddress: sock.remoteAddress,
+        timestamp: formatDate(new Date()),
+        headers: req.headers,
+        query: req.query,
+      });
 
-    // Process pagination parameters
-    const page = parseInt(req.query?.page as string) || 1;
-    const limit = parseInt(req.query?.limit as string) || 20;
-    const sort = (req.query?.sort as string) || 'name';
-    const order = (req.query?.order as string) || 'asc';
+      // Process pagination parameters
+      const page = parseInt(req.query?.page as string) || 1;
+      const limit = parseInt(req.query?.limit as string) || 20;
+      const sort = (req.query?.sort as string) || 'name';
+      const order = (req.query?.order as string) || 'asc';
 
-    // Add pagination and sorting support to the request
-    req.query = {
-      ...req.query,
-      page: page.toString(),
-      limit: limit.toString(),
-      sort,
-      order,
-    };
+      routeLogger.debug('Pagination params', { limit, page, sort, order });
+      routeLogger.debug(`Starting file query at ${Date.now() - startTime}ms`);
 
-    fileHostingController.listFiles(req, sock);
+      // Attach updated pagination and sorting back to query
+      req.query = { ...req.query, page: page.toString(), limit: limit.toString(), sort, order };
+
+      // Invoke controller and await response handling
+      await fileHostingController.listFiles(req, sock);
+
+      routeLogger.info(`File listing completed in ${Date.now() - startTime}ms`);
+    } catch (error) {
+      routeLogger.error('Error processing file listing', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      sendWithContext(
+        req,
+        sock,
+        500,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({ error: 'Internal server error' }),
+      );
+    }
   });
 
   // Add new search endpoint with advanced filtering
@@ -197,7 +213,8 @@ if (config.features.fileHosting) {
         // Get aggregate statistics
         const stats = await statsHelper.getAggregateStats();
 
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           200,
           { 'Content-Type': 'application/json' },
@@ -214,7 +231,7 @@ if (config.features.fileHosting) {
             timestamp: formatDate(new Date()),
           });
 
-          sendResponse(sock, 403, { 'Content-Type': 'text/plain' }, 'Unauthorized access');
+          sendWithContext(req, sock, 403, { 'Content-Type': 'text/plain' }, 'Unauthorized access');
           return;
         }
 
@@ -237,7 +254,8 @@ if (config.features.fileHosting) {
         // Query file stats with filters
         const fileStats = await statsHelper.queryFileStats(queryOptions);
 
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           200,
           { 'Content-Type': 'application/json' },
@@ -256,7 +274,8 @@ if (config.features.fileHosting) {
         const fileStats = await statsHelper.getStatsByPath(filePath);
 
         if (fileStats) {
-          sendResponse(
+          sendWithContext(
+            req,
             sock,
             200,
             { 'Content-Type': 'application/json' },
@@ -266,7 +285,8 @@ if (config.features.fileHosting) {
             }),
           );
         } else {
-          sendResponse(
+          sendWithContext(
+            req,
             sock,
             404,
             { 'Content-Type': 'application/json' },
@@ -278,7 +298,8 @@ if (config.features.fileHosting) {
         }
       } else {
         // Invalid operation
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           400,
           { 'Content-Type': 'application/json' },
@@ -297,7 +318,8 @@ if (config.features.fileHosting) {
         stack: (err as Error).stack,
       });
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         500,
         { 'Content-Type': 'application/json' },
@@ -323,7 +345,8 @@ if (config.features.fileHosting) {
     });
 
     if (!filename) {
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         400,
         { 'Content-Type': 'application/json' },
@@ -352,7 +375,8 @@ if (config.features.fileHosting) {
         await fileSvc.stat(filename);
       } catch {
         // File doesn't exist
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           404,
           { 'Content-Type': 'application/json' },
@@ -385,7 +409,8 @@ if (config.features.fileHosting) {
             error: (statsErr as Error).message,
           });
 
-          sendResponse(
+          sendWithContext(
+            req,
             sock,
             500,
             { 'Content-Type': 'application/json' },
@@ -408,7 +433,8 @@ if (config.features.fileHosting) {
       };
 
       // Send the response
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         200,
         {
@@ -440,7 +466,8 @@ if (config.features.fileHosting) {
         stack: (err as Error).stack,
       });
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         500,
         { 'Content-Type': 'application/json' },
@@ -476,7 +503,8 @@ if (config.features.fileHosting) {
 
     // This will be implemented later
     // For now return a not implemented response
-    sendResponse(
+    sendWithContext(
+      req,
       sock,
       501,
       { 'Content-Type': 'application/json' },
@@ -509,7 +537,8 @@ if (config.features.fileHosting) {
       const { source, destination } = body;
 
       if (!source || !destination) {
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           400,
           { 'Content-Type': 'application/json' },
@@ -523,7 +552,8 @@ if (config.features.fileHosting) {
 
       await fileSvc.moveFile(source, destination);
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         200,
         { 'Content-Type': 'application/json' },
@@ -540,7 +570,8 @@ if (config.features.fileHosting) {
         stack: (err as Error).stack,
       });
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         500,
         { 'Content-Type': 'application/json' },
@@ -574,7 +605,8 @@ if (config.features.fileHosting) {
       const { path } = body;
 
       if (!path) {
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           400,
           { 'Content-Type': 'application/json' },
@@ -588,7 +620,8 @@ if (config.features.fileHosting) {
 
       await fileSvc.createDirectory(path);
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         201,
         { 'Content-Type': 'application/json' },
@@ -604,7 +637,8 @@ if (config.features.fileHosting) {
         stack: (err as Error).stack,
       });
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         500,
         { 'Content-Type': 'application/json' },
@@ -629,7 +663,8 @@ if (config.features.fileHosting) {
     });
 
     if (!folderPath) {
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         400,
         { 'Content-Type': 'application/json' },
@@ -645,7 +680,8 @@ if (config.features.fileHosting) {
       const recursive = req.query?.recursive === 'true';
       await fileSvc.deleteDirectory(folderPath, recursive);
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         200,
         { 'Content-Type': 'application/json' },
@@ -664,7 +700,8 @@ if (config.features.fileHosting) {
 
       const statusCode = (err as Error).message.includes('not empty') ? 400 : 500;
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         statusCode,
         { 'Content-Type': 'application/json' },
@@ -692,7 +729,8 @@ if (config.features.fileHosting) {
       const recursive = req.query?.recursive === 'true';
       const files = await fileSvc.listFiles(folderPath, recursive);
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         200,
         { 'Content-Type': 'application/json' },
@@ -709,7 +747,8 @@ if (config.features.fileHosting) {
         folderPath,
       });
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         500,
         { 'Content-Type': 'application/json' },
@@ -744,7 +783,8 @@ if (config.features.fileHosting) {
       fileHostingController.getFile(req, sock);
     } else {
       // Respond with 405 Method Not Allowed for other methods
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         405,
         {

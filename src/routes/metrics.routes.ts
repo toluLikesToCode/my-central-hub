@@ -13,7 +13,7 @@ import { Logger, FileTransport, ConsoleTransport, PrettyFormatter } from '../uti
 import { formatDate } from '../utils/dateFormatter';
 import path from 'path';
 import os from 'os';
-import { beginChunkedResponse, sendResponse } from '../entities/sendResponse';
+import { beginChunkedResponse, sendWithContext } from '../entities/sendResponse';
 
 // Create a specialized logger for metrics routes with request tracking
 const metricsRouteLogger = new Logger({
@@ -27,7 +27,7 @@ const metricsRouteLogger = new Logger({
     new ConsoleTransport({
       formatter: new PrettyFormatter({
         useColors: true,
-        useBoxes: true,
+        useBoxes: false,
         showTimestamp: true,
       }),
       level: 'info',
@@ -201,7 +201,8 @@ if (config.features.metrics) {
       // If we haven't written headers yet, send an error response
       if (!sock.writableEnded) {
         // Send error response with standard headers
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           500,
           {
@@ -255,7 +256,8 @@ if (config.features.metrics) {
         });
 
         // Use sendResponse utility for consistent error handling
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           400,
           {
@@ -338,7 +340,8 @@ if (config.features.metrics) {
           });
 
           // Use sendResponse utility for consistent response handling
-          sendResponse(
+          sendWithContext(
+            req,
             sock,
             200,
             {
@@ -369,7 +372,8 @@ if (config.features.metrics) {
 
         // Use sendResponse utility for consistent error handling
         if (!sock.writableEnded && !sock.destroyed) {
-          sendResponse(
+          sendWithContext(
+            req,
             sock,
             500,
             {

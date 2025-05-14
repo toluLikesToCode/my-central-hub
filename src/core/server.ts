@@ -1,4 +1,5 @@
-import { createServer, Socket } from 'net';
+import { createServer, Socket, Server } from 'net';
+import os from 'os';
 
 import { HttpRequestParser } from './httpParser';
 import router from './router';
@@ -13,6 +14,7 @@ export class HttpServer {
   private server = createServer();
   private readonly connections = new Set<Socket>();
   private readonly router;
+  private hostname: string = '0.0.0.0'; // Default to all interfaces
 
   constructor(
     private port: number,
@@ -35,17 +37,19 @@ export class HttpServer {
       // --- ⏰ Idle Timeout (Protection) ---
       const HEADER_TIMEOUT_MS = config.headerTimeoutMs;
       const BODY_TIMEOUT_MS = config.bodyTimeoutMs;
+      const UPLOAD_TIMEOUT_MS = config.uploadTimeoutMS;
       let headerTimer: NodeJS.Timeout | undefined;
       let bodyTimer: NodeJS.Timeout | undefined;
+      let uploadTimer: NodeJS.Timeout | undefined;
 
       // Set keep-alive if available (check for production vs test environment)
       if (typeof socket.setKeepAlive === 'function') {
-        socket.setKeepAlive(true, 60000);
+        socket.setKeepAlive(true);
       }
 
       // Set socket timeout if available
       if (typeof socket.setTimeout === 'function') {
-        socket.setTimeout(120000); // Default 2 min
+        socket.setTimeout(2 * 60 * 1000); // Default 2 min
       }
 
       const refreshTimeout = () => {
@@ -53,6 +57,8 @@ export class HttpServer {
         headerTimer = setTimeout(() => {
           logger.warn('Closing idle socket (header timeout)', {
             remoteAddress: socket.remoteAddress,
+            socketTimeoutS:
+              typeof socket.timeout === 'number' ? Math.floor(socket.timeout / 1000) : undefined,
           });
           // In tests, we need to call destroy to match test expectations
           // In production, end() is more graceful
@@ -69,6 +75,8 @@ export class HttpServer {
         bodyTimer = setTimeout(() => {
           logger.warn('Closing idle socket (body timeout)', {
             remoteAddress: socket.remoteAddress,
+            socketTimeoutS:
+              typeof socket.timeout === 'number' ? Math.floor(socket.timeout / 1000) : undefined,
           });
           // In tests, we need to call destroy to match test expectations
           // In production, end() is more graceful
@@ -78,6 +86,17 @@ export class HttpServer {
             socket.end();
           }
         }, BODY_TIMEOUT_MS);
+      };
+
+      const refreshUploadTimeout = () => {
+        if (uploadTimer) clearTimeout(uploadTimer);
+        uploadTimer = setTimeout(() => {
+          logger.warn('Closing idle socket (upload timeout)', {
+            remoteAdress: socket.remoteAddress,
+            socketTimeoutS:
+              typeof socket.timeout === 'number' ? Math.floor(socket.timeout / 1000) : undefined,
+          });
+        }, UPLOAD_TIMEOUT_MS);
       };
 
       refreshTimeout(); // start immediately
@@ -125,7 +144,14 @@ export class HttpServer {
         try {
           // First feed yields the first complete request (or null)
           let req = parser.feed(chunk);
-          if (!req) return; // need more bytes
+          if (!req) {
+            // We need more bytes, but set a timeout in case they come later
+            const pending = parser.getPendingBytes();
+            if (pending > 0) {
+              refreshTimeout(); // We have some data, but not a complete request yet
+            }
+            return;
+          }
 
           clearTimeout(headerTimer);
 
@@ -144,15 +170,24 @@ export class HttpServer {
             socket.setTimeout(0); // Disable socket timeout for this socket
           }
 
+          // Track number of processed requests for better debugging
+          let requestCount = 0;
+
           // Handle all pipelined requests in buffer
           do {
+            requestCount++;
+
             // Ignore invalid requests (invalid: true)
             if (req.invalid) {
               req = parser.feed(Buffer.alloc(0));
               continue;
             }
 
-            const isKeepAlive = req.headers['connection'].toLowerCase() !== 'close';
+            logger.debug('[Server.ts] Connection header value:', {
+              connection: req.headers['connection'],
+              requestNumber: requestCount,
+            });
+            const isKeepAlive = (req.headers['connection'] || '').toLowerCase() !== 'close';
 
             // PATCH: Detect embeddings POST and skip body timeout
             const isEmbeddingsRequest =
@@ -168,14 +203,23 @@ export class HttpServer {
               if (bodyTimer) clearTimeout(bodyTimer);
             }
 
+            const ifFileUpload = req.path && req.path.startsWith('/api/files');
+
+            if (ifFileUpload) {
+              refreshUploadTimeout();
+            }
+
+            // Process the current request
             await this.router.handle(req, socket);
             clearTimeout(bodyTimer);
 
+            // Try to get the next pipelined request
             req = parser.feed(Buffer.alloc(0));
 
             if (!isKeepAlive) {
               if (!socket.destroyed) {
                 if (process.env.NODE_ENV === 'test') {
+                  logger.debug(`Keep alive is false, socket should be closing`);
                   socket.end();
                 } else {
                   setTimeout(() => {
@@ -185,14 +229,19 @@ export class HttpServer {
               }
               break;
             }
-          } while (req);
+          } while (req); // Continue only if we have a complete request
 
+          // After processing all complete requests, check if there are any pending bytes
           const pending = parser.getPendingBytes();
 
+          // Set appropriate timeout based on pending data
           if (pending > 0) {
-            refreshTimeout();
+            logger.debug(
+              `[Server.ts] ${pending} bytes pending after processing ${requestCount} requests`,
+            );
+            refreshTimeout(); // We have partial data for another request
           } else {
-            refreshTimeout();
+            refreshTimeout(); // Standard refresh
           }
         } catch (err) {
           logger.error(`Failed request:`, {
@@ -249,6 +298,35 @@ export class HttpServer {
   }
 
   /**
+   * Gets all available network addresses for the server
+   * @returns An object with local and network addresses
+   */
+  private getNetworkUrls(): { local: string[]; network: string[] } {
+    const interfaces = os.networkInterfaces();
+    const addresses: { local: string[]; network: string[] } = {
+      local: ['http://localhost:' + this.port],
+      network: [],
+    };
+
+    // Get all IPv4 addresses
+    if (interfaces) {
+      Object.keys(interfaces).forEach((interfaceName) => {
+        const networkInterface = interfaces[interfaceName];
+        if (networkInterface) {
+          networkInterface.forEach((interfaceInfo) => {
+            // Filter for IPv4 non-internal addresses
+            if (interfaceInfo.family === 'IPv4' && !interfaceInfo.internal) {
+              addresses.network.push(`http://${interfaceInfo.address}:${this.port}`);
+            }
+          });
+        }
+      });
+    }
+
+    return addresses;
+  }
+
+  /**
    * Gracefully shuts down the server and every open TCP socket.
    */
   public async stop(): Promise<void> {
@@ -262,9 +340,6 @@ export class HttpServer {
           sock.once('close', () => resolve());
           // Destroy the socket
           sock.destroy();
-
-          // Ensure resolution even if 'close' event doesn't fire
-          setTimeout(() => resolve(), 500);
         }),
     );
 
@@ -273,7 +348,7 @@ export class HttpServer {
     await Promise.race([
       Promise.all(socketClosePromises),
       new Promise((resolve) => {
-        timeoutId = setTimeout(resolve, 2000); // 2 second timeout
+        timeoutId = setTimeout(resolve, 100);
       }),
     ]);
 
@@ -308,13 +383,32 @@ export class HttpServer {
     this.connections.forEach((socket) => socket.destroy());
   }
 
-  public async start(): Promise<import('net').Server> {
+  public async start(): Promise<Server> {
     logger.info('Initializing file stats database');
     await initializeFileStats();
     return new Promise((resolve, reject) => {
       // Listen for the server 'listening' event
       this.server.once('listening', () => {
-        logger.info(`🚀 Server listening on port ${this.port}`);
+        const urls = this.getNetworkUrls();
+
+        logger.info(`🚀 Server started successfully on port ${this.port}`);
+
+        // Display local URLs
+        logger.info('Local URLs:');
+        urls.local.forEach((url) => {
+          logger.info(`  - \x1b[36m${url}\x1b[0m`);
+        });
+
+        // Display network URLs if available
+        if (urls.network.length > 0) {
+          logger.info('Network URLs (for access from other devices):');
+          urls.network.forEach((url) => {
+            logger.info(`  - \x1b[36m${url}\x1b[0m`);
+          });
+        } else {
+          logger.info('No network URLs available (not connected to any networks)');
+        }
+
         resolve(this.server);
       });
       // Propagate listen errors
@@ -322,7 +416,7 @@ export class HttpServer {
         reject(err);
       });
       // Start listening
-      this.server.listen(this.port);
+      this.server.listen(this.port, this.hostname);
       // Graceful shutdown hooks
       ['SIGINT', 'SIGTERM'].forEach((sig) =>
         process.on(sig as NodeJS.Signals, () => {

@@ -698,8 +698,18 @@ export class FileHostingStatsHelper {
         : 'fileName'; // Default sort to fileName if not specified
     const dbSortColumn = sortKeyMap[sortByKey];
     const sortOrder = options.sortOrder?.toUpperCase() === 'ASC' ? 'ASC' : 'DESC'; // Default to DESC if invalid
-    // Add secondary sort by ID for stable pagination, especially when primary sort key might have duplicates
-    const orderByClause = `ORDER BY "${dbSortColumn}" ${sortOrder}, "id" ${sortOrder}`;
+    // Use COLLATE NOCASE for string columns to ensure case-insensitive sorting
+    const stringColumns = [
+      'file_name',
+      'file_path',
+      'mime_type',
+      'encoding',
+      'codec',
+      'format_name',
+    ];
+    const orderByClause = stringColumns.includes(dbSortColumn)
+      ? `ORDER BY "${dbSortColumn}" COLLATE NOCASE ${sortOrder}, "id" ${sortOrder}`
+      : `ORDER BY "${dbSortColumn}" ${sortOrder}, "id" ${sortOrder}`;
 
     // Pagination
     // The controller might pass a large limit (MAX_RECORDS_FOR_JS_FILTERING) or a smaller one.
@@ -722,7 +732,27 @@ export class FileHostingStatsHelper {
 
     try {
       const rows = await this.db.all<FileStatsDbRow[]>(sqlQuery, finalParams);
-      return rows.map(this.mapDbRowToFileStats.bind(this)); // Use bind if mapDbRowToFileStats uses `this`
+      const results = rows.map(this.mapDbRowToFileStats.bind(this));
+
+      // Debug logging to see what's coming back from the database
+      if (options.sortBy === 'fileName') {
+        // Use console directly since logger may be mocked in tests
+        console.log('\n\n=== DATABASE SORTING DEBUG ===');
+        console.log('SQL Query:', sqlQuery);
+        console.log('String Columns:', stringColumns);
+        console.log('Results:', results.map((r) => r.fileName).join(', '));
+        console.log('Order:', options.sortOrder);
+        console.log('=============================\n\n');
+
+        // Keep the regular logging too
+        statsLogger.info('Sorted results from database:', {
+          sortedFileNames: results.map((r) => r.fileName),
+          order: options.sortOrder,
+          stringColumns,
+        });
+      }
+
+      return results;
     } catch (error) {
       statsLogger.error('Failed to query file stats from database', {
         error: (error as Error).message,

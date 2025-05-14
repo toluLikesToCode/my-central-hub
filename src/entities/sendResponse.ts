@@ -5,6 +5,7 @@
 import { Socket } from 'net';
 import { Readable } from 'stream';
 import logger from '../utils/logger';
+import type { IncomingRequest } from './http';
 
 const STATUS_TEXT: Record<number, string> = {
   200: 'OK',
@@ -97,7 +98,7 @@ export function sendResponse(
     socket.write(head);
 
     // Handle responses with no body
-    if (!body) {
+    if (body === undefined || body === null) {
       if (shouldCloseConnection && !socket.destroyed) {
         socket.end();
       }
@@ -314,3 +315,15 @@ export function beginChunkedResponse(
 // Ensure the caller of sendResponse provides an accurate Content-Length header if the stream's total length is known beforehand.
 // Or ensure Connection: close is set if proper framing for keep-alive (via Content-Length or chunking) isn't possible for the stream.
 // The body.pipe(socket, { end: false }) for non-binary streams is tricky for keep-alive without Content-Length or chunking. I've added comments and a slight modification to use { end: shouldCloseConnection } for body.pipe as a general approach, but for robust keep-alive streaming, beginChunkedResponse is better.
+
+// Use the context-aware sendResponse if present, otherwise fallback to the default
+
+export function sendWithContext(
+  req: IncomingRequest,
+  sock: Socket,
+  status: number,
+  headers: Record<string, string>,
+  body?: string | Buffer | import('stream').Readable,
+) {
+  return (req.ctx?.sendResponse ?? sendResponse)(sock, status, headers, body);
+}

@@ -44,7 +44,29 @@ export class HttpRequestParser {
   }
 
   feed(data: Buffer): IncomingRequest | null {
-    this.buffer = Buffer.concat([this.buffer, data]);
+    const originalBufferLength = this.buffer.length;
+    const incomingDataLength = data.length;
+
+    if (process.env.NODE_ENV === 'test') {
+      logger.debug(
+        `[HttpParser] Feed called: originalBuffer=${originalBufferLength} bytes, incomingData=${incomingDataLength} bytes`,
+      );
+    }
+
+    // Special case: if an empty buffer is passed and no data in buffer, return null immediately
+    if (data.length === 0 && this.buffer.length === 0) {
+      return null; // No data to parse
+    }
+
+    // special case: if an empty buffer is passed then its a signal
+    // to proccess next request from existing buffer
+    if (data.length === 0 && this.buffer.length > 0) {
+      // do nothing, just contnue with existing buffer below
+    } else {
+      // standard case
+      this.buffer = Buffer.concat([this.buffer, data]);
+    }
+
     try {
       while (true) {
         // REQUEST_LINE
@@ -247,6 +269,10 @@ export class HttpRequestParser {
           const leftover = this.buffer;
           const finalBody = this.bodyChunks.length ? Buffer.concat(this.bodyChunks) : undefined;
 
+          if (process.env.NODE_ENV === 'test') {
+            logger.debug(`[HttpParser] Request complete, leftover=${leftover.length} bytes`);
+          }
+
           // Log information about binary content for debugging
           if (this.isBinaryContent && finalBody) {
             logger.debug('Parsed binary request', {
@@ -272,7 +298,7 @@ export class HttpRequestParser {
             },
             invalid: this.invalid,
           };
-          this.reset();
+          this.reset(true);
           this.buffer = leftover; // restore leftover for next request
           this.state = ParserState.REQUEST_LINE; // ensure ready for next pipelined request
           return request;
@@ -315,8 +341,10 @@ export class HttpRequestParser {
     };
   }
 
-  reset(): void {
-    this.buffer = Buffer.alloc(0);
+  reset(preserveBuffer = true): void {
+    const leftover = preserveBuffer ? this.buffer : Buffer.alloc(0);
+
+    // reset all other state
     this.state = ParserState.REQUEST_LINE;
     this.headers = {};
     this.headersMap = new Map();
@@ -330,5 +358,8 @@ export class HttpRequestParser {
     this.invalid = false;
     this.lastHeaderKey = null;
     this.isBinaryContent = false;
+
+    // Restore the leftover buffer
+    this.buffer = leftover;
   }
 }

@@ -3,14 +3,14 @@ import { Middleware } from '../router';
 import logger from '../../utils/logger';
 import { Socket } from 'net';
 import { IncomingRequest } from '../../entities/http';
-import { sendResponse } from '../../entities/sendResponse';
+import { sendResponse, sendWithContext } from '../../entities/sendResponse';
 import { Readable } from 'stream';
 
 /**
  * CORS middleware for adding CORS headers to all responses
  * Enables cross-origin requests from browsers to access the API
  */
-export const corsMiddleware: Middleware = (req, sock, next) => {
+export const corsMiddleware: Middleware = (req, _sock, next) => {
   // Store the original sendResponse function reference
   const originalSendResponse = req.ctx?.sendResponse as typeof sendResponse | undefined;
 
@@ -34,7 +34,7 @@ export const corsMiddleware: Middleware = (req, sock, next) => {
     };
 
     // Log CORS headers being added
-    logger.debug('[corsMiddleware] Adding CORS headers to response', {
+    logger.info('[corsMiddleware] Adding CORS headers to response', {
       requestId: req.ctx?.requestId,
       method: req.method,
       path: req.path,
@@ -43,7 +43,9 @@ export const corsMiddleware: Middleware = (req, sock, next) => {
 
     // Handle preflight OPTIONS requests
     if (req.method === 'OPTIONS') {
-      return sendResponse(socket, 204, corsHeaders);
+      return (
+        originalSendResponse?.(socket, 204, corsHeaders) ?? sendResponse(socket, 204, corsHeaders)
+      );
     }
 
     // Call the original sendResponse with added CORS headers
@@ -59,10 +61,10 @@ export const corsMiddleware: Middleware = (req, sock, next) => {
  * Handler for preflight OPTIONS requests
  * This can be used directly in route handlers for OPTIONS
  *
- * @param _req The incoming request (unused but kept for signature matching)
+ * @param req The incoming request (used in case the ctx contains middleware data)
  * @param sock The client socket
  */
-export const handlePreflightRequest = (_req: IncomingRequest, sock: Socket): void => {
+export const handlePreflightRequest = (req: IncomingRequest, sock: Socket): void => {
   const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
@@ -74,8 +76,8 @@ export const handlePreflightRequest = (_req: IncomingRequest, sock: Socket): voi
     'Content-Type': 'text/plain', // Add Content-Type for text response
   };
 
-  // Send 204 No Content with headers and body as expected by the test
-  sendResponse(sock, 204, headers, 'No Content');
+  // Send 204 No Content with headers as expected by the test
+  sendWithContext(req, sock, 204, headers);
 
   logger.debug('Responded to OPTIONS request');
 };

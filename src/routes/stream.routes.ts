@@ -13,7 +13,7 @@
 import router from '../core/router';
 import { config } from '../config/server.config';
 import logger from '../utils/logger';
-import { sendResponse } from '../entities/sendResponse';
+import { sendWithContext } from '../entities/sendResponse';
 import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
 import { formatDate } from '../utils/dateFormatter';
@@ -47,7 +47,8 @@ const handleDeprecatedRoute = (req: IncomingRequest, sock: Socket) => {
   });
 
   // Show deprecation notice with 301 redirect
-  sendResponse(
+  sendWithContext(
+    req,
     sock,
     301,
     {

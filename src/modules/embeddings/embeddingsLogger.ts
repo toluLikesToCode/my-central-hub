@@ -43,7 +43,7 @@ class EmbeddingsLogger {
         // Console for immediate feedback with pretty formatting
         new ConsoleTransport({
           formatter: new PrettyFormatter({
-            useBoxes: true,
+            useBoxes: false,
           }),
           level: 'info',
         }),

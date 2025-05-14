@@ -12,7 +12,7 @@ const FileHostingLogger = new Logger({
     new ConsoleTransport({
       formatter: new PrettyFormatter({
         useColors: true,
-        useBoxes: true,
+        useBoxes: false,
         showTimestamp: true,
         maxDepth: 3,
       }),

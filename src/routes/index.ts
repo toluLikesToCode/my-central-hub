@@ -6,7 +6,7 @@ import './metrics.routes';
 import './embeddings.routes';
 import './file-hosting.routes';
 import router from '../core/router';
-import { sendResponse } from '../entities/sendResponse';
+import { sendWithContext } from '../entities/sendResponse';
 
 // Extracts the message from request body or returns default
 function extractMessage(body?: Buffer): string {
@@ -35,7 +35,8 @@ routes.forEach(({ path, getMessage }) =>
   router.any(path, async (req, sock) => {
     const message = getMessage(req.body as Buffer | undefined);
     const responseText = message ? JSON.stringify({ message }) : '';
-    sendResponse(
+    sendWithContext(
+      req,
       sock,
       200,
       {

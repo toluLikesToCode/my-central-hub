@@ -19,7 +19,7 @@ const logger = new Logger({
   transports: [
     new ConsoleTransport({
       formatter: new PrettyFormatter({
-        useBoxes: true,
+        useBoxes: false,
         useColors: true,
         showTimestamp: false,
         indent: 3,

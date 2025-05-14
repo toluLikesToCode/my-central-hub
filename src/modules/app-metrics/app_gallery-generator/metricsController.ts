@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { IncomingRequest } from '../../../entities/http';
-import { sendResponse } from '../../../entities/sendResponse';
+import { sendWithContext } from '../../../entities/sendResponse';
 import { Socket } from 'net';
 import { saveMetrics, isPerfLogArray } from './metricsService';
 import { Logger, FileTransport, ConsoleTransport, PrettyFormatter } from '../../../utils/logger';
@@ -19,7 +19,7 @@ const metricsLogger = new Logger({
     new ConsoleTransport({
       formatter: new PrettyFormatter({
         useColors: true,
-        useBoxes: true,
+        useBoxes: false,
         showTimestamp: true,
         maxDepth: 3,
       }),
@@ -79,7 +79,8 @@ export const metricsController = {
           clientIp,
         });
 
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           405,
           {
@@ -124,7 +125,8 @@ export const metricsController = {
           clientIp,
         });
 
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           400,
           { 'Content-Type': 'application/json' },
@@ -169,7 +171,8 @@ export const metricsController = {
             sessionId: clientSessionId,
           });
 
-          sendResponse(
+          sendWithContext(
+            req,
             sock,
             200,
             { 'Content-Type': 'application/json' },
@@ -238,7 +241,8 @@ export const metricsController = {
         contentSize: `${(contentLength / 1024).toFixed(2)} KB`,
       });
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         200,
         { 'Content-Type': 'application/json' },
@@ -261,7 +265,8 @@ export const metricsController = {
         processingTime: `${duration}ms`,
       });
 
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         500,
         { 'Content-Type': 'application/json' },

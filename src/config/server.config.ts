@@ -21,11 +21,12 @@ export const config = {
     ? join(process.cwd(), process.env.MEDIA_DIR)
     : join(process.cwd(), 'public', 'media'),
   headerTimeoutMs: process.env.HEADER_TIMEOUT_MS
-    ? Math.max(parseInt(process.env.HEADER_TIMEOUT_MS, 10), 0)
-    : 10000,
+    ? Math.max(parseInt(process.env.HEADER_TIMEOUT_MS, 10) * 1000, 0)
+    : 30 * 1000, // 30 seconds
   bodyTimeoutMs: process.env.BODY_TIMEOUT_MS
-    ? Math.max(parseInt(process.env.BODY_TIMEOUT_MS, 10), 0)
-    : 15000,
+    ? Math.max(parseInt(process.env.BODY_TIMEOUT_MS, 10) * 1000, 0)
+    : 60 * 1000, //60 seconds
+  uploadTimeoutMS: 5 * 60 * 1000, // 5 mins
   /**
    * Path to the SQLite database file. Will be created if missing.
    */
@@ -102,7 +103,7 @@ export const config = {
     inputDir: process.env.EMBED_DIR,
   },
   testMode: false, // Set to true for testing purposes
-  staticDir: process.env.STATIC_DIR || join(process.cwd(), 'static'), // Static files directory
+  staticDir: process.env.STATIC_DIR || join(process.cwd(), 'public'), // Static files directory
 };
 
 // Only log configuration if logger is defined and we're in test mode

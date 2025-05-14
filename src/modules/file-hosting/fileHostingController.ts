@@ -4,7 +4,7 @@ import { Readable } from 'stream';
 import * as zlib from 'zlib';
 import path from 'path';
 
-import { sendResponse } from '../../entities/sendResponse';
+import { sendWithContext } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
 import { FileHostingService } from './fileHostingService';
 import {
@@ -31,6 +31,25 @@ const log = getLoggerInstance({
 const MAX_RECORDS_FOR_JS_FILTERING = 5000;
 
 /* -------------------------------------------------- */
+/* Interfaces & Types                   */
+/* -------------------------------------------------- */
+/** Shared helpers that kept re‑appearing everywhere */
+
+interface ListParams {
+  page: number;
+  limit: number;
+  sort: string;
+  order: string;
+  filterType: string;
+  search: string;
+  dateFrom: string;
+  dateTo: string;
+  sizeFrom: number;
+  sizeTo: number; // 0 means no upper limit for sizeTo, handle accordingly if needed
+  filterOptions: FileFilter;
+}
+
+/* -------------------------------------------------- */
 /* BOILER‑PLATE                   */
 /* -------------------------------------------------- */
 /** Shared helpers that kept re‑appearing everywhere */
@@ -46,6 +65,7 @@ const utils = {
 
   /** Wrap sendResponse with try/catch + destroyed check */
   safeSend(
+    req: IncomingRequest,
     sock: Socket,
     status: number,
     headers: Record<string, string>,
@@ -53,7 +73,7 @@ const utils = {
   ) {
     if (sock.destroyed) return;
     try {
-      sendResponse(sock, status, headers, body);
+      sendWithContext(req, sock, status, headers, body);
     } catch (err) {
       log.error('Failed to send response', { error: (err as Error).message });
       if (!sock.destroyed) sock.end();
@@ -61,8 +81,15 @@ const utils = {
   },
 
   /** Common JSON sender */
-  json(sock: Socket, status: number, data: unknown, headers: Record<string, string> = {}) {
+  json(
+    req: IncomingRequest,
+    sock: Socket,
+    status: number,
+    data: unknown,
+    headers: Record<string, string> = {},
+  ) {
     this.safeSend(
+      req,
       sock,
       status,
       { 'Content-Type': 'application/json', ...headers },
@@ -72,8 +99,14 @@ const utils = {
   },
 
   /** Plain‑text sender with a “close” connection header */
-  plain(sock: Socket, status: number, message: string) {
-    this.safeSend(sock, status, { 'Content-Type': 'text/plain', Connection: 'close' }, message);
+  plain(req: IncomingRequest, sock: Socket, status: number, message: string) {
+    this.safeSend(
+      req,
+      sock,
+      status,
+      { 'Content-Type': 'text/plain', Connection: 'close' },
+      message,
+    );
   },
 
   /** Measure duration & auto‑log */
@@ -103,12 +136,15 @@ const utils = {
   },
 
   /** Parse pagination / filter / sort query once */
-  parseListParams(req: IncomingRequest) {
+  parseListParams(req: IncomingRequest): ListParams {
     const q = req.query;
+    // Map 'name' to 'fileName' for sort key compatibility
+    let sort = (q.sort as string) ?? 'name';
+    if (sort === 'name') sort = 'fileName';
     return {
       page: Math.max(1, Number(q.page ?? 1)),
       limit: Math.max(1, Number(q.limit ?? 20)),
-      sort: (q.sort as string) ?? 'name',
+      sort,
       order: (q.order as string) ?? 'asc',
       filterType: q.type as string, // Simple top-level MIME type filter
       search: q.search as string, // Simple top-level search term
@@ -183,11 +219,11 @@ export const fileHostingController = {
         if (meta?.height) headers['X-Image-Height'] = String(meta.height);
         if (meta?.duration) headers['X-Media-Duration'] = String(meta.duration);
 
-        utils.safeSend(sock, 200, headers);
+        utils.safeSend(req, sock, 200, headers);
       })
       .catch((err) => {
         log.error('HEAD failed', { fileName, error: (err as Error).message });
-        utils.plain(sock, 404, 'Not found');
+        utils.plain(req, sock, 404, 'Not found');
       });
   },
 
@@ -211,12 +247,12 @@ export const fileHostingController = {
           noneMatch === cacheHeaders.ETag ||
           (modSince && new Date(modSince) >= statResult.mtime)
         ) {
-          utils.safeSend(sock, 304, cacheHeaders);
+          utils.safeSend(req, sock, 304, cacheHeaders);
           return;
         }
 
         const range = getHeader(req, 'range');
-        if (range) return this.sendRange(fileName, statResult, mime, range, sock, acceptEnc);
+        if (range) return this.sendRange(req, fileName, statResult, mime, range, sock, acceptEnc);
 
         const compression = utils.pickCompression(acceptEnc, mime);
         const baseHeaders: Record<string, string> = {
@@ -245,11 +281,11 @@ export const fileHostingController = {
         } else {
           baseHeaders['Content-Length'] = String(statResult.size);
         }
-        utils.safeSend(sock, 200, baseHeaders, body);
+        utils.safeSend(req, sock, 200, baseHeaders, body);
       })
       .catch((err) => {
         log.error('GET failed', { fileName, error: (err as Error).message });
-        utils.plain(sock, 404, 'File not found');
+        utils.plain(req, sock, 404, 'File not found');
       });
   },
 
@@ -290,7 +326,7 @@ export const fileHostingController = {
             filesFromDB = await stats.queryFileStats(queryOptsForDB);
             // JS filtering
             let jsFilteredResults = filesFromDB;
-            const searchTermLower = p.search?.toLowerCase();
+            const searchTermLower = p.search.toLowerCase();
             if (searchTermLower) {
               jsFilteredResults = jsFilteredResults.filter(
                 (f) =>
@@ -309,7 +345,7 @@ export const fileHostingController = {
             }
             if (p.filterOptions && Object.keys(p.filterOptions).length > 0) {
               jsFilteredResults = jsFilteredResults.filter((f) =>
-                evaluateFilter(f, p.filterOptions as FileFilter),
+                evaluateFilter(f, p.filterOptions),
               );
             }
             // Sort
@@ -341,13 +377,15 @@ export const fileHostingController = {
               const valB = b[sortKey];
               let comparison = 0;
               if (typeof valA === 'string' && typeof valB === 'string') {
-                comparison = valA.localeCompare(valB);
+                comparison = valA.localeCompare(valB, undefined, { sensitivity: 'base' });
               } else if (valA instanceof Date && valB instanceof Date) {
                 comparison = valA.getTime() - valB.getTime();
               } else if (typeof valA === 'number' && typeof valB === 'number') {
                 comparison = valA - valB;
               } else {
-                comparison = String(valA ?? '').localeCompare(String(valB ?? ''));
+                comparison = String(valA ?? '').localeCompare(String(valB ?? ''), undefined, {
+                  sensitivity: 'base',
+                });
               }
               return p.order === 'desc' ? -comparison : comparison;
             });
@@ -378,6 +416,7 @@ export const fileHostingController = {
               'Referrer-Policy': 'no-referrer',
             };
             utils.json(
+              req,
               sock,
               200,
               {
@@ -404,7 +443,7 @@ export const fileHostingController = {
               error: (dbError as Error).message,
               queryOptsForDB,
             });
-            utils.plain(sock, 500, 'Failed to list files');
+            utils.plain(req, sock, 500, 'Failed to list files');
             return;
           }
         } else {
@@ -445,6 +484,7 @@ export const fileHostingController = {
               'Referrer-Policy': 'no-referrer',
             };
             utils.json(
+              req,
               sock,
               200,
               {
@@ -471,7 +511,7 @@ export const fileHostingController = {
               error: (dbError as Error).message,
               queryOptsForDB,
             });
-            utils.plain(sock, 500, 'Failed to list files');
+            utils.plain(req, sock, 500, 'Failed to list files');
             return;
           }
         }
@@ -481,7 +521,7 @@ export const fileHostingController = {
           error: (err as Error).message,
           stack: (err as Error).stack,
         });
-        utils.plain(sock, 500, 'Failed to list files');
+        utils.plain(req, sock, 500, 'Failed to list files');
       });
   },
 
@@ -493,7 +533,12 @@ export const fileHostingController = {
     const fileName = fileNameQuery || fileNameHeader;
 
     if (!fileName) {
-      utils.plain(sock, 400, 'Missing file name (expected in ?file= query or X-Filename header)');
+      utils.plain(
+        req,
+        sock,
+        400,
+        'Missing file name (expected in ?file= query or X-Filename header)',
+      );
       return;
     }
 
@@ -506,7 +551,7 @@ export const fileHostingController = {
         //   return;
         // }
         if (!req.body || !(req.body instanceof Buffer) || req.body.length === 0) {
-          utils.plain(sock, 400, 'Empty or invalid body');
+          utils.plain(req, sock, 400, 'Empty or invalid body');
           return;
         }
 
@@ -532,7 +577,7 @@ export const fileHostingController = {
             }),
           );
 
-        utils.json(sock, 201, {
+        utils.json(req, sock, 201, {
           // 201 Created for successful upload
           success: true,
           fileName,
@@ -547,7 +592,7 @@ export const fileHostingController = {
           error: (err as Error).message,
           stack: (err as Error).stack,
         });
-        utils.plain(sock, 500, `Upload failed: ${(err as Error).message}`);
+        utils.plain(req, sock, 500, `Upload failed: ${(err as Error).message}`);
       });
   },
 
@@ -575,7 +620,7 @@ export const fileHostingController = {
             }),
           );
 
-        utils.json(sock, 200, {
+        utils.json(req, sock, 200, {
           success: true,
           fileName,
           message: 'File deleted successfully',
@@ -588,9 +633,9 @@ export const fileHostingController = {
           (err as Error).message.toLowerCase().includes('not found') ||
           (err as Error).message.includes('ENOENT')
         ) {
-          utils.plain(sock, 404, 'File not found');
+          utils.plain(req, sock, 404, 'File not found');
         } else {
-          utils.plain(sock, 500, `Deletion failed: ${(err as Error).message}`);
+          utils.plain(req, sock, 500, `Deletion failed: ${(err as Error).message}`);
         }
       });
   },
@@ -623,7 +668,7 @@ export const fileHostingController = {
           sanitized: safeName,
           url: req.url,
         });
-        utils.plain(sock, 400, 'Invalid file path.');
+        utils.plain(req, sock, 400, 'Invalid file path.');
         return undefined;
       }
       return safeName;
@@ -631,6 +676,7 @@ export const fileHostingController = {
 
     log.warn('File name missing', { url: req.url, method: req.method, ...(extra || {}) });
     utils.plain(
+      req,
       sock,
       400,
       extra?.message || 'File name is required in path or as "file" query parameter.',
@@ -640,6 +686,7 @@ export const fileHostingController = {
 
   /* ------------------------- RANGE_SENDER_HELPER ----------------------- */
   async sendRange(
+    req: IncomingRequest,
     fileName: string,
     statResult: Awaited<ReturnType<typeof fileSvc.stat>>, // Correct type
     mime: string,
@@ -650,7 +697,7 @@ export const fileHostingController = {
     const size = statResult.size;
     const rangeMatch = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
     if (!rangeMatch) {
-      utils.plain(sock, 400, 'Malformed Range header');
+      utils.plain(req, sock, 400, 'Malformed Range header');
       return;
     }
 
@@ -659,7 +706,7 @@ export const fileHostingController = {
     let end = endStr ? parseInt(endStr, 10) : size - 1;
 
     if (isNaN(start) || isNaN(end) || start > end || start < 0 || end >= size) {
-      utils.plain(sock, 416, 'Range Not Satisfiable'); // HTTP 416
+      utils.plain(req, sock, 416, 'Range Not Satisfiable'); // HTTP 416
       return;
     }
 
@@ -685,8 +732,7 @@ export const fileHostingController = {
       ...utils.buildCacheHeaders(size, statResult.mtime), // Cache headers still useful
     };
 
-    utils.safeSend(sock, 206, headers, source); // HTTP 206 Partial Content
+    utils.safeSend(req, sock, 206, headers, source); // HTTP 206 Partial Content
   },
 };
-
 /* eof */

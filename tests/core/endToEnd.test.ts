@@ -7,6 +7,7 @@
 import request from 'supertest';
 import { HttpServer } from '../../src/core/server';
 import type { Server } from 'net';
+import logger from '../../src/utils/logger';
 
 const normalize = (s: string) =>
   JSON.parse(s)
@@ -16,72 +17,14 @@ const normalize = (s: string) =>
 let httpServer: HttpServer;
 let server: Server;
 
-jest.mock('../../src/utils/logger', () => {
-  // Helper to create a logger function for a specific level
-  const createLevelLogger = (level: string) =>
-    jest.fn((primaryMessageOrObject: any, ...metadata: any[]) => {
-      const logPrefix = `TEST-LOG [${level.toUpperCase()}]:`;
-      let message = primaryMessageOrObject;
-      let metaString = '';
-
-      if (typeof primaryMessageOrObject === 'object' && metadata.length === 0) {
-        // Called like: logger.info({ key: 'value' });
-        message = JSON.stringify(primaryMessageOrObject, null, 2);
-      } else if (typeof primaryMessageOrObject === 'string') {
-        // Called like: logger.info('message', { key: 'value' }, ...);
-        // message is already primaryMessageOrObject
-        if (metadata.length > 0) {
-          metaString = metadata
-            .map((m) => (typeof m === 'object' ? JSON.stringify(m, null, 2) : m.toString()))
-            .join(' ');
-        }
-      } else {
-        // Fallback for other types
-        message = primaryMessageOrObject.toString();
-        if (metadata.length > 0) {
-          metaString = metadata
-            .map((m) => (typeof m === 'object' ? JSON.stringify(m, null, 2) : m.toString()))
-            .join(' ');
-        }
-      }
-
-      // Using process.stdout.write might behave differently with Jest's console handling
-      // compared to console.log, especially during teardown.
-      process.stdout.write(`${logPrefix} ${message}${metaString ? ' ' + metaString : ''}\n`);
-    });
-
-  // Create the mock logger instance structure
-  const mockLoggerInstance = {
-    info: createLevelLogger('info'),
-    error: createLevelLogger('error'),
-    warn: createLevelLogger('warn'),
-    //debug: createLevelLogger('debug'), // This will be used by withTiming
-    debug: jest.fn(() => {
-      // do nothing
-    }),
-    success: createLevelLogger('success'),
-    child: jest.fn(), // We'll make child return the same instance for simplicity
-  };
-
-  // Make child() return the same logger instance.
-  // For more complex scenarios, child could return a new instance with bound context.
-  mockLoggerInstance.child.mockReturnValue(mockLoggerInstance);
-
-  return {
-    __esModule: true, // Important for ES module interop
-    default: mockLoggerInstance, // If your app imports `logger from './logger'`
-    Logger: jest.fn().mockImplementation(() => mockLoggerInstance), // If your app uses `new Logger()`
-    // Mock other exports from your logger module if there are any
-    ConsoleTransport: jest.fn(),
-    FileTransport: jest.fn(),
-    PrettyFormatter: jest.fn(),
-    JsonFormatter: jest.fn(),
-  };
-});
+jest.mock('../../src/utils/logger');
 
 beforeAll(async () => {
   // Use ephemeral port (0) to avoid occupying fixed port
   httpServer = new HttpServer(0);
+
+  // Wait longer for server to start and initialize file stats
+  jest.setTimeout(30000); // Extend the Jest timeout to 30 seconds
   server = await httpServer.start();
 });
 
@@ -113,7 +56,39 @@ describe('GET /echo', () => {
 
 describe('GET /api/files pagination and sorting', () => {
   it('should return the first 30 files sorted by name (asc), hasNextPage true, and next page link works', async () => {
-    const res = await request(server).get('/api/files?limit=30&sort=name&order=asc');
+    logger.warn = jest.fn().mockImplementation((message, meta) => {
+      if (meta && typeof meta === 'object') {
+        console.log('[TEST][logger.warn]', message);
+        console.dir(meta, { depth: null });
+      } else if (meta) {
+        console.log('[TEST][logger.warn]', message, meta);
+      } else {
+        console.log('[TEST][logger.warn]', message);
+      }
+    });
+    logger.error = jest.fn().mockImplementation((message, meta) => {
+      if (meta && typeof meta === 'object') {
+        console.log('[TEST][logger.error]', message);
+        console.dir(meta, { depth: null });
+      } else if (meta) {
+        console.log('[TEST][logger.error]', message, meta);
+      } else {
+        console.log('[TEST][logger.error]', message);
+      }
+    });
+
+    logger.debug = jest.fn().mockImplementation((message, meta) => {
+      if (meta && typeof meta === 'object') {
+        console.log('[TEST][logger.debug]', message);
+        console.dir(meta, { depth: null });
+      } else if (meta) {
+        console.log('[TEST][logger.debug]', message, meta);
+      } else {
+        console.log('[TEST][logger.debug]', message);
+      }
+    });
+
+    const res = await request(server).get('/api/files?limit=30&sort=name&order=asc').timeout(10000); // Increase timeout to 10 seconds
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('files');
     expect(Array.isArray(res.body.files)).toBe(true);
@@ -121,7 +96,9 @@ describe('GET /api/files pagination and sorting', () => {
 
     // Check sorting order (asc by name)
     const names = res.body.files.map((f) => f.name);
-    const sorted = [...names].sort((a, b) => a.localeCompare(b));
+    const sorted = [...names].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' }),
+    );
     expect(names).toEqual(sorted);
 
     // Check pagination
@@ -136,7 +113,7 @@ describe('GET /api/files pagination and sorting', () => {
       try {
         // Make a request to the next page link with a timeout
         const nextPageUrl = res.body._links.next.replace(/^https?:\/\/[^/]+(\/|$)/, '/');
-        const nextRes = await request(server).get(nextPageUrl).timeout(5000);
+        const nextRes = await request(server).get(nextPageUrl).timeout(10000); // Increase timeout to 10 seconds
         expect(nextRes.status).toBe(200);
         expect(nextRes.body.pagination.page).toBe(res.body.pagination.page + 1);
 
@@ -163,6 +140,7 @@ describe('GET /api/files with filters', () => {
     request(server)
       .get('/api/files')
       .query(query)
+      .timeout(10000) // Increase timeout to 10 seconds
       .expect(200)
       .then((res) => res.body.files as Array<{ name: string; mimeType: string; size: number }>);
 

@@ -1,3 +1,16 @@
+/**
+ * @deprecated This parser implementation is deprecated and will be removed in a future version.
+ * Use the HttpRequestParser class from httpParser.ts instead which provides better support
+ * for HTTP pipelining, chunked encoding, and binary content.
+ *
+ * Migration guide:
+ * 1. Import HttpRequestParser: import { HttpRequestParser } from './httpParser';
+ * 2. Create an instance: const parser = new HttpRequestParser();
+ * 3. For each chunk of data: const request = parser.feed(Buffer.from(data));
+ * 4. If request is null, more data is needed; if not null, a complete request is available
+ * 5. For multiple requests in one connection (pipelining): process all with req = parser.feed(Buffer.alloc(0))
+ */
+
 import { IncomingRequest } from '../entities/http';
 import { URL } from 'url';
 
@@ -13,6 +26,9 @@ function addHeader(map: Map<string, string[]>, key: string, value: string) {
 }
 
 export const parser = {
+  /**
+   * @deprecated Use HttpRequestParser from httpParser.ts instead
+   */
   parse(raw: string): IncomingRequest {
     const dummyUrl = new URL('http://placeholder/');
     const earlyReturn = (): IncomingRequest => ({

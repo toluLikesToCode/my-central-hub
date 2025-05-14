@@ -17,7 +17,7 @@
  */
 import { Socket } from 'net';
 import { IncomingRequest } from '../entities/http';
-import { sendResponse } from '../entities/sendResponse';
+import { sendWithContext } from '../entities/sendResponse';
 import logger, { Logger } from '../utils/logger';
 import { requestIdMiddleware } from '../core/middlewares/requestId';
 import { corsMiddleware } from '../core/middlewares/cors';
@@ -242,10 +242,49 @@ class Router {
   }
 
   /**
+   * Register an OPTIONS route
+   */
+  options(path: string, h: Handler) {
+    return this.add('OPTIONS', path, h);
+  }
+
+  /**
    * Register a route that handles any HTTP method
    */
   any(path: string, h: Handler) {
     return this.add('ANY', path, h);
+  }
+
+  /**
+   * Helper to capture headers from a handler without sending a body
+   * Simulates Express's approach for HEAD requests
+   */
+  private async captureHeadersFromHandler(
+    handler: Handler,
+    req: IncomingRequest,
+    sock: Socket,
+  ): Promise<{ status: number; headers: Record<string, string> }> {
+    let capturedStatus = 200;
+    let capturedHeaders: Record<string, string> = {};
+    // Save the original sendResponse from context (if any)
+    const originalSendResponse = req.ctx?.sendResponse;
+    // Inject a capturing sendResponse into the request context
+    req.ctx = req.ctx || {};
+    req.ctx.sendResponse = (_sock: Socket, status: number, headers: Record<string, string>) => {
+      capturedStatus = status;
+      capturedHeaders = { ...headers };
+    };
+    try {
+      await handler(req, sock);
+    } finally {
+      // Restore the original sendResponse in context
+      if (originalSendResponse) {
+        req.ctx.sendResponse = originalSendResponse;
+      } else {
+        delete req.ctx.sendResponse;
+      }
+    }
+    return { status: capturedStatus, headers: capturedHeaders };
   }
 
   /**
@@ -255,45 +294,35 @@ class Router {
    */
   async handle(req: IncomingRequest, sock: Socket): Promise<void> {
     const startTime = process.hrtime();
-    const requestId =
-      req.ctx?.requestId || req.headers['x-request-id'] || req.headers['request-id'];
-
+    let requestId = req.ctx?.requestId || req.headers['x-request-id'] || req.headers['request-id'];
     if (!requestId) {
       const newRequestId = crypto.randomUUID();
-      req.ctx = { ...req.ctx, requestId: newRequestId };
+      req.ctx = { ...(req.ctx || {}), requestId: newRequestId };
+      requestId = newRequestId;
       req.headers['x-request-id'] = newRequestId;
       req.headers['request-id'] = newRequestId;
-      logger.warn('Request ID not found in headers or context, creating a new one', {
-        'new id': newRequestId,
-      });
+      logger.warn('Generated new request ID', { requestId });
     }
-
-    // Create a request-scoped logger with request-specific metadata
     const reqLogger = logger.child({
-      requestId: requestId ? requestId : 'unknown',
+      requestId,
       path: req.path,
-      ip: sock.remoteAddress, // Get remote address from Socket instead of req
+      ip: sock.remoteAddress,
       headers: req.headers,
       body: req.body?.byteLength || 0,
       ctx: req.ctx,
     });
-
     reqLogger.info(`Request started: ${req.method} ${req.path}`);
-
     try {
       // Validate request path
       if (!req.path || typeof req.path !== 'string') {
         const status = 400;
-        sendResponse(
+        const isApi = req.path?.startsWith('/api/');
+        sendWithContext(
+          req,
           sock,
           status,
-          {
-            'Content-Type':
-              req.path && req.path.startsWith('/api/') ? 'application/json' : 'text/plain',
-          },
-          req.path && req.path.startsWith('/api/')
-            ? JSON.stringify({ error: 'Bad Request' })
-            : 'Bad Request',
+          { 'Content-Type': isApi ? 'application/json' : 'text/plain' },
+          isApi ? JSON.stringify({ error: 'Bad Request' }) : 'Bad Request',
         );
         reqLogger.warn('Invalid request path', { path: req.path });
         logRequestCompletion(reqLogger, startTime, status);
@@ -303,175 +332,105 @@ class Router {
       // Special handling for OPTIONS requests (for CORS preflight)
       if (req.method === 'OPTIONS') {
         reqLogger.debug('Handling OPTIONS request');
-        const headers = {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, HEAD',
-          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-          Allow: 'GET, POST, PUT, DELETE, OPTIONS, HEAD',
-          'Content-Type': 'text/plain',
-        };
 
-        sendResponse(sock, 204, headers, 'No Content');
-        reqLogger.debug('Responded to OPTIONS request');
-        logRequestCompletion(reqLogger, startTime, 204);
+        // Continue to middleware chain for OPTIONS requests
+        // This allows our registerd CORS middleware and OPTIONS handlers to process the request
+        // We're not ending the request here to support tests that check specific headers
+      }
+      // run middlewear chain
+      await this.runMiddlewares(req, sock, reqLogger);
+      const matching = this.routes.filter((r) => {
+        const m = req.path.match(r.regex);
+        if (!m) return false;
+        if (r.keys.length) {
+          req.ctx = { ...(req.ctx || {}), params: {} };
+          r.keys.forEach((k, i) => {
+            (req.ctx!.params as Record<string, string>)[k] = m[i + 1];
+          });
+        }
+        return true;
+      });
+      // If no routes match the path
+      if (matching.length === 0) {
+        reqLogger.debug('No routes match request path');
+        sendWithContext(req, sock, 404, { 'Content-Type': 'text/plain' }, 'Not Found');
+        logRequestCompletion(reqLogger, startTime, 404);
         return;
       }
-
-      // 1. run middleware chain
-      let i = 0;
-      // Use an explicit stack to unwind after handler
-      const run = async (): Promise<void> => {
-        if (i < this.middlewares.length) {
-          const idx = i++;
-          reqLogger.debug(`Executing middleware #${idx}`);
-          await this.middlewares[idx](req, sock, run);
-          return;
-        }
-
-        // Only after all middleware, run the handler
-        // 2. route lookup
-        const matching = this.routes.filter((r) => r.regex.test(req.path));
-        reqLogger.debug('Route matching', {
-          matchCount: matching.length,
-          matchingRoutes: matching.map((r) => ({ method: r.method, path: r.originalPath })),
-        });
-
-        const route =
-          matching.find((r) => r.method === req.method) ?? matching.find((r) => r.method === 'ANY');
-
-        if (!route) {
-          // Distinguish 404 vs 405
-          if (matching.length) {
-            // HTTP 405 Method Not Allowed
-            const status = 405;
-            // Only include allowed methods that are not 'ANY'
-            const allowed = matching
-              .map((r) => r.method)
-              .filter((m) => m !== 'ANY')
-              .join(', ');
-
-            reqLogger.warn('Method not allowed', {
-              allowedMethods: allowed,
-              requestedMethod: req.method,
-            });
-
-            if (req.path.startsWith('/api/')) {
-              sendResponse(
-                sock,
-                status,
-                {
-                  'Content-Type': 'application/json',
-                  Allow: allowed,
-                },
-                JSON.stringify({ error: 'Method Not Allowed' }),
-              );
-            } else {
-              sendResponse(sock, status, { Allow: allowed }, 'Method Not Allowed');
-            }
-            logRequestCompletion(reqLogger, startTime, status);
-          } else {
-            // HTTP 404 Not Found
-            const status = 404;
-            reqLogger.warn('No matching route found');
-
-            if (req.path.startsWith('/api/')) {
-              sendResponse(
-                sock,
-                status,
-                { 'Content-Type': 'application/json' },
-                JSON.stringify({ error: 'Not Found' }),
-              );
-            } else {
-              sendResponse(sock, status, { 'Content-Type': 'text/plain' }, 'Not Found');
-            }
-            logRequestCompletion(reqLogger, startTime, status);
-          }
-          return;
-        }
-
-        // 3. pull params (/:id etc.) → req.ctx.params
-        const match = route.regex.exec(req.path)!;
-        const params: Record<string, string> = {};
-        route.keys.forEach((k, idx) => {
-          params[k] = decodeURIComponent(match[idx + 1]);
-        });
-        (req.ctx ??= {}).params = params;
-
-        reqLogger.debug('Route matched', {
-          method: route.method,
-          path: route.originalPath,
-          params,
-        });
-
-        // 4. invoke handler
-        try {
-          reqLogger.debug('Executing route handler');
-          // Store status in req.ctx for logging
-          (req.ctx ??= {}).responseStatus = 200; // Default if not set by handler
-
-          await route.handler(req, sock);
-
-          // Log after handler completes
-          logRequestCompletion(reqLogger, startTime, req.ctx.responseStatus || 200);
-        } catch (err) {
-          const status = 500;
-          const error = err as Error;
-
-          reqLogger.error('Handler error', {
-            error: {
-              message: error.message,
-              stack: error.stack,
-              name: error.name,
-            },
-          });
-
-          if (req.path.startsWith('/api/')) {
-            sendResponse(
+      if (req.method === 'HEAD') {
+        const headRoute = matching.find((r) => r.method === 'HEAD');
+        if (headRoute) {
+          reqLogger.debug('Found HEAD route handler');
+        } else if (matching.some((r) => r.method === 'GET')) {
+          reqLogger.debug('No HEAD handler, using GET for headers');
+          // Find the GET route
+          const getRoute = matching.find((r) => r.method === 'GET');
+          if (getRoute) {
+            // Capture headers from GET handler without sending a body
+            const { status, headers } = await this.captureHeadersFromHandler(
+              getRoute.handler,
+              req,
               sock,
-              status,
-              { 'Content-Type': 'application/json' },
-              JSON.stringify({ error: 'Internal Server Error' }),
             );
-          } else {
-            sendResponse(sock, status, { 'Content-Type': 'text/plain' }, '500 Server Error');
+            sendWithContext(req, sock, status, headers, undefined);
+            logRequestCompletion(reqLogger, startTime, status);
+            return;
           }
-
-          // waif for socket to finish before logging
-          await new Promise((resolve) => {
-            sock.on('finish', resolve);
-          });
-
-          logRequestCompletion(reqLogger, startTime, status);
         }
-      };
-
-      await run();
-    } catch (err) {
-      // Global error handler for middleware
-      const status = 500;
-      const error = err as Error;
-
-      reqLogger.error('Middleware error', {
-        error: {
-          message: error.message,
-          stack: error.stack,
-          name: error.name,
-        },
-      });
-
-      if (req.path.startsWith('/api/')) {
-        sendResponse(
-          sock,
-          status,
-          { 'Content-Type': 'application/json' },
-          JSON.stringify({ error: 'Internal Server Error' }),
-        );
-      } else {
-        sendResponse(sock, status, { 'Content-Type': 'text/plain' }, '500 Server Error');
       }
-
+      const route =
+        matching.find((r) => r.method === req.method) || matching.find((r) => r.method === 'ANY');
+      if (!route) {
+        const allowed = matching.map((r) => r.method).join(',');
+        reqLogger.debug('Method not allowed', { allowed });
+        sendWithContext(
+          req,
+          sock,
+          405,
+          { 'Content-Type': 'text/plain', Allow: allowed },
+          'Method Not Allowed',
+        );
+        logRequestCompletion(reqLogger, startTime, 405);
+        return;
+      }
+      reqLogger.debug('Executing route handler', {
+        method: route.method,
+        path: route.originalPath,
+      });
+      await route.handler(req, sock);
+      logRequestCompletion(reqLogger, startTime, req.ctx?.responseStatus || 200);
+    } catch (err) {
+      const status = 500;
+      reqLogger.error('Handler error', { error: (err as Error).message });
+      const isApi = req.path.startsWith('/api/');
+      sendWithContext(
+        req,
+        sock,
+        status,
+        { 'Content-Type': isApi ? 'application/json' : 'text/plain' },
+        isApi ? JSON.stringify({ error: 'Internal Server Error' }) : '500 Server Error',
+      );
       logRequestCompletion(reqLogger, startTime, status);
     }
+  }
+
+  /**
+   * Execute middleware chain
+   */
+  private async runMiddlewares(
+    req: IncomingRequest,
+    sock: Socket,
+    reqLogger: Logger,
+  ): Promise<void> {
+    let index = 0;
+    const next = async (): Promise<void> => {
+      const mw = this.middlewares[index++];
+      if (mw) {
+        reqLogger.debug('Executing middleware', { index: index - 1 });
+        await mw(req, sock, next);
+      }
+    };
+    await next();
   }
 }
 

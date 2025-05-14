@@ -710,7 +710,7 @@ const defaultLogger = new Logger({
     new ConsoleTransport({
       formatter: new PrettyFormatter({
         useColors: true,
-        useBoxes: true, // Keep boxes for default console
+        useBoxes: false, // Don't keep boxes for default console
         showTimestamp: false,
       }),
       level: (process.env.CONSOLE_LOG_LEVEL as LogLevel) || undefined,

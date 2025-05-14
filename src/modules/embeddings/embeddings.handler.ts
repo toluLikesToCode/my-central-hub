@@ -5,7 +5,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { Socket } from 'net';
 import { IncomingRequest } from '../../entities/http';
-import { sendResponse } from '../../entities/sendResponse';
+import { sendWithContext } from '../../entities/sendResponse';
 import { ClipCacheEntry, embeddingService } from './embedding.service';
 import { embeddingsLogger, EmbeddingComponent } from './embeddingsLogger';
 import path from 'path';
@@ -82,7 +82,8 @@ export const embeddingsController = {
       );
 
       embeddingsLogger.removeContext(requestId);
-      return sendResponse(
+      return sendWithContext(
+        req,
         sock,
         405,
         { 'Content-Type': 'application/json' },
@@ -96,7 +97,8 @@ export const embeddingsController = {
       });
 
       embeddingsLogger.removeContext(requestId);
-      return sendResponse(
+      return sendWithContext(
+        req,
         sock,
         400,
         { 'Content-Type': 'application/json' },
@@ -120,7 +122,8 @@ export const embeddingsController = {
         );
 
         embeddingsLogger.removeContext(requestId);
-        return sendResponse(
+        return sendWithContext(
+          req,
           sock,
           503,
           { 'Content-Type': 'application/json' },
@@ -167,7 +170,8 @@ export const embeddingsController = {
         );
 
         embeddingsLogger.removeContext(requestId);
-        return sendResponse(
+        return sendWithContext(
+          req,
           sock,
           400,
           { 'Content-Type': 'application/json' },
@@ -200,7 +204,8 @@ export const embeddingsController = {
         );
 
         embeddingsLogger.removeContext(requestId);
-        return sendResponse(
+        return sendWithContext(
+          req,
           sock,
           400,
           { 'Content-Type': 'application/json' },
@@ -269,7 +274,8 @@ export const embeddingsController = {
         );
 
         embeddingsLogger.removeContext(requestId);
-        return sendResponse(
+        return sendWithContext(
+          req,
           sock,
           400,
           { 'Content-Type': 'application/json' },
@@ -313,7 +319,8 @@ export const embeddingsController = {
         );
 
         embeddingsLogger.removeContext(requestId);
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           200,
           { 'Content-Type': 'application/json' },
@@ -350,7 +357,8 @@ export const embeddingsController = {
         }
 
         embeddingsLogger.removeContext(requestId);
-        sendResponse(
+        sendWithContext(
+          req,
           sock,
           500,
           { 'Content-Type': 'application/json' },
@@ -373,7 +381,8 @@ export const embeddingsController = {
           : 'Failed to process embeddings.';
 
       embeddingsLogger.removeContext(requestId);
-      sendResponse(
+      sendWithContext(
+        req,
         sock,
         statusCode,
         { 'Content-Type': 'application/json' },
@@ -400,7 +409,8 @@ export const embeddingsController = {
     embeddingsLogger.info(EmbeddingComponent.HANDLER, 'Embedding service stop initiated.', context);
 
     embeddingsLogger.removeContext(requestId);
-    sendResponse(
+    sendWithContext(
+      req,
       sock,
       200,
       { 'Content-Type': 'application/json' },
@@ -430,7 +440,8 @@ export const embeddingsController = {
       );
 
       embeddingsLogger.removeContext(requestId);
-      return sendResponse(
+      return sendWithContext(
+        req,
         sock,
         405,
         { 'Content-Type': 'application/json' },
@@ -470,6 +481,6 @@ export const embeddingsController = {
     );
 
     embeddingsLogger.removeContext(requestId);
-    sendResponse(sock, 200, { 'Content-Type': 'application/json' }, JSON.stringify(status));
+    sendWithContext(req, sock, 200, { 'Content-Type': 'application/json' }, JSON.stringify(status));
   },
 };

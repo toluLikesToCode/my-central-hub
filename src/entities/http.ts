@@ -1,3 +1,5 @@
+import { Socket } from 'net';
+
 /**
  * src/entities/http.ts
  * This file contains the interface definitions for HTTP requests.
@@ -44,6 +46,20 @@ export interface SecurityContext {
   };
 }
 
+export interface RequestContext {
+  /**
+   * Optional custom sendResponse function for this request (used by router/middleware)
+   */
+  sendResponse?: (
+    sock: Socket,
+    status: number,
+    headers: Record<string, string>,
+    body?: string | Buffer | import('stream').Readable,
+  ) => void;
+  // Allow any other fields for extensibility
+  [key: string]: unknown;
+}
+
 export interface IncomingRequest {
   url: URL; // canonical URL (always present)
   path: string; // == url.pathname
@@ -62,7 +78,7 @@ export interface IncomingRequest {
   // the return type of req.ctx.requestId is {} which is a generic object
   // that converted to a string by calling toString() on it.
 
-  ctx?: Record<string, unknown>;
+  ctx?: RequestContext;
 
   invalid?: boolean;
 

@@ -1,5 +1,5 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
 
@@ -12,6 +12,7 @@ import * as RouterModule from '../../src/core/router';
 import { HttpRequestParser } from '../../src/core/httpParser';
 import { IncomingRequest } from '../../src/entities/http';
 import { on } from 'events';
+import { assert } from 'console';
 
 jest.mock('net');
 jest.mock('../../src/utils/logger');
@@ -22,7 +23,6 @@ jest.mock('../../src/modules/file-hosting/FileStatsInitializer', () => ({
 
 jest.mock('../../src/config/server.config', () => ({
   config: {
-    // Keep existing mocks
     headerTimeoutMs: 100,
     bodyTimeoutMs: 150,
 
@@ -74,6 +74,14 @@ jest.mock('../../src/config/server.config', () => ({
   },
 }));
 
+beforeAll(() => {
+  jest.useFakeTimers();
+});
+
+afterAll(() => {
+  jest.useRealTimers();
+});
+
 describe('HttpServer', () => {
   let server: HttpServer;
   let mockSocket: Socket;
@@ -86,13 +94,30 @@ describe('HttpServer', () => {
 
     mockSocket = {
       on: jest.fn(),
-      once: jest.fn(),
+      once: jest.fn((event, callback) => {
+        // Store the callback for later execution
+        if (event === 'close') {
+          mockSocket._closeCallback = callback;
+        }
+      }),
       write: jest.fn(),
       end: jest.fn(),
-      destroy: jest.fn(),
+      destroy: jest.fn(() => {
+        // When destroy is called, simulate the close event
+        if (mockSocket._closeCallback) {
+          mockSocket._closeCallback();
+        }
+      }),
       setMaxListeners: jest.fn(),
       getMaxListeners: jest.fn().mockReturnValue(10),
+      close: jest.fn(() => {
+        // When close is called, simulate the close event
+        if (mockSocket._closeCallback) {
+          mockSocket._closeCallback();
+        }
+      }),
       remoteAddress: '127.0.0.1',
+      _closeCallback: null,
     } as unknown as Socket;
 
     parserInstance = new HttpRequestParser();
@@ -112,6 +137,21 @@ describe('HttpServer', () => {
     realRouter = RouterModule.createRouter();
     jest.spyOn(realRouter, 'handle').mockImplementation(jest.fn());
     server = new HttpServer(3000, realRouter);
+  });
+
+  afterEach(async () => {
+    // real timers for server shutdown
+
+    jest.useRealTimers();
+
+    if (server) {
+      await server.stop();
+    }
+
+    // reset mocks and timers
+    jest.clearAllTimers();
+    jest.clearAllMocks();
+    jest.useFakeTimers();
   });
 
   const getConnectionHandler = () => {
@@ -173,14 +213,7 @@ describe('HttpServer', () => {
     );
   });
 
-  test('should destroy socket on header timeout', () => {
-    let timeoutFn;
-    global.setTimeout = jest.fn((fn) => {
-      timeoutFn = fn;
-      return 123;
-    }) as any;
-    global.clearTimeout = jest.fn();
-
+  test('should destroy socket on header timeout', async () => {
     mockSocket.once = jest.fn();
     mockSocket.on = jest.fn();
 
@@ -188,14 +221,13 @@ describe('HttpServer', () => {
     expect(connHandler).not.toBeNull();
     connHandler(mockSocket);
 
-    expect(setTimeout).toHaveBeenCalled();
-    expect(typeof timeoutFn).toBe('function');
+    // Fast-forward all timers to trigger header timeout
+    jest.runAllTimers();
 
-    timeoutFn(); // simulate timeout trigger
     expect(mockSocket.destroy).toHaveBeenCalled();
   });
 
-  test('should destroy socket on body timeout for POST request', async () => {
+  test('should destroy socket on body timeout for incomplete POST request', async () => {
     let dataHandler;
     mockSocket.on = jest.fn().mockImplementation((event, cb) => {
       if (event === 'data') dataHandler = cb;
@@ -206,40 +238,81 @@ describe('HttpServer', () => {
     expect(connHandler).not.toBeNull();
     connHandler(mockSocket);
 
-    let bodyTimeoutFn;
-    global.setTimeout = jest.fn((fn) => {
-      if (!bodyTimeoutFn) bodyTimeoutFn = fn;
-      return 123;
-    }) as any;
-    global.clearTimeout = jest.fn();
-
+    // Simulate sending only headers for a POST with Content-Length: 10 (no body yet)
     dataHandler(Buffer.from('POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\n'));
-    jest.spyOn(realRouter, 'handle').mockImplementation(async () => {
-      /* Does nothing */
-    });
 
-    expect(typeof bodyTimeoutFn).toBe('function');
-    bodyTimeoutFn(); // simulate body timeout
+    // Do NOT send the body, so the server should be waiting for it
+
+    // Fast-forward to trigger the body timeout
+    jest.advanceTimersByTime(config.bodyTimeoutMs);
+
+    // Now the socket should be destroyed
     expect(mockSocket.destroy).toHaveBeenCalled();
   });
 
   test('should handle multiple pipelined requests in sequence', async () => {
+    // logger.info = jest.fn().mockImplementation((message, meta) => {
+    //   if (meta && typeof meta === 'object') {
+    //     console.log('[TEST][logger.info]', message);
+    //     console.dir(meta, { depth: null });
+    //   } else if (meta) {
+    //     console.log('[TEST][logger.info]', message, meta);
+    //   } else {
+    //     console.log('[TEST][logger.info]', message);
+    //   }
+    // });
+    // logger.debug = jest.fn().mockImplementation((message, meta) => {
+    //   if (meta && typeof meta === 'object') {
+    //     console.log('[TEST][logger.debug]', message);
+    //     console.dir(meta, { depth: null });
+    //   } else if (meta) {
+    //     console.log('[TEST][logger.debug]', message, meta);
+    //   } else {
+    //     console.log('[TEST][logger.debug]', message);
+    //   }
+    // });
+    // logger.warn = jest.fn().mockImplementation((message, meta) => {
+    //   if (meta && typeof meta === 'object') {
+    //     console.log('[TEST][logger.warn]', message);
+    //     console.dir(meta, { depth: null });
+    //   } else if (meta) {
+    //     console.log('[TEST][logger.warn]', message, meta);
+    //   } else {
+    //     console.log('[TEST][logger.warn]', message);
+    //   }
+    // });
+    // logger.error = jest.fn().mockImplementation((message, meta) => {
+    //   if (meta && typeof meta === 'object') {
+    //     console.log('[TEST][logger.error]', message);
+    //     console.dir(meta, { depth: null });
+    //   } else if (meta) {
+    //     console.log('[TEST][logger.error]', message, meta);
+    //   } else {
+    //     console.log('[TEST][logger.error]', message);
+    //   }
+    // });
+
     let dataHandler;
     mockSocket.on = jest.fn().mockImplementation((event, cb) => {
       if (event === 'data') dataHandler = cb;
     });
-    mockSocket.once = jest.fn();
 
     const connHandler = getConnectionHandler();
     expect(connHandler).not.toBeNull();
     connHandler(mockSocket);
 
     const handleSpy = jest.spyOn(realRouter, 'handle');
+    // Make sure router.handle resolves immediately for this test
+    handleSpy.mockImplementation(jest.fn().mockResolvedValue(undefined));
 
     const requestChunk = Buffer.from(
       'GET /first HTTP/1.1\r\nHost: a\r\n\r\nGET /second HTTP/1.1\r\nHost: b\r\n\r\n',
     );
-    await dataHandler(requestChunk);
+    dataHandler(requestChunk);
+
+    // Wait for all promises to resolve
+    await Promise.resolve();
+
     expect(handleSpy).toHaveBeenCalledTimes(2);
     expect(handleSpy).toHaveBeenNthCalledWith(
       1,
@@ -253,7 +326,7 @@ describe('HttpServer', () => {
     );
   });
 
-  test('should handle socket error event', () => {
+  test('should handle socket error event', async () => {
     let errorHandler: (err: Error) => void = () => {};
     mockSocket.on = jest.fn().mockImplementation((event, cb) => {
       if (event === 'error') errorHandler = cb;
@@ -276,30 +349,31 @@ describe('HttpServer', () => {
   });
 
   test('should close socket if Connection: close header is present', async () => {
+    mockSocket.end.mockClear();
+
+    // logger.debug = jest.fn().mockImplementation((message: string, meta: object) => {
+    //   console.log(`[TEST][should close socket if Connection: close header is present]: ${message}`);
+    //   console.table(meta);
+    // });
+
     let dataHandler;
     mockSocket.on = jest.fn().mockImplementation((event, cb) => {
       if (event === 'data') dataHandler = cb;
     });
-    mockSocket.once = jest.fn();
+
     const connHandler = getConnectionHandler();
     expect(connHandler).not.toBeNull();
     connHandler(mockSocket);
 
-    jest
-      .spyOn(realRouter, 'handle')
-      .mockImplementation(async (req: IncomingRequest, sock: Socket) => {});
+    jest.spyOn(realRouter, 'handle').mockImplementation(async () => {});
 
-    jest.useFakeTimers();
+    dataHandler(Buffer.from('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'));
 
-    await dataHandler(
-      Buffer.from('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'),
-    );
+    jest.advanceTimersByTime(200);
 
-    jest.advanceTimersByTime(50);
+    await Promise.resolve();
 
     expect(realRouter.handle).toHaveBeenCalled();
     expect(mockSocket.end).toHaveBeenCalled();
-
-    jest.useRealTimers();
   });
 });

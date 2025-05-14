@@ -26,10 +26,23 @@ jest.mock('../../../src/utils/helpers', () => {
   };
 });
 
-// Mock sendResponse
-jest.mock('../../../src/entities/sendResponse', () => ({
-  sendResponse: jest.fn(),
-}));
+// Mock sendResponse while keeping sendWithContext real
+const mockSendResponse = jest.fn();
+jest.mock('../../../src/entities/sendResponse', () => {
+  const actual = jest.requireActual('../../../src/entities/sendResponse');
+  return {
+    ...actual,
+    // Mock sendResponse but keep sendWithContext real
+    sendResponse: mockSendResponse,
+    // Override sendWithContext to use our mock
+    sendWithContext: jest.fn((req, sock, status, headers, body) => {
+      console.log('sendWithContext called with status:', status);
+      console.log('Headers:', headers);
+      // Forward to our mock sendResponse
+      mockSendResponse(sock, status, headers, body);
+    }),
+  };
+});
 
 // Create mock streams
 const mockBrotliStream = new PassThrough();
@@ -51,6 +64,24 @@ jest.mock('../../../src/modules/file-hosting/fileHostingService', () => {
   };
 });
 
+// Mock FileHostingStatsHelper
+const mockInitialize = jest.fn().mockResolvedValue(undefined);
+const mockGetStatsByPath = jest.fn().mockResolvedValue(null);
+const mockDeleteFileStats = jest.fn().mockResolvedValue(true);
+const mockSaveFileStats = jest.fn().mockResolvedValue(1);
+jest.mock('../../../src/modules/file-hosting/fileHostingStatsHelper', () => {
+  return {
+    FileHostingStatsHelper: jest.fn().mockImplementation(() => {
+      return {
+        initialize: mockInitialize,
+        getStatsByPath: mockGetStatsByPath,
+        deleteFileStats: mockDeleteFileStats,
+        saveFileStats: mockSaveFileStats,
+      };
+    }),
+  };
+});
+
 // Mock zlib
 const mockCreateBrotliCompress = jest.fn(() => mockBrotliStream);
 const mockCreateGzip = jest.fn(() => mockGzipStream);
@@ -62,7 +93,15 @@ jest.mock('zlib', () => ({
 }));
 
 // Now import the controller and other modules
-import { sendResponse } from '../../../src/entities/sendResponse';
+// Mock the controller initialization promise
+jest.mock('../../../src/modules/file-hosting/fileHostingController', () => {
+  const actual = jest.requireActual('../../../src/modules/file-hosting/fileHostingController');
+  return {
+    ...actual,
+    // Mock the initialization promise to be already resolved
+    __fileHostingStatsHelperInit: Promise.resolve(),
+  };
+});
 import { fileHostingController } from '../../../src/modules/file-hosting/fileHostingController';
 
 describe('fileHostingController - Compression Tests', () => {
@@ -97,7 +136,7 @@ describe('fileHostingController - Compression Tests', () => {
       remoteAddress: '127.0.0.1',
     };
 
-    // Setup default request
+    // Setup default request - IMPORTANT: We add a ctx with our mock sendResponse
     req = {
       url: 'http://example.com/api/files?file=test.html',
       path: '/api/files',
@@ -105,6 +144,10 @@ describe('fileHostingController - Compression Tests', () => {
       headers: {
         'accept-encoding': '',
         'user-agent': 'test-agent',
+      },
+      // Add ctx with sendResponse to ensure our mock is used
+      ctx: {
+        sendResponse: mockSendResponse,
       },
     };
   });
@@ -119,7 +162,7 @@ describe('fileHostingController - Compression Tests', () => {
       expect(mockCreateGzip).not.toHaveBeenCalled();
       expect(mockCreateDeflate).not.toHaveBeenCalled();
 
-      expect(sendResponse).toHaveBeenCalledWith(
+      expect(mockSendResponse).toHaveBeenCalledWith(
         sock,
         200,
         expect.objectContaining({
@@ -139,7 +182,7 @@ describe('fileHostingController - Compression Tests', () => {
       expect(mockCreateGzip).toHaveBeenCalled();
       expect(mockCreateDeflate).not.toHaveBeenCalled();
 
-      expect(sendResponse).toHaveBeenCalledWith(
+      expect(mockSendResponse).toHaveBeenCalledWith(
         sock,
         200,
         expect.objectContaining({
@@ -159,7 +202,7 @@ describe('fileHostingController - Compression Tests', () => {
       expect(mockCreateGzip).not.toHaveBeenCalled();
       expect(mockCreateDeflate).toHaveBeenCalled();
 
-      expect(sendResponse).toHaveBeenCalledWith(
+      expect(mockSendResponse).toHaveBeenCalledWith(
         sock,
         200,
         expect.objectContaining({
@@ -179,7 +222,7 @@ describe('fileHostingController - Compression Tests', () => {
       expect(mockCreateGzip).not.toHaveBeenCalled();
       expect(mockCreateDeflate).not.toHaveBeenCalled();
 
-      expect(sendResponse).toHaveBeenCalledWith(
+      expect(mockSendResponse).toHaveBeenCalledWith(
         sock,
         200,
         expect.not.objectContaining({
@@ -189,7 +232,7 @@ describe('fileHostingController - Compression Tests', () => {
         expect.any(Object),
       );
 
-      expect(sendResponse).toHaveBeenCalledWith(
+      expect(mockSendResponse).toHaveBeenCalledWith(
         sock,
         200,
         expect.objectContaining({
@@ -209,7 +252,7 @@ describe('fileHostingController - Compression Tests', () => {
       expect(mockCreateGzip).not.toHaveBeenCalled();
       expect(mockCreateDeflate).not.toHaveBeenCalled();
 
-      expect(sendResponse).toHaveBeenCalledWith(
+      expect(mockSendResponse).toHaveBeenCalledWith(
         sock,
         200,
         expect.not.objectContaining({
@@ -240,7 +283,7 @@ describe('fileHostingController - Compression Tests', () => {
       expect(mockCreateGzip).not.toHaveBeenCalled();
       expect(mockCreateDeflate).not.toHaveBeenCalled();
 
-      expect(sendResponse).toHaveBeenCalledWith(
+      expect(mockSendResponse).toHaveBeenCalledWith(
         expect.anything(),
         206,
         expect.objectContaining({
@@ -249,7 +292,7 @@ describe('fileHostingController - Compression Tests', () => {
         expect.any(Object),
       );
 
-      expect(sendResponse).toHaveBeenCalledWith(
+      expect(mockSendResponse).toHaveBeenCalledWith(
         expect.anything(),
         206,
         expect.not.objectContaining({
@@ -272,7 +315,7 @@ describe('fileHostingController - Compression Tests', () => {
 
       expect(pipeSpy).toHaveBeenCalledWith(mockBrotliStream);
 
-      expect(sendResponse).toHaveBeenCalledWith(
+      expect(mockSendResponse).toHaveBeenCalledWith(
         expect.anything(),
         200,
         expect.anything(),
