@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 // src/modules/file-hosting/fileHostingController.ts
 import { Socket } from 'net';
 import { Readable } from 'stream';
@@ -13,7 +14,7 @@ import {
 } from './fileHostingStatsHelper';
 import { getHeader, getQuery } from '../../utils/httpHelpers';
 import { config } from '../../config/server.config';
-import { getMimeType } from '../../utils/helpers';
+import { getMimeType, nocaseAscii } from '../../utils/helpers';
 import { formatDate } from '../../utils/dateFormatter';
 import {
   evaluateFilter,
@@ -41,7 +42,7 @@ interface ListParams {
   sort: string;
   order: string;
   filterType: string;
-  search: string;
+  search?: string;
   dateFrom: string;
   dateTo: string;
   sizeFrom: number;
@@ -95,7 +96,33 @@ const utils = {
       { 'Content-Type': 'application/json', ...headers },
       JSON.stringify(data),
     );
-    log.debug('JSON response sent', { 'Content-Type': 'application/json', ...headers });
+    // Extract requestId and pagination info if present
+    const requestId =
+      req.ctx && typeof req.ctx.requestId === 'string' ? req.ctx.requestId : undefined;
+    let pagination: unknown = undefined;
+    if (
+      typeof data === 'object' &&
+      data !== null &&
+      'pagination' in data &&
+      typeof (data as any).pagination === 'object'
+    ) {
+      pagination = (data as { pagination?: unknown }).pagination;
+    }
+    log.debug('JSON response sent', {
+      'Content-Type': 'application/json',
+      ...headers,
+      ...(requestId ? { requestId } : {}),
+      ...(pagination
+        ? {
+            page: (pagination as any).page,
+            limit: (pagination as any).limit,
+            totalFiles: (pagination as any).totalFiles,
+            totalPages: (pagination as any).totalPages,
+            hasNextPage: (pagination as any).hasNextPage,
+            hasPrevPage: (pagination as any).hasPrevPage,
+          }
+        : {}),
+    });
   },
 
   /** Plain‑text sender with a “close” connection header */
@@ -147,7 +174,7 @@ const utils = {
       sort,
       order: (q.order as string) ?? 'asc',
       filterType: q.type as string, // Simple top-level MIME type filter
-      search: q.search as string, // Simple top-level search term
+      search: q.search as string, // Remove default - now handled where used
       dateFrom: q.dateFrom as string,
       dateTo: q.dateTo as string,
       sizeFrom: Number(q.sizeFrom ?? 0),
@@ -326,7 +353,7 @@ export const fileHostingController = {
             filesFromDB = await stats.queryFileStats(queryOptsForDB);
             // JS filtering
             let jsFilteredResults = filesFromDB;
-            const searchTermLower = p.search.toLowerCase();
+            const searchTermLower = (p.search ?? '').toLowerCase(); // Coerce only once
             if (searchTermLower) {
               jsFilteredResults = jsFilteredResults.filter(
                 (f) =>
@@ -348,52 +375,79 @@ export const fileHostingController = {
                 evaluateFilter(f, p.filterOptions),
               );
             }
-            // Sort
-            type SortableFileStatsKey = keyof Pick<
-              FileStats,
-              | 'fileName'
-              | 'filePath'
-              | 'mimeType'
-              | 'size'
-              | 'lastModified'
-              | 'createdAt'
-              | 'updatedAt'
-            >;
-            const sortKey: SortableFileStatsKey = (
-              [
-                'fileName',
-                'filePath',
-                'mimeType',
-                'size',
-                'lastModified',
-                'createdAt',
-                'updatedAt',
-              ].includes(p.sort)
-                ? p.sort
-                : 'fileName'
-            ) as SortableFileStatsKey;
-            jsFilteredResults.sort((a, b) => {
-              const valA = a[sortKey];
-              const valB = b[sortKey];
-              let comparison = 0;
-              if (typeof valA === 'string' && typeof valB === 'string') {
-                comparison = valA.localeCompare(valB, undefined, { sensitivity: 'base' });
-              } else if (valA instanceof Date && valB instanceof Date) {
-                comparison = valA.getTime() - valB.getTime();
-              } else if (typeof valA === 'number' && typeof valB === 'number') {
-                comparison = valA - valB;
-              } else {
-                comparison = String(valA ?? '').localeCompare(String(valB ?? ''), undefined, {
-                  sensitivity: 'base',
-                });
-              }
-              return p.order === 'desc' ? -comparison : comparison;
-            });
-            totalMatchingFiles = jsFilteredResults.length;
+
+            // Determine the array that needs sorting
+            const filesToSort = jsFilteredResults;
+
+            if (p.sort === 'fileName') {
+              filesToSort.sort((x, y) => {
+                // Primary sort: case-insensitive ASCII
+                const primaryOrder = nocaseAscii(x.fileName, y.fileName);
+                if (primaryOrder !== 0) {
+                  return p.order === 'desc' ? -primaryOrder : primaryOrder;
+                }
+
+                // Secondary sort: exact fileName match (case-sensitive for further tie-breaking)
+                const secondaryOrder = x.fileName.localeCompare(y.fileName);
+                if (secondaryOrder !== 0) {
+                  return p.order === 'desc' ? -secondaryOrder : secondaryOrder;
+                }
+
+                // Tertiary sort: by ID for ultimate stability
+                const xId = String(x.id || ''); // Handle potentially undefined IDs
+                const yId = String(y.id || '');
+                const tertiaryOrder = xId.localeCompare(yId);
+                return p.order === 'desc' ? -tertiaryOrder : tertiaryOrder;
+              });
+            } else {
+              // Sort using existing logic
+              type SortableFileStatsKey = keyof Pick<
+                FileStats,
+                | 'fileName'
+                | 'filePath'
+                | 'mimeType'
+                | 'size'
+                | 'lastModified'
+                | 'createdAt'
+                | 'updatedAt'
+              >;
+              const sortKey: SortableFileStatsKey = (
+                [
+                  'fileName',
+                  'filePath',
+                  'mimeType',
+                  'size',
+                  'lastModified',
+                  'createdAt',
+                  'updatedAt',
+                ].includes(p.sort)
+                  ? p.sort
+                  : 'fileName'
+              ) as SortableFileStatsKey;
+              filesToSort.sort((a, b) => {
+                const valA = a[sortKey];
+                const valB = b[sortKey];
+                let comparison = 0;
+                if (typeof valA === 'string' && typeof valB === 'string') {
+                  comparison = valA.localeCompare(valB, undefined, { sensitivity: 'base' });
+                } else if (valA instanceof Date && valB instanceof Date) {
+                  comparison = valA.getTime() - valB.getTime();
+                } else if (typeof valA === 'number' && typeof valB === 'number') {
+                  comparison = valA - valB;
+                } else {
+                  comparison = String(valA ?? '').localeCompare(String(valB ?? ''), undefined, {
+                    sensitivity: 'base',
+                  });
+                }
+                return p.order === 'desc' ? -comparison : comparison;
+              });
+            }
+
+            totalMatchingFiles = filesToSort.length;
             const totalPages = Math.ceil(totalMatchingFiles / p.limit);
             const startIndex = (p.page - 1) * p.limit;
             const endIndex = startIndex + p.limit;
-            const pageDataArray = jsFilteredResults.slice(startIndex, endIndex);
+            const pageDataArray = filesToSort.slice(startIndex, endIndex);
             const pageData = pageDataArray.map((f) => ({
               name: f.fileName,
               path: f.filePath,
@@ -461,8 +515,34 @@ export const fileHostingController = {
               stats.queryFileStats(queryOptsForDB),
               stats.countFileStats(queryOptsForDB),
             ]);
+
+            // For simple filter case, apply fileName sorting to the current page if needed
+            const filesToSort = filesFromDB;
+
+            if (p.sort === 'fileName') {
+              filesToSort.sort((x, y) => {
+                // Primary sort: case-insensitive ASCII
+                const primaryOrder = nocaseAscii(x.fileName, y.fileName);
+                if (primaryOrder !== 0) {
+                  return p.order === 'desc' ? -primaryOrder : primaryOrder;
+                }
+
+                // Secondary sort: exact fileName match (case-sensitive for further tie-breaking)
+                const secondaryOrder = x.fileName.localeCompare(y.fileName);
+                if (secondaryOrder !== 0) {
+                  return p.order === 'desc' ? -secondaryOrder : secondaryOrder;
+                }
+
+                // Tertiary sort: by ID for ultimate stability
+                const xId = String(x.id || ''); // Handle potentially undefined IDs
+                const yId = String(y.id || '');
+                const tertiaryOrder = xId.localeCompare(yId);
+                return p.order === 'desc' ? -tertiaryOrder : tertiaryOrder;
+              });
+            }
+
             const totalPages = Math.ceil(totalMatchingFiles / p.limit);
-            const pageData = filesFromDB.map((f) => ({
+            const pageData = filesToSort.map((f) => ({
               name: f.fileName,
               path: f.filePath,
               size: f.size,
@@ -471,6 +551,7 @@ export const fileHostingController = {
               width: f.width || 'N/A',
               height: f.height || 'N/A',
               url: `/api/files/${encodeURIComponent(f.filePath)}`,
+              id: f.id, // Include id for frontend or debugging
             }));
             const hasNextPage = p.page < totalPages;
             const urlObj = new URL(req.url);
@@ -653,25 +734,40 @@ export const fileHostingController = {
     if (!name) {
       const fileQuery = getQuery(req, 'file');
       if (fileQuery) {
-        name = decodeURIComponent(fileQuery);
+        name = fileQuery; // Already decoded by query parser
       }
     }
 
     if (name) {
-      // Basic path sanitization: prevent directory traversal
-      // Resolve turns '..' into actual paths, then we check if it's still within a safe root.
-      // For this controller, names are typically relative to staticDir.
-      const safeName = path.normalize(name).replace(/^(\.\.[/\\])+/, '');
-      if (name !== safeName) {
-        log.warn('Potential path traversal attempt blocked', {
+      try {
+        // Properly decode URL-encoded filename
+        // Check if the name already contains decoded characters to avoid double-decoding
+        const decodedName = name.includes('%') ? decodeURIComponent(name) : name;
+
+        // Basic path sanitization: prevent directory traversal
+        const safeName = path.normalize(decodedName).replace(/^(\.\.[/\\])+/, '');
+
+        if (decodedName !== safeName) {
+          log.warn('Potential path traversal attempt blocked', {
+            original: name,
+            decoded: decodedName,
+            sanitized: safeName,
+            url: req.url,
+          });
+          utils.plain(req, sock, 400, 'Invalid file path.');
+          return undefined;
+        }
+
+        return safeName;
+      } catch (e) {
+        log.warn('Failed to decode filename', {
           original: name,
-          sanitized: safeName,
+          error: (e as Error).message,
           url: req.url,
         });
-        utils.plain(req, sock, 400, 'Invalid file path.');
+        utils.plain(req, sock, 400, 'Invalid filename encoding.');
         return undefined;
       }
-      return safeName;
     }
 
     log.warn('File name missing', { url: req.url, method: req.method, ...(extra || {}) });

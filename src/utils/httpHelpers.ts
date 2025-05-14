@@ -19,7 +19,17 @@ export function getHeader(req: IncomingRequest, name: string): string | undefine
   return req.headers?.[key];
 }
 
-/** Case-sensitive query lookup that falls back to searchParams */
+/**
+ * Retrieves the value of a query parameter from the incoming request.
+ *
+ * This function first attempts to get the value directly from the `req.query` map,
+ * which is typically built by a parser. If the key is not found there, it falls back
+ * to parsing the value from the request URL's search parameters.
+ *
+ * @param req - The incoming request object containing query and URL information.
+ * @param key - The name of the query parameter to retrieve.
+ * @returns The value of the query parameter if found, otherwise `undefined`.
+ */
 export function getQuery(req: IncomingRequest, key: string): string | undefined {
   if (req.invalid || !req.query || !req.url) return undefined;
 

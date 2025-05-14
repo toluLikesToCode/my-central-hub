@@ -651,26 +651,24 @@ export class FileHostingStatsHelper {
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     // Sorting logic (maps FileStats camelCase keys to DB snake_case columns)
-    const validSortKeys = [
-      'id',
-      'fileName',
-      'filePath',
-      'mimeType',
-      'size',
-      'lastModified',
-      'width',
-      'height',
-      'duration',
-      'bitrate',
-      'encoding',
-      'codec',
-      'frameRate',
-      'audioChannels',
-      'sampleRate',
-      'createdAt',
-      'updatedAt',
-    ] as const;
-    type ValidSortKey = (typeof validSortKeys)[number];
+    type ValidSortKey =
+      | 'id'
+      | 'fileName'
+      | 'filePath'
+      | 'mimeType'
+      | 'size'
+      | 'lastModified'
+      | 'width'
+      | 'height'
+      | 'duration'
+      | 'bitrate'
+      | 'encoding'
+      | 'codec'
+      | 'frameRate'
+      | 'audioChannels'
+      | 'sampleRate'
+      | 'createdAt'
+      | 'updatedAt';
 
     const sortKeyMap: Record<ValidSortKey, string> = {
       id: 'id',
@@ -692,24 +690,32 @@ export class FileHostingStatsHelper {
       updatedAt: 'updated_at',
     };
 
-    const sortByKey: ValidSortKey =
-      options.sortBy && (validSortKeys as readonly string[]).includes(options.sortBy)
-        ? options.sortBy
-        : 'fileName'; // Default sort to fileName if not specified
-    const dbSortColumn = sortKeyMap[sortByKey];
+    const sortByKeyOption = options.sortBy as ValidSortKey | undefined;
+    const dbSortColumnUserChoice = sortByKeyOption ? sortKeyMap[sortByKeyOption] : 'file_name'; // Default to file_name if not specified
     const sortOrder = options.sortOrder?.toUpperCase() === 'ASC' ? 'ASC' : 'DESC'; // Default to DESC if invalid
-    // Use COLLATE NOCASE for string columns to ensure case-insensitive sorting
-    const stringColumns = [
-      'file_name',
-      'file_path',
-      'mime_type',
-      'encoding',
-      'codec',
-      'format_name',
-    ];
-    const orderByClause = stringColumns.includes(dbSortColumn)
-      ? `ORDER BY "${dbSortColumn}" COLLATE NOCASE ${sortOrder}, "id" ${sortOrder}`
-      : `ORDER BY "${dbSortColumn}" ${sortOrder}, "id" ${sortOrder}`;
+
+    let orderByClause: string;
+
+    if (dbSortColumnUserChoice === 'file_name' && options.sortBy === 'fileName') {
+      // If sorting by fileName, JS will handle it.
+      // SQL sorts by "id" to ensure stable pagination for the JS sort.
+      orderByClause = `ORDER BY "id" ${sortOrder}`;
+    } else {
+      // For other sort fields, or if sortBy is not 'fileName' (e.g. 'name' before aliasing), use DB sort.
+      const dbSortColumnToUse =
+        dbSortColumnUserChoice === 'file_name' ? sortKeyMap['fileName'] : dbSortColumnUserChoice;
+      const stringColumns = [
+        'file_name',
+        'file_path',
+        'mime_type',
+        'encoding',
+        'codec',
+        'format_name',
+      ];
+      orderByClause = stringColumns.includes(dbSortColumnToUse)
+        ? `ORDER BY "${dbSortColumnToUse}" COLLATE NOCASE ${sortOrder}, "id" ${sortOrder}`
+        : `ORDER BY "${dbSortColumnToUse}" ${sortOrder}, "id" ${sortOrder}`;
+    }
 
     // Pagination
     // The controller might pass a large limit (MAX_RECORDS_FOR_JS_FILTERING) or a smaller one.
@@ -736,6 +742,15 @@ export class FileHostingStatsHelper {
 
       // Debug logging to see what's coming back from the database
       if (options.sortBy === 'fileName') {
+        // Define stringColumns in this scope for debugging
+        const stringColumns = [
+          'file_name',
+          'file_path',
+          'mime_type',
+          'encoding',
+          'codec',
+          'format_name',
+        ];
         // Use console directly since logger may be mocked in tests
         console.log('\n\n=== DATABASE SORTING DEBUG ===');
         console.log('SQL Query:', sqlQuery);

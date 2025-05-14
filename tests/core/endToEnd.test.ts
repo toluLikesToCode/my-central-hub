@@ -8,6 +8,7 @@ import request from 'supertest';
 import { HttpServer } from '../../src/core/server';
 import type { Server } from 'net';
 import logger from '../../src/utils/logger';
+import { nocaseAscii } from '../../src/utils/helpers';
 
 const normalize = (s: string) =>
   JSON.parse(s)
@@ -96,9 +97,16 @@ describe('GET /api/files pagination and sorting', () => {
 
     // Check sorting order (asc by name)
     const names = res.body.files.map((f) => f.name);
-    const sorted = [...names].sort((a, b) =>
-      a.localeCompare(b, undefined, { sensitivity: 'base' }),
-    );
+    const sorted = [...names].sort((a, b) => {
+      // Primary sort: case-insensitive ASCII (matching behavior in fileHostingController)
+      const primaryOrder = nocaseAscii(a, b);
+      if (primaryOrder !== 0) {
+        return primaryOrder;
+      }
+
+      // Secondary sort: exact fileName match (case-sensitive for further tie-breaking)
+      return a.localeCompare(b);
+    });
     expect(names).toEqual(sorted);
 
     // Check pagination
