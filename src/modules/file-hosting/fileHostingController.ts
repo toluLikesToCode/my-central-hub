@@ -225,7 +225,9 @@ export const fileHostingController = {
   /* ------------------------------ HEAD FILE ----------------------------- */
   async headFile(req: IncomingRequest, sock: Socket): Promise<void> {
     if (utils.abortIfClosed(sock, { remote: sock.remoteAddress })) return;
-    const fileName = this.resolveFileName(req, sock, { message: 'Missing file param in HEAD' });
+    const fileName = await this.resolveFileName(req, sock, {
+      message: 'Missing file param in HEAD',
+    });
     if (!fileName) return;
 
     await utils
@@ -257,7 +259,7 @@ export const fileHostingController = {
   /* ------------------------------ GET FILE ------------------------------ */
   async getFile(req: IncomingRequest, sock: Socket): Promise<void> {
     if (utils.abortIfClosed(sock, { remote: sock.remoteAddress })) return;
-    const fileName = this.resolveFileName(req, sock);
+    const fileName = await this.resolveFileName(req, sock);
     if (!fileName) return;
 
     const acceptEnc = (getHeader(req, 'accept-encoding') || '').toLowerCase();
@@ -680,7 +682,7 @@ export const fileHostingController = {
   /* ----------------------------- DELETE -------------------------------- */
   async deleteFile(req: IncomingRequest, sock: Socket): Promise<void> {
     if (utils.abortIfClosed(sock)) return;
-    const fileName = this.resolveFileName(req, sock); // Use resolveFileName for consistency
+    const fileName = await this.resolveFileName(req, sock); // Use resolveFileName for consistency
     if (!fileName) {
       // resolveFileName already sends a 400 response
       return;
@@ -722,61 +724,80 @@ export const fileHostingController = {
   },
 
   /* ------------------------- RESOLVE_FILE_NAME ------------------------- */
-  resolveFileName(
+  /**
+   * Resolves and validates a requested file name from an HTTP request, ensuring security and existence.
+   *
+   * This method extracts a file name from the request's path parameters or query string, decodes it,
+   * and performs normalization to prevent path traversal or absolute path exploits. It then checks
+   * the file system to verify if the file exists using `fileSvc.stat`. If the file is not found directly,
+   * it attempts a recursive search with `fileSvc.findFileByName`. If the file is found, the normalized
+   * path is returned; otherwise, an appropriate error response is sent to the client.
+   *
+   * @param req - The incoming request object containing context and URL information.
+   * @param sock - The socket used to send responses.
+   * @param extra - Optional object containing a custom error message.
+   * @returns A promise that resolves to the validated and normalized file path if found, or `undefined` if not found or invalid.
+   *
+   * @remarks
+   * This method is responsible for both secure string manipulation (decoding, normalization, and validation)
+   * and interacting with the filesystem to verify the existence of the requested file.
+   */
+  async resolveFileName(
     req: IncomingRequest,
-    sock: Socket, // Keep sock for sending error response
+    sock: Socket,
     extra?: { message: string },
-  ): string | undefined {
-    // Prioritize path parameter (e.g., /api/files/:filename)
+  ): Promise<string | undefined> {
+    // Extract filename from path parameter or query
     let name = (req.ctx?.params as Record<string, string>)?.filename;
-
-    // Fallback to query parameter (e.g., /api/files?file=filename)
     if (!name) {
       const fileQuery = getQuery(req, 'file');
       if (fileQuery) {
-        name = fileQuery; // Already decoded by query parser
+        name = fileQuery;
       }
     }
 
-    if (name) {
-      try {
-        // Properly decode URL-encoded filename
-        // Check if the name already contains decoded characters to avoid double-decoding
-        const decodedName = name.includes('%') ? decodeURIComponent(name) : name;
-
-        // Basic path sanitization: prevent directory traversal
-        const safeName = path.normalize(decodedName).replace(/^(\.\.[/\\])+/, '');
-
-        if (decodedName !== safeName) {
-          log.warn('Potential path traversal attempt blocked', {
-            original: name,
-            decoded: decodedName,
-            sanitized: safeName,
-            url: req.url,
-          });
-          utils.plain(req, sock, 400, 'Invalid file path.');
-          return undefined;
-        }
-
-        return safeName;
-      } catch (e) {
-        log.warn('Failed to decode filename', {
-          original: name,
-          error: (e as Error).message,
-          url: req.url,
-        });
-        utils.plain(req, sock, 400, 'Invalid filename encoding.');
-        return undefined;
+    // If no filename provided, respond with error or undefined
+    if (!name) {
+      if (extra?.message) {
+        utils.plain(req, sock, 400, extra.message);
       }
+      return undefined;
     }
 
-    log.warn('File name missing', { url: req.url, method: req.method, ...(extra || {}) });
-    utils.plain(
-      req,
-      sock,
-      400,
-      extra?.message || 'File name is required in path or as "file" query parameter.',
-    );
+    // Decode filename safely
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(name);
+    } catch {
+      utils.plain(req, sock, 400, 'Invalid filename encoding.');
+      return undefined;
+    }
+
+    // Normalize and reject any path traversal or absolute paths
+    const normalized = path.normalize(decoded);
+    if (path.isAbsolute(normalized) || normalized.split(path.sep).includes('..')) {
+      log.warn('Potential path traversal attempt blocked', {
+        original: name,
+        decoded,
+        normalized,
+        url: req.url,
+      });
+      utils.plain(req, sock, 400, 'Invalid file path.');
+      return undefined;
+    }
+
+    // Try direct stat on normalized path
+    try {
+      await fileSvc.stat(normalized);
+      return normalized;
+    } catch {
+      // If not found, attempt recursive search
+      const found = await fileSvc.findFileByName(normalized);
+      if (found) return found;
+    }
+
+    // File not found after checks
+    utils.plain(req, sock, 404, 'File not found.');
     return undefined;
   },
 
@@ -825,6 +846,7 @@ export const fileHostingController = {
       'Content-Range': `bytes ${start}-${end}/${size}`,
       'Accept-Ranges': 'bytes',
       'Accept-Encoding': acceptEnc, // Not typically needed for range requests, compression handled differently
+      Connection: 'close',
       ...utils.buildCacheHeaders(size, statResult.mtime), // Cache headers still useful
     };
 

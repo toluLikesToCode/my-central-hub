@@ -415,7 +415,7 @@ class EmbeddingService {
           );
 
           remapped[reqPath] = {
-            schemaVersion: '1.0.0',
+            schemaVersion: '1.1.0',
             filePath: reqPath,
             error: 'File not found in public directory',
             mtime: 0,

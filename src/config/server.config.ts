@@ -20,17 +20,19 @@ export const config = {
   mediaDir: process.env.MEDIA_DIR
     ? join(process.cwd(), process.env.MEDIA_DIR)
     : join(process.cwd(), 'public', 'media'),
+  // DDoS protection settings:
+  maxConnectionsPerIp: process.env.MAX_CONN_PER_IP ? parseInt(process.env.MAX_CONN_PER_IP, 10) : 50,
   headerTimeoutMs: process.env.HEADER_TIMEOUT_MS
-    ? Math.max(parseInt(process.env.HEADER_TIMEOUT_MS, 10) * 1000, 0)
-    : 30 * 1000, // 30 seconds
-  bodyTimeoutMs: process.env.BODY_TIMEOUT_MS
-    ? Math.max(parseInt(process.env.BODY_TIMEOUT_MS, 10) * 1000, 0)
-    : 60 * 1000, //60 seconds
-  uploadTimeoutMS: 5 * 60 * 1000, // 5 mins
+    ? parseInt(process.env.HEADER_TIMEOUT_MS, 10)
+    : 10000, // 10 s to receive headers
+  bodyTimeoutMs: process.env.BODY_TIMEOUT_MS ? parseInt(process.env.BODY_TIMEOUT_MS, 10) : 30000, // 30 s to send full body
+  uploadTimeoutMs: process.env.UPLOAD_TIMEOUT_MS
+    ? parseInt(process.env.UPLOAD_TIMEOUT_MS, 10)
+    : 60000, // 60 s max per request
   /**
-   * Path to the SQLite database file. Will be created if missing.
+   * Path to the SQLite database directory. Will be created if missing.
    */
-  dbPath: process.env.DB_PATH ? process.env.DB_PATH : join(process.cwd(), 'data', 'metrics.db'),
+  dbPath: process.env.DB_PATH ? process.env.DB_PATH : join(process.cwd(), 'data'),
   /**
    * Admin key for privileged operations (cache management, etc.)
    */
@@ -51,6 +53,7 @@ export const config = {
     fileHosting: true,
     fileStreaming: true,
     embeddingService: true,
+    remoteLogging: true, // Enable the remote logging feature
     // Add more features here as needed
   },
 
@@ -104,6 +107,10 @@ export const config = {
   },
   testMode: false, // Set to true for testing purposes
   staticDir: process.env.STATIC_DIR || join(process.cwd(), 'public'), // Static files directory
+  // Maximum allowed JSON/body size in bytes
+  maxBodySizeBytes: process.env.MAX_BODY_SIZE_BYTES
+    ? parseInt(process.env.MAX_BODY_SIZE_BYTES, 10)
+    : 10 * 1024 * 1024, // default 10 MB
 };
 
 // Only log configuration if logger is defined and we're in test mode

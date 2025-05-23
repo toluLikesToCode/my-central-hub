@@ -41,8 +41,8 @@ export interface FileInfo {
 
 // Get cache options from config
 const DEFAULT_CACHE_OPTIONS: CacheOptions = {
-  maxSize: config.fileCache?.maxSize || 200 * 1024 * 1024, // 200MB
-  maxAge: config.fileCache?.maxAge || 10 * 60 * 1000, // 10 minutes
+  maxSize: config.fileCache?.maxSize || 500 * 1024 * 1024, // 500MB
+  maxAge: config.fileCache?.maxAge || 20 * 60 * 1000, // 20 minutes
   enabled: config.fileCache?.enabled !== false, // Default to true
 };
 
@@ -231,8 +231,8 @@ export class FileHostingService {
       const fileSize = fileStat.size;
       const mimeType = getMimeType(relPath) || 'application/octet-stream';
 
-      // Only cache files under 10MB
-      const CACHE_SIZE_LIMIT = 10 * 1024 * 1024; // 10MB
+      // Only cache files under 40MB
+      const CACHE_SIZE_LIMIT = 40 * 1024 * 1024; // 40MB
       const shouldCache = fileSize <= CACHE_SIZE_LIMIT;
 
       // If file is in cache and up-to-date, return from cache
@@ -396,5 +396,24 @@ export class FileHostingService {
         destination: destPath,
       });
     }
+  }
+
+  /**
+   * Recursively search for a file by name under the root directory.
+   * Returns the relative path if found, or null if not found.
+   */
+  async findFileByName(fileName: string, dir: string = '.'): Promise<string | null> {
+    const absDir = this.resolveSafe(dir);
+    const entries = await readdir(absDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const relPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const found = await this.findFileByName(fileName, relPath);
+        if (found) return found;
+      } else if (entry.isFile() && entry.name === fileName) {
+        return relPath;
+      }
+    }
+    return null;
   }
 }

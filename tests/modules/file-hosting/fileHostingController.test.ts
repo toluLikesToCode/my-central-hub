@@ -53,12 +53,14 @@ const sourceStream = new PassThrough();
 // Create file hosting service mock
 const mockStat = jest.fn();
 const mockReadFile = jest.fn();
+const mockFindFileByName = jest.fn();
 jest.mock('../../../src/modules/file-hosting/fileHostingService', () => {
   return {
     FileHostingService: jest.fn().mockImplementation(() => {
       return {
         stat: mockStat,
         readFile: mockReadFile,
+        findFileByName: mockFindFileByName,
       };
     }),
   };
@@ -320,6 +322,62 @@ describe('fileHostingController - Compression Tests', () => {
         200,
         expect.anything(),
         mockBrotliStream,
+      );
+    });
+  });
+
+  describe('resolveFileName', () => {
+    test('normalizes paths correctly by removing parent segments', async () => {
+      // Mock request with a path containing parent traversal segments
+      const reqNorm = {
+        ctx: { params: { filename: 'folder/../test.html' } },
+        url: '/api/files/folder/../test.html',
+        query: {},
+        headers: {},
+      };
+      const sockNorm = {
+        destroyed: false,
+        write: jest.fn(),
+        end: jest.fn(),
+        destroy: jest.fn(),
+        on: jest.fn(),
+        remoteAddress: '127.0.0.1',
+      };
+
+      // Ensure stat succeeds on normalized name
+      mockStat.mockResolvedValue({ size: 0, mtime: new Date(), isFile: () => true });
+
+      const result = await fileHostingController.resolveFileName(reqNorm, sockNorm);
+      expect(result).toBe('test.html');
+      // Should not send an error response
+      expect(mockSendResponse).not.toHaveBeenCalled();
+    });
+
+    test('rejects paths with parent traversal segments and sends 400', async () => {
+      const reqReject = {
+        ctx: { params: { filename: '../../secret.txt' } },
+        url: '/api/files/../../secret.txt',
+        query: {},
+        headers: {},
+      };
+      const sockReject = {
+        destroyed: false,
+        write: jest.fn(),
+        end: jest.fn(),
+        destroy: jest.fn(),
+        on: jest.fn(),
+        remoteAddress: '127.0.0.1',
+      };
+
+      mockSendResponse.mockClear();
+      const resultReject = await fileHostingController.resolveFileName(reqReject, sockReject);
+      expect(resultReject).toBeUndefined();
+      // Should have sent a 400 plain response for invalid path
+      expect(mockSendResponse).toHaveBeenCalledWith(
+        sockReject,
+        400,
+        expect.objectContaining({ 'Content-Type': 'text/plain' }),
+        'Invalid file path.',
       );
     });
   });

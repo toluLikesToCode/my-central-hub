@@ -5,6 +5,7 @@ import './files.routes';
 import './metrics.routes';
 import './embeddings.routes';
 import './file-hosting.routes';
+import './logging.routes';
 import router from '../core/router';
 import { sendWithContext } from '../entities/sendResponse';
 

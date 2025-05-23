@@ -335,7 +335,7 @@ if (config.features.fileHosting) {
   router.get('/api/files/:filename/stats', async (req: IncomingRequest, sock: Socket) => {
     // Extract filename from URL path
     const pathMatch = req.path.match(/\/api\/files\/([^/]+)\/stats$/);
-    const filename = pathMatch ? decodeURIComponent(pathMatch[1]) : '';
+    const filename = pathMatch ? pathMatch[1] : '';
 
     routeLogger.debug('File stats detail request received', {
       filename,
@@ -764,7 +764,7 @@ if (config.features.fileHosting) {
   router.any('/api/files/:filename', (req: IncomingRequest, sock: Socket) => {
     // Extract filename from URL path using regex instead of req.params
     const pathMatch = req.path.match(/\/api\/files\/([^/]+)$/);
-    const filename = pathMatch ? decodeURIComponent(pathMatch[1]) : '';
+    const filename = pathMatch ? pathMatch[1] : '';
 
     routeLogger.debug(`${req.method} request received for file`, {
       filename,

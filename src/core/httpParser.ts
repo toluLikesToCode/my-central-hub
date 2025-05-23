@@ -17,8 +17,15 @@ enum ParserState {
 const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
 const MAX_HEADER_BYTES = 8192; // 8KB
 const MAX_HEADERS = 100; // Maximum number of headers allowed
-const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_BODY_BYTES = config.maxBodySizeBytes;
 const CRLF = Buffer.from('\r\n');
+
+export class RequestEntityTooLargeError extends Error {
+  constructor(message = 'Request body too large') {
+    super(message);
+    this.name = 'RequestEntityTooLargeError';
+  }
+}
 
 export class HttpRequestParser {
   protected buffer = Buffer.alloc(0);
@@ -205,8 +212,8 @@ export class HttpRequestParser {
             continue;
           }
           if (this.contentLength > MAX_BODY_BYTES) {
-            this._setError('Request body too large');
-            continue;
+            // immediately abort parsing
+            throw new RequestEntityTooLargeError();
           }
           this.remainingBody = this.contentLength;
           if (this.buffer.length < this.remainingBody) return null;
@@ -236,8 +243,7 @@ export class HttpRequestParser {
         // CHUNK_BODY
         if (this.state === ParserState.CHUNK_BODY) {
           if (this.remainingBody > MAX_BODY_BYTES) {
-            this._setError('Chunk body too large');
-            continue;
+            throw new RequestEntityTooLargeError();
           }
           if (this.buffer.length < this.remainingBody) return null;
           const chunk = this.buffer.subarray(0, this.remainingBody);

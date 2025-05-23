@@ -184,23 +184,33 @@ class Router {
   }
 
   /**
+   * Normalize a path: ensures leading slash, removes trailing slash (except for root)
+   */
+  private static normalizePath(path: string): string {
+    if (!path.startsWith('/')) path = '/' + path;
+    if (path.length > 1 && path.endsWith('/')) path = path.replace(/\/+$/, '');
+    return path;
+  }
+
+  /**
    * Register a route with the specified method, path pattern, and handler
    * @param method - HTTP method (GET, POST, etc.) or 'ANY' for any method
    * @param path - URL path pattern with optional parameters
    * @param handler - Function to handle matching requests
    */
   add(method: string, path: string, handler: Handler) {
-    const { regex, keys } = compilePath(path);
+    const normalizedPath = Router.normalizePath(path);
+    const { regex, keys } = compilePath(normalizedPath);
     this.routes.push({
       method: method.toUpperCase(),
       regex,
       keys,
       handler,
-      originalPath: path,
+      originalPath: normalizedPath,
     });
     logger.debug('Route registered', {
       method: method.toUpperCase(),
-      path,
+      path: normalizedPath,
       paramKeys: keys,
     });
     return this; // Enable chaining
@@ -256,6 +266,26 @@ class Router {
   }
 
   /**
+   * Register a debug endpoint that lists all registered routes
+   */
+  registerDebugRoute() {
+    this.get('/__routes__', (req, sock) => {
+      const routesList = this.routes.map((r) => ({
+        method: r.method,
+        path: r.originalPath,
+      }));
+      sendWithContext(
+        req,
+        sock,
+        200,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({ routes: routesList }, null, 2),
+      );
+    });
+    return this;
+  }
+
+  /**
    * Helper to capture headers from a handler without sending a body
    * Simulates Express's approach for HEAD requests
    */
@@ -294,6 +324,10 @@ class Router {
    */
   async handle(req: IncomingRequest, sock: Socket): Promise<void> {
     const startTime = process.hrtime();
+    // Normalize path to always start with a slash and remove trailing slash (except root)
+    if (req.path) {
+      req.path = Router.normalizePath(req.path);
+    }
     let requestId = req.ctx?.requestId || req.headers['x-request-id'] || req.headers['request-id'];
     if (!requestId) {
       const newRequestId = crypto.randomUUID();
@@ -353,7 +387,34 @@ class Router {
       // If no routes match the path
       if (matching.length === 0) {
         reqLogger.debug('No routes match request path');
-        sendWithContext(req, sock, 404, { 'Content-Type': 'text/plain' }, 'Not Found');
+        // Find similar routes for suggestion
+        const availablePaths = this.routes.map((r) => r.originalPath);
+        const suggestion =
+          availablePaths.length > 0
+            ? `Available routes: ${availablePaths.join(', ')}`
+            : 'No routes registered.';
+        const isApi = req.path.startsWith('/api/');
+        if (isApi) {
+          sendWithContext(
+            req,
+            sock,
+            404,
+            { 'Content-Type': 'application/json' },
+            JSON.stringify({
+              error: 'Not Found',
+              message: `No route matches ${req.path}`,
+              suggestion,
+            }),
+          );
+        } else {
+          sendWithContext(
+            req,
+            sock,
+            404,
+            { 'Content-Type': 'text/plain' },
+            `404 Not Found: ${req.path}\n${suggestion}`,
+          );
+        }
         logRequestCompletion(reqLogger, startTime, 404);
         return;
       }
@@ -507,6 +568,7 @@ export function createRouter(): Router {
   router.use(requestIdMiddleware); // Register the request ID middleware
   router.use(optionsHandlerMiddleware); // Register OPTIONS handler middleware
   router.use(corsMiddleware); // Register the CORS middleware
+  router.registerDebugRoute(); // Register the debug route
   return router;
 }
 

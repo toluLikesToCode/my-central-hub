@@ -24,9 +24,7 @@ Usage:
 import os
 import sys
 import time
-import json
 import uuid
-import tempfile
 import logging
 import io
 from typing import List, Dict, Any, Optional, Union
@@ -35,11 +33,6 @@ import torch
 import uvicorn
 from fastapi import (
     FastAPI,
-    File,
-    UploadFile,
-    HTTPException,
-    BackgroundTasks,
-    Query,
     Request,
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -102,12 +95,20 @@ class BatchEmbeddingResponse(BaseModel):
 
 class GPUMetrics(BaseModel):
     available: bool
+    device_index: Optional[int] = None
     device_name: Optional[str] = None
+    driver_version: Optional[str] = None
     memory_allocated_mb: Optional[float] = None
     memory_reserved_mb: Optional[float] = None
     memory_free_mb: Optional[float] = None
     memory_total_mb: Optional[float] = None
     utilization_percent: Optional[float] = None
+    mps_info: Optional[Dict[str, Any]] = None  # For MPS-specific details
+    compute_capability: Optional[str] = None
+    multiprocessor_count: Optional[int] = None
+    gpu_clock_mhz: Optional[int] = None
+    pci_bus_id: Optional[str] = None
+    cuda_capability: Optional[str] = None
 
 
 class ServiceHealth(BaseModel):
@@ -231,32 +232,55 @@ async def get_gpu_metrics():
     if torch.cuda.is_available():
         try:
             device_index = 0  # Assuming single GPU
+            device_prop = torch.cuda.get_device_properties(device_index)
             device_name = torch.cuda.get_device_name(device_index)
+            driver_version = torch.version.cuda
             memory_allocated = torch.cuda.memory_allocated(device_index) / (
                 1024**2
             )  # MB
             memory_reserved = torch.cuda.memory_reserved(device_index) / (1024**2)  # MB
-            memory_total = torch.cuda.get_device_properties(
-                device_index
-            ).total_memory / (
-                1024**2
-            )  # MB
+            memory_total = device_prop.total_memory / (1024**2)  # MB
             memory_free = memory_total - memory_allocated
 
+            # Try to get utilization if possible (requires pynvml or torch >= 2.1)
+            utilization = None
             try:
-                # This is only available with NVML (NVIDIA Management Library)
-                utilization = torch.cuda.utilization(device_index)
-            except:
-                utilization = None
+                import pynvml
+
+                pynvml.nvmlInit()
+                handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                utilization = util.gpu
+                pci_bus_id = pynvml.nvmlDeviceGetPciInfo(handle).busId.decode()
+                pynvml.nvmlShutdown()
+            except Exception:
+                pci_bus_id = getattr(device_prop, "pci_bus_id", None)
+                try:
+                    utilization = torch.cuda.utilization(device_index)
+                except Exception:
+                    utilization = None
+
+            compute_capability = f"{device_prop.major}.{device_prop.minor}"
+            multiprocessor_count = getattr(device_prop, "multi_processor_count", None)
+            gpu_clock_mhz = getattr(device_prop, "clock_rate", None)
+            cuda_capability = f"{device_prop.major}.{device_prop.minor}"
 
             metrics = {
                 "available": True,
+                "device_index": device_index,
                 "device_name": device_name,
+                "driver_version": driver_version,
                 "memory_allocated_mb": memory_allocated,
                 "memory_reserved_mb": memory_reserved,
                 "memory_free_mb": memory_free,
                 "memory_total_mb": memory_total,
                 "utilization_percent": utilization,
+                "mps_info": None,
+                "compute_capability": compute_capability,
+                "multiprocessor_count": multiprocessor_count,
+                "gpu_clock_mhz": gpu_clock_mhz,
+                "pci_bus_id": pci_bus_id,
+                "cuda_capability": cuda_capability,
             }
         except Exception as e:
             logger.error(f"Error getting CUDA metrics: {e}")
@@ -264,10 +288,28 @@ async def get_gpu_metrics():
     elif torch.backends.mps.is_available():
         try:
             # MPS (Metal Performance Shaders) for Apple Silicon - has limited metrics
+            mps_info = {
+                "is_available": torch.backends.mps.is_available(),
+                "is_built": torch.backends.mps.is_built(),
+                "device_count": 1,  # MPS is always device 0 if available
+                "torch_version": torch.__version__,
+            }
             metrics = {
                 "available": True,
+                "device_index": 0,
                 "device_name": "Apple MPS (Metal)",
-                # Other metrics not available through torch for MPS
+                "driver_version": None,
+                "memory_allocated_mb": None,
+                "memory_reserved_mb": None,
+                "memory_free_mb": None,
+                "memory_total_mb": None,
+                "utilization_percent": None,
+                "mps_info": mps_info,
+                "compute_capability": None,
+                "multiprocessor_count": None,
+                "gpu_clock_mhz": None,
+                "pci_bus_id": None,
+                "cuda_capability": None,
             }
         except Exception as e:
             logger.error(f"Error getting MPS metrics: {e}")

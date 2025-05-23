@@ -421,8 +421,8 @@ describe('Router', () => {
       const headReq = {
         ...req,
         method: 'HEAD',
-        path: '/test-head-fallback',
-        url: new URL('http://localhost/test-head-fallback'),
+        path: '/api/client-error-ingest',
+        url: new URL('http://localhost/api/client-error-ingest'),
       };
       const getHandler = jest.fn().mockImplementation((req, sock) => {
         sendResponseModule.sendWithContext(
@@ -433,7 +433,7 @@ describe('Router', () => {
           'GET response body',
         );
       });
-      router.get('/test-head-fallback', getHandler);
+      router.get('/api/client-error-ingest', getHandler);
 
       await router.handle(headReq, socket);
 

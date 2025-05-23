@@ -9,21 +9,24 @@ import type { IncomingRequest } from './http';
 
 const STATUS_TEXT: Record<number, string> = {
   200: 'OK',
-  201: 'Created', // Added for common use
-  204: 'No Content', // Added for common use
+  201: 'Created',
+  204: 'No Content',
   206: 'Partial Content',
   301: 'Moved Permanently', // Added
-  302: 'Found', // Added (often used for temporary redirect)
+  302: 'Found',
   304: 'Not Modified', // Added
   400: 'Bad Request',
   401: 'Unauthorized', // Added
   403: 'Forbidden', // Added
   404: 'Not Found',
   405: 'Method Not Allowed',
+  408: 'Request Timeout',
+  413: 'Payload Too Large',
   416: 'Range Not Satisfiable',
+  429: 'Too Many Requests',
   500: 'Internal Server Error',
-  502: 'Bad Gateway', // Added
-  503: 'Service Unavailable', // Added
+  502: 'Bad Gateway',
+  503: 'Service Unavailable',
 };
 
 // Add a new interface for chunked response options

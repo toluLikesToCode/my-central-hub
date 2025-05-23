@@ -26,6 +26,10 @@ deprecationLogger.warn('Using deprecated /files route', {
   migrationDeadline: '2025-08-01',
 });
 
+// NOTE: This route does not accept user-supplied file paths directly.
+// Path traversal protection is enforced in fileHostingController and FileHostingService.
+// If this route is ever extended to accept file paths, ensure to sanitize all user input.
+
 // Keep for backward compatibility but log deprecation warning on access
 router.get('/files', (req, sock) => {
   deprecationLogger.warn('Accessed deprecated /files endpoint', {
