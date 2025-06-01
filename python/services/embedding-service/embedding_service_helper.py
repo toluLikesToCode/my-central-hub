@@ -520,20 +520,27 @@ class VideoProcessor:
 
     def _extract_frame_software(self, time_sec: float) -> Image.Image:
         self.logger.debug(f"Extracting frame (software) at {time_sec:.2f}s")
-        # Fast path: use persistent cv2.VideoCapture if available
+        # Use a fresh cv2.VideoCapture for each extraction to avoid crashes
         try:
-            if self._cv2_capture is None:
-                self._cv2_capture = cv2.VideoCapture(self.video_path)
-            cap = self._cv2_capture
+            cap = cv2.VideoCapture(self.video_path)
+            if not cap.isOpened():
+                self.logger.warning(f"OpenCV failed to open video: {self.video_path}")
+                cap.release()
+                raise RuntimeError(f"OpenCV could not open video: {self.video_path}")
             cap.set(cv2.CAP_PROP_POS_MSEC, time_sec * 1000)
             ret, frame = cap.read()
+            cap.release()
             if ret and frame is not None:
-                # Convert BGR to RGB and return PIL Image
                 img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 return img
-        except Exception:
-            # Fallback to ffmpeg if OpenCV read fails
-            pass
+            else:
+                self.logger.warning(
+                    f"OpenCV failed to read frame at {time_sec:.2f}s from {self.video_path}"
+                )
+        except Exception as e:
+            self.logger.error(
+                f"OpenCV extraction failed at {time_sec:.2f}s: {e}", error=e
+            )
 
         command = [
             "ffmpeg",
