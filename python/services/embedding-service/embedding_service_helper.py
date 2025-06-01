@@ -220,18 +220,39 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 
 
 def compute_entropy(image: Image.Image) -> float:
-    # ... (omitted for brevity, same as original)
-    grayscale = image.convert("L")
-    histogram = grayscale.histogram()
-    total_pixels = sum(histogram)
-    if total_pixels == 0:
+    """
+    Compute the visual entropy of an image using histogram-based approach.
+
+    Args:
+        image: PIL Image object
+
+    Returns:
+        float: Entropy value (higher values indicate more visual information/complexity)
+    """
+    try:
+        # Convert to grayscale for entropy calculation
+        grayscale = image.convert("L")
+
+        # Get histogram of pixel intensities (0-255)
+        histogram = grayscale.histogram()
+
+        # Calculate total pixels
+        total_pixels = sum(histogram)
+        if total_pixels == 0:
+            return 0.0
+
+        # Calculate Shannon entropy
+        entropy = 0.0
+        for count in histogram:
+            if count > 0:
+                probability = count / total_pixels
+                entropy -= probability * math.log2(probability)
+
+        return entropy
+
+    except Exception as e:
+        # Return a default low entropy value if computation fails
         return 0.0
-    entropy = 0.0
-    for count in histogram:
-        if count > 0:
-            p = count / total_pixels
-            entropy -= p * math.log2(p)
-    return entropy
 
 
 class VideoProcessor:
@@ -519,87 +540,107 @@ class VideoProcessor:
             ) from e_generic
 
     def _extract_frame_software(self, time_sec: float) -> Image.Image:
-        self.logger.debug(f"Extracting frame (software) at {time_sec:.2f}s")
-        # Use a fresh cv2.VideoCapture for each extraction to avoid crashes
-        try:
-            cap = cv2.VideoCapture(self.video_path)
-            if not cap.isOpened():
-                self.logger.warning(f"OpenCV failed to open video: {self.video_path}")
-                cap.release()
-                raise RuntimeError(f"OpenCV could not open video: {self.video_path}")
-            cap.set(cv2.CAP_PROP_POS_MSEC, time_sec * 1000)
-            ret, frame = cap.read()
-            cap.release()
-            if ret and frame is not None:
-                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                return img
-            else:
-                self.logger.warning(
-                    f"OpenCV failed to read frame at {time_sec:.2f}s from {self.video_path}"
-                )
-        except Exception as e:
-            self.logger.error(
-                f"OpenCV extraction failed at {time_sec:.2f}s: {e}", error=e
-            )
+        self.logger.debug(
+            f"Attempting software frame extraction using FFmpeg (PPM) at {time_sec:.2f}s for '{self.video_path}'."
+        )
 
         command = [
             "ffmpeg",
-            "-y",
+            "-y",  # Overwrite output files without asking (though not strictly needed for pipes)
             "-loglevel",
-            "warning",
-            # use all available CPU threads for software decode
+            "warning",  # Suppress verbose output, only show warnings and errors
+            "-hide_banner",  # Hide FFmpeg banner information from stderr
             "-threads",
-            "0",
+            "0",  # Use all available CPU threads for decoding
             "-ss",
-            str(time_sec),
+            str(time_sec),  # Seek to the specified time
             "-i",
-            self.video_path,
+            self.video_path,  # Input video file
             "-vframes",
-            "1",
+            "1",  # Extract exactly one frame
             "-f",
-            "image2pipe",
-            # output raw PPM for faster decode (no JPEG compression)
+            "image2pipe",  # Output to a pipe
             "-c:v",
-            "ppm",
-            "-",
+            "ppm",  # Output codec as PPM (Portable Pixmap, raw image format)
+            "-",  # Output to stdout
         ]
-        cmd_str_preview = " ".join(command[:8]) + "..."
+        # Create a preview of the command for logging, avoiding overly long strings with full paths
+        cmd_str_preview = (
+            " ".join(command[:5])
+            + f" -ss {str(time_sec)} -i ... "
+            + " ".join(command[-5:])
+        )
+
         try:
+            # Log the command being executed for easier debugging if issues arise
+            self.logger.debug(
+                f"Executing FFmpeg software extraction command: {' '.join(command)}"
+            )
+
+            process_start_time = time.time()
             result = subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=True,
-                timeout=20,
+                check=True,  # Raise CalledProcessError if FFmpeg returns a non-zero exit code
+                timeout=20,  # Timeout for the FFmpeg process
             )
+            process_duration_ms = (time.time() - process_start_time) * 1000
+
             if not result.stdout:
                 stderr_output = (
                     result.stderr.decode("utf-8", errors="ignore").strip()
                     if result.stderr
                     else "No stderr"
                 )
-                err_msg = f"No stdout. Stderr: {stderr_output}"
+                err_msg = f"No stdout (frame data) from FFmpeg. Stderr: {stderr_output}"
                 self.logger.error(
-                    f"ffmpeg (software) failed for '{self.video_path}' at {time_sec:.2f}s: {err_msg}",
+                    f"FFmpeg (software PPM) failed for '{self.video_path}' at {time_sec:.2f}s: {err_msg}",
                     extra={
                         "time_sec": time_sec,
                         "stderr": stderr_output,
-                        "command_preview": cmd_str_preview,
+                        "full_command": " ".join(
+                            command
+                        ),  # Log full command for detailed debugging
+                        "video_path": self.video_path,
+                        "duration_ms": process_duration_ms,
                     },
                 )
                 raise RuntimeError(
-                    f"No frame data from software mjpeg. Stderr: {stderr_output}"
+                    f"No frame data from software FFmpeg (PPM) at {time_sec:.2f}s. Stderr: {stderr_output}. Command preview: {cmd_str_preview}"
                 )
+
+            self.logger.debug(
+                f"FFmpeg (software PPM) successfully extracted frame at {time_sec:.2f}s in {process_duration_ms:.2f}ms. Output size: {len(result.stdout)} bytes.",
+                extra={
+                    "time_sec": time_sec,
+                    "video_path": self.video_path,
+                    "duration_ms": process_duration_ms,
+                    "output_bytes": len(result.stdout),
+                },
+            )
             return Image.open(io.BytesIO(result.stdout)).convert("RGB")
+
         except subprocess.TimeoutExpired as e_timeout:
+            stderr_output = (
+                e_timeout.stderr.decode("utf-8", errors="ignore").strip()
+                if e_timeout.stderr
+                else "N/A (timeout before stderr)"
+            )
             self.logger.error(
-                f"ffmpeg (software) timeout at {time_sec:.2f}s",
+                f"FFmpeg (software PPM) timeout extracting frame from '{self.video_path}' at {time_sec:.2f}s. Stderr: {stderr_output}",
                 error=e_timeout,
-                extra={"time_sec": time_sec, "command_preview": cmd_str_preview},
+                extra={
+                    "time_sec": time_sec,
+                    "full_command": " ".join(command),
+                    "video_path": self.video_path,
+                    "stderr_on_timeout": stderr_output,
+                },
             )
             raise RuntimeError(
-                f"ffmpeg (software) timeout extracting frame at {time_sec:.2f}s. Command: {cmd_str_preview}"
+                f"FFmpeg (software PPM) timeout extracting frame at {time_sec:.2f}s. Command preview: {cmd_str_preview}. Stderr: {stderr_output}"
             ) from e_timeout
+
         except subprocess.CalledProcessError as e_call:
             stderr_output = (
                 e_call.stderr.decode("utf-8", errors="ignore").strip()
@@ -607,26 +648,54 @@ class VideoProcessor:
                 else "N/A"
             )
             self.logger.error(
-                f"ffmpeg (software) error code {e_call.returncode} at {time_sec:.2f}s. Stderr: {stderr_output}",
+                f"FFmpeg (software PPM) error (code {e_call.returncode}) for '{self.video_path}' at {time_sec:.2f}s. Stderr: {stderr_output}",
                 error=e_call,
                 extra={
                     "time_sec": time_sec,
                     "return_code": e_call.returncode,
                     "stderr": stderr_output,
-                    "command_preview": cmd_str_preview,
+                    "full_command": " ".join(command),
+                    "video_path": self.video_path,
                 },
             )
             raise RuntimeError(
-                f"Software frame extraction failed (code {e_call.returncode}) at {time_sec:.2f}s. Stderr: {stderr_output}. Command: {cmd_str_preview}"
+                f"Software FFmpeg (PPM) frame extraction failed (code {e_call.returncode}) at {time_sec:.2f}s. Stderr: {stderr_output}. Command preview: {cmd_str_preview}"
             ) from e_call
-        except Exception as e_generic:
+
+        except FileNotFoundError:  # Should not happen if ffprobe worked in __init__
             self.logger.error(
-                f"Frame extraction (software) failed at {time_sec:.2f}s: {e_generic}",
-                error=e_generic,
-                extra={"time_sec": time_sec, "command_preview": cmd_str_preview},
+                f"FFmpeg executable not found. Please ensure FFmpeg is installed and in PATH. Video: '{self.video_path}', Time: {time_sec:.2f}s",
+                extra={
+                    "time_sec": time_sec,
+                    "full_command": " ".join(command),
+                    "video_path": self.video_path,
+                },
             )
             raise RuntimeError(
-                f"Failed to extract frame at {time_sec:.2f}s using software mjpeg: {e_generic}. Command: {cmd_str_preview}"
+                f"FFmpeg executable not found for software extraction. Command preview: {cmd_str_preview}"
+            )
+
+        except Exception as e_generic:
+            # Attempt to decode stderr if available on the generic exception
+            stderr_info = "N/A"
+            if hasattr(e_generic, "stderr") and e_generic.stderr:  # type: ignore
+                try:
+                    stderr_info = e_generic.stderr.decode("utf-8", errors="ignore").strip()  # type: ignore
+                except Exception:
+                    stderr_info = "Error decoding stderr"
+
+            self.logger.error(
+                f"Generic error during FFmpeg (software PPM) frame extraction from '{self.video_path}' at {time_sec:.2f}s: {e_generic}. Stderr: {stderr_info}",
+                error=e_generic,
+                extra={
+                    "time_sec": time_sec,
+                    "full_command": " ".join(command),
+                    "video_path": self.video_path,
+                    "stderr_info": stderr_info,
+                },
+            )
+            raise RuntimeError(
+                f"Failed to extract frame at {time_sec:.2f}s using software FFmpeg (PPM): {e_generic}. Command preview: {cmd_str_preview}. Stderr: {stderr_info}"
             ) from e_generic
 
     def extract_frame(
@@ -963,7 +1032,12 @@ class VideoProcessor:
 
 
 class CLIPEmbedder:
-    # ... (omitted for brevity, same as original)
+    """
+    A CLIP model wrapper for generating embeddings from PIL images.
+    Supports both CPU and GPU inference with optional data augmentation.
+    """
+
+    model: Any
     preprocess: Callable[[Any], torch.Tensor]
 
     def __init__(
@@ -1087,6 +1161,15 @@ class CLIPEmbedder:
     def get_embeddings_for_pil_list(
         self, pil_image_list: List[Image.Image]
     ) -> torch.Tensor:
+        """
+        Generate CLIP embeddings for a list of PIL images.
+
+        Args:
+            pil_image_list: List of PIL Image objects to process
+
+        Returns:
+            torch.Tensor: Normalized embeddings tensor on CPU
+        """
         if not pil_image_list:
             return torch.empty(0, dtype=torch.float32, device="cpu")
 
@@ -1152,6 +1235,119 @@ class CLIPEmbedder:
             f"GPU inference for batch of {len(pil_image_list)} items completed in {gpu_duration_ms:.2f}ms. Output shape: {image_features_batch.shape}"
         )
         return image_features_batch.cpu()
+
+    def get_single_embedding(self, pil_image: Image.Image) -> List[float]:
+        """
+        Generate CLIP embedding for a single PIL image.
+
+        Args:
+            pil_image: PIL Image object to process
+
+        Returns:
+            List[float]: Normalized embedding as a list of floats
+        """
+        embeddings_tensor = self.get_embeddings_for_pil_list([pil_image])
+        if embeddings_tensor.shape[0] == 0:
+            return []
+        return embeddings_tensor[0].tolist()
+
+    def get_text_embedding(self, text: str) -> List[float]:
+        """
+        Generate CLIP embedding for text.
+
+        Args:
+            text: Text string to encode
+
+        Returns:
+            List[float]: Normalized text embedding as a list of floats
+        """
+        try:
+            text_tokens = open_clip.tokenize([text]).to(self.device)
+
+            autocast_context = nullcontext()
+            if self.device != "cpu":
+                autocast_context = torch.autocast(device_type=self.device.split(":")[0])
+
+            with torch.no_grad(), autocast_context:
+                text_features = self.model.encode_text(text_tokens)
+                if text_features is not None:
+                    text_features = text_features / text_features.norm(
+                        p=2, dim=-1, keepdim=True
+                    )
+                else:
+                    self.logger.error(
+                        "Model encode_text returned None, which is unexpected."
+                    )
+                    raise RuntimeError("Text encoding failed, returned None.")
+
+            return text_features.cpu()[0].tolist()
+
+        except Exception as e_text:
+            self.logger.error(f"Failed to encode text '{text}': {e_text}", error=e_text)
+            raise RuntimeError(f"Text encoding failed: {e_text}") from e_text
+
+    def compute_similarity(
+        self, embedding1: List[float], embedding2: List[float]
+    ) -> float:
+        """
+        Compute cosine similarity between two embeddings.
+
+        Args:
+            embedding1: First embedding as list of floats
+            embedding2: Second embedding as list of floats
+
+        Returns:
+            float: Cosine similarity score between -1 and 1
+        """
+        if not embedding1 or not embedding2:
+            return 0.0
+
+        try:
+            tensor1 = torch.tensor(embedding1, dtype=torch.float32)
+            tensor2 = torch.tensor(embedding2, dtype=torch.float32)
+
+            # Compute cosine similarity
+            similarity = torch.nn.functional.cosine_similarity(
+                tensor1.unsqueeze(0), tensor2.unsqueeze(0)
+            )
+            return float(similarity.item())
+
+        except Exception as e_sim:
+            self.logger.error(f"Failed to compute similarity: {e_sim}", error=e_sim)
+            return 0.0
+
+    def get_device_info(self) -> Dict[str, Any]:
+        """
+        Get information about the device and model.
+
+        Returns:
+            Dict containing device and model information
+        """
+        info = {
+            "device": self.device,
+            "model_name": self.model_name,
+            "enable_augmentation": self.enable_augmentation,
+        }
+
+        if self.device == "cuda" and torch.cuda.is_available():
+            info.update(
+                {
+                    "cuda_device_name": torch.cuda.get_device_name(),
+                    "cuda_memory_allocated": torch.cuda.memory_allocated(),
+                    "cuda_memory_reserved": torch.cuda.memory_reserved(),
+                }
+            )
+        elif self.device == "mps" and torch.backends.mps.is_available():
+            info["mps_available"] = True
+
+        return info
+
+    def __del__(self):
+        """Cleanup resources when the embedder is destroyed."""
+        if hasattr(self, "model") and self.model is not None:
+            del self.model
+        if self.device == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def _preprocess_single_item_for_batch(
@@ -1939,7 +2135,6 @@ def process_media_batch(
 
 
 if __name__ == "__main__":
-    # ... (omitted for brevity, same as original)
     print("[embedding_service_helper.py] Loaded environment/config values:")
     print(f"  PYTHON_PORT={os.environ.get('PYTHON_PORT')}")
     print(f"  PYTHON_MEDIA_ROOT={os.environ.get('PYTHON_MEDIA_ROOT')}")

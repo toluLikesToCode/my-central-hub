@@ -65,9 +65,9 @@ export const embeddingsController = {
    * Returns JSON: { "path1": { "embedding": [...] }, "path2": { "embedding": [...] }, ... }
    */
   async handleEmbeddingsRequest(req: IncomingRequest, sock: Socket) {
-    // Set socket timeout to 2 minutes (120,000 ms)
+    // Disable socket timeout for embeddings requests
     if (typeof sock.setTimeout === 'function') {
-      sock.setTimeout(120000);
+      sock.setTimeout(0); // disables timeout for this socket
     }
 
     const requestId = req.ctx?.requestId?.toString() || randomUUID().toString();
