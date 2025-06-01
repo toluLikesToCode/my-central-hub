@@ -64,7 +64,12 @@ export const embeddingsController = {
    * Expects a JSON body: { "files": ["path1", "path2", ...] } or legacy { "imagePaths": [...] }
    * Returns JSON: { "path1": { "embedding": [...] }, "path2": { "embedding": [...] }, ... }
    */
-  async handleEmbeddingsRequest(req: IncomingRequest, sock: Socket): Promise<void> {
+  async handleEmbeddingsRequest(req: IncomingRequest, sock: Socket) {
+    // Set socket timeout to 2 minutes (120,000 ms)
+    if (typeof sock.setTimeout === 'function') {
+      sock.setTimeout(120000);
+    }
+
     const requestId = req.ctx?.requestId?.toString() || randomUUID().toString();
     const context = embeddingsLogger.createContext({
       requestId: requestId,

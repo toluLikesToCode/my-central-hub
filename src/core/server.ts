@@ -234,14 +234,17 @@ export class HttpServer {
             req.headers['connection'] = 'keep-alive';
           }
 
-          // --- PATCH: Disable socket timeout for embeddings POST requests ---
+          // --- PATCH: Disable socket timeout and all timeouts for embeddings POST requests ---
           if (
             req.method === 'POST' &&
             req.path &&
             req.path.startsWith('/api/embeddings') &&
             typeof socket.setTimeout === 'function'
           ) {
-            socket.setTimeout(0); // Disable socket timeout for this socket
+            socket.setTimeout(0); // Disable socket timeout for embeddings
+            // Also clear any body/upload timers for embeddings
+            if (bodyTimer) clearTimeout(bodyTimer);
+            if (uploadTimer) clearTimeout(uploadTimer);
           }
 
           // Track number of processed requests for better debugging
@@ -273,8 +276,9 @@ export class HttpServer {
             ) {
               refreshBodyTimeout();
             } else if (isEmbeddingsRequest) {
-              // For embeddings, clear any body timeout so the socket stays open
+              // For embeddings, clear any body/upload timeout so the socket stays open
               if (bodyTimer) clearTimeout(bodyTimer);
+              if (uploadTimer) clearTimeout(uploadTimer);
             }
 
             const ifFileUpload = req.path && req.path.startsWith('/api/files');

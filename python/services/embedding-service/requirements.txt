@@ -13,8 +13,8 @@ Pillow>=10.0.0
 numpy>=1.25.2
 
 # video/image processing
-opencv-python
-scenedetect
+opencv-python-headless>=4.8.0  # headless OpenCV build for server
+scenedetect>=0.7.1
 
 # requests for URL downloads
 requests

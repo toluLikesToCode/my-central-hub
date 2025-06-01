@@ -366,7 +366,7 @@ class EmbeddingService {
 
     const mediaItemsForPythonBatch: MediaItemArgs[] = [];
     // MEDIA_DIR on Node.js server, corresponding to PYTHON_MEDIA_ROOT in Python container
-    const mediaDirAbsolute = path.resolve(config.mediaDir || 'public/media');
+    //const mediaDirAbsolute = path.resolve(config.mediaDir || 'public/media');
 
     for (const originalReqPath of originalPathsToUseAsKeys) {
       const filename = path.basename(originalReqPath);
@@ -378,11 +378,11 @@ class EmbeddingService {
         try {
           // Get metadata using the HTTP client's utility (which accesses local files)
           const metadata = await this.httpClient.getFileMetadata(foundAbsolutePath, true); // `true` to use FileHostingStatsHelper if available
-          const relativePathForPython = path.relative(mediaDirAbsolute, foundAbsolutePath);
+          const pythonFilePath = path.basename(foundAbsolutePath);
 
           mediaItemsForPythonBatch.push({
             originalPath: originalReqPath, // This is the key client expects.
-            resolvedPath: relativePathForPython, // Path for Python, relative to its media root.
+            resolvedPath: pythonFilePath, // Path for Python, relative to its media root.
             mediaType: metadata.mediaType,
             filename: metadata.filename,
             fileSize: metadata.fileSize,

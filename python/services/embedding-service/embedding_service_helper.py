@@ -266,6 +266,9 @@ class VideoProcessor:
         self.hwaccel_method = (
             hwaccel_method  # This is the batch-level configured HW accel method
         )
+        self._cv2_capture = (
+            None  # OpenCV VideoCapture handle for fast software frame reads
+        )
         self.extraction_events: List[Dict[str, Any]] = []
 
         self._add_event(
@@ -517,11 +520,29 @@ class VideoProcessor:
 
     def _extract_frame_software(self, time_sec: float) -> Image.Image:
         self.logger.debug(f"Extracting frame (software) at {time_sec:.2f}s")
+        # Fast path: use persistent cv2.VideoCapture if available
+        try:
+            if self._cv2_capture is None:
+                self._cv2_capture = cv2.VideoCapture(self.video_path)
+            cap = self._cv2_capture
+            cap.set(cv2.CAP_PROP_POS_MSEC, time_sec * 1000)
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                # Convert BGR to RGB and return PIL Image
+                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                return img
+        except Exception:
+            # Fallback to ffmpeg if OpenCV read fails
+            pass
+
         command = [
             "ffmpeg",
             "-y",
             "-loglevel",
             "warning",
+            # use all available CPU threads for software decode
+            "-threads",
+            "0",
             "-ss",
             str(time_sec),
             "-i",
@@ -530,10 +551,9 @@ class VideoProcessor:
             "1",
             "-f",
             "image2pipe",
+            # output raw PPM for faster decode (no JPEG compression)
             "-c:v",
-            "mjpeg",
-            "-q:v",
-            "2",
+            "ppm",
             "-",
         ]
         cmd_str_preview = " ".join(command[:8]) + "..."
