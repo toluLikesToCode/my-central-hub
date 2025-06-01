@@ -28,60 +28,8 @@ RUN echo "Downloading FFmpeg from ${FFMPEG_DOWNLOAD_URL}" && \
     ln -s /opt/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe && \
     ln -s /opt/ffmpeg/bin/ffplay /usr/local/bin/ffplay # Optional
 
-# ========== NVIDIA LIBRARY DIAGNOSTICS START ==========
-RUN echo "--- [DIAGNOSTIC] Checking for NVIDIA persistence daemon ---" && \
-    (ls -l /usr/bin/nvidia-persistenced || echo "[DIAGNOSTIC] nvidia-persistenced not found at /usr/bin/nvidia-persistenced")
-
-# List contents of common NVIDIA library directories
-RUN echo "--- [DIAGNOSTIC] Listing /usr/local/nvidia/lib64 ---" && \
-    (ls -lah /usr/local/nvidia/lib64 || echo "[DIAGNOSTIC] /usr/local/nvidia/lib64 not found or empty.")
-RUN echo "--- [DIAGNOSTIC] Listing /usr/lib/x86_64-linux-gnu (for NVIDIA components) ---" && \
-    (ls -lah /usr/lib/x86_64-linux-gnu | grep -E 'nvidia|cuda|nvcuvid' || echo "[DIAGNOSTIC] No NVIDIA/CUDA libs found in /usr/lib/x86_64-linux-gnu by grep.")
-
-# Explicitly search for libnvcuvid.so.1 and other key libraries
-RUN echo "--- [DIAGNOSTIC] Searching for libnvcuvid.so.1 ---" && \
-    (find / -name "libnvcuvid.so*" -ls 2>/dev/null || echo "[DIAGNOSTIC] libnvcuvid.so* not found by find.")
-RUN echo "--- [DIAGNOSTIC] Searching for libcuda.so.1 ---" && \
-    (find / -name "libcuda.so*" -ls 2>/dev/null || echo "[DIAGNOSTIC] libcuda.so* not found by find.")
-RUN echo "--- [DIAGNOSTIC] Searching for libnvidia-ml.so.1 ---" && \
-    (find / -name "libnvidia-ml.so*" -ls 2>/dev/null || echo "[DIAGNOSTIC] libnvidia-ml.so* not found by find.")
-
-# Check what the dynamic linker sees
-RUN echo "--- [DIAGNOSTIC] ldconfig cache for libnvcuvid ---" && \
-    (ldconfig -p | grep libnvcuvid || echo "[DIAGNOSTIC] libnvcuvid not found in ldconfig cache.")
-RUN echo "--- [DIAGNOSTIC] ldconfig cache for libcuda ---" && \
-    (ldconfig -p | grep libcuda || echo "[DIAGNOSTIC] libcuda not found in ldconfig cache.")
-
-# Check libraries linked by ffmpeg
-RUN echo "--- [DIAGNOSTIC] Libraries linked by FFmpeg (ldd) ---" && \
-    (ldd /usr/local/bin/ffmpeg || echo "[DIAGNOSTIC] ldd on ffmpeg failed.")
-RUN echo "--- [DIAGNOSTIC] Grepping ldd output for NVIDIA libs ---" && \
-    ((ldd /usr/local/bin/ffmpeg | grep -iE 'cuda|nvidia|npp|cuvid|nvdec|nvenc' && echo "[DIAGNOSTIC] Found NVIDIA libs in ldd output.") || echo "[DIAGNOSTIC] No direct NVIDIA libs found in ldd output for ffmpeg (this is expected for plugins loaded at runtime).")
-
-# Display environment variables relevant to library loading
-RUN echo "--- [DIAGNOSTIC] LD_LIBRARY_PATH ---" && \
-    echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
-RUN echo "--- [DIAGNOSTIC] NVIDIA_VISIBLE_DEVICES ---" && \
-    echo "NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}"
-RUN echo "--- [DIAGNOSTIC] NVIDIA_DRIVER_CAPABILITIES ---" && \
-    echo "NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES}"
-
-# Attempt to run ffmpeg -hwaccels (as in your entrypoint)
-# This output will be in the build log.
-RUN echo "--- [DIAGNOSTIC] Running ffmpeg -hwaccels during build ---" && \
-    (/usr/local/bin/ffmpeg -hwaccels || echo "[DIAGNOSTIC] ffmpeg -hwaccels failed during build.")
-
-# Ensure ldconfig is run after potential library path changes or discoveries (though NVIDIA images usually handle this)
-RUN ldconfig
-
-RUN echo "========== NVIDIA LIBRARY DIAGNOSTICS END =========="
-
 # Set default port for FastAPI server
 ENV PYTHON_PORT=3456
-
-# Explicitly set NVIDIA_DRIVER_CAPABILITIES to ensure video capabilities are requested
-# This complements the host's Docker runtime configuration.
-ENV NVIDIA_DRIVER_CAPABILITIES="compute,utility,video"
 
 # Expose the port for FastAPI
 EXPOSE 3456
