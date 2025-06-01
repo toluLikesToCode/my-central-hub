@@ -3,7 +3,7 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 # Prevent interactive prompts and configure APT for stability
 ENV DEBIAN_FRONTEND=noninteractive
-RUN printf "Acquire::http::Pipeline-Depth 0;\nAcquire::http::No-Cache true;\nAcquire::BrokenProxy true;\n" > /etc/apt/apt.conf.d/99no-cache
+RUN printf "Acquire::http::Pipeline-Depth 0;\nAcquire::http::No-Cache true;\nAcquire::BrokenProxy true;\n" > /etc/apt/apt.conf.d/99no-cache 
 
 # Install Python 3.11, minimal OS dependencies, and tools for downloading/extracting
 RUN apt-get update && apt-get install -y --no-install-recommends \
