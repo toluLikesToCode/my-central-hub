@@ -3,7 +3,7 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 # Prevent interactive prompts and configure APT for stability
 ENV DEBIAN_FRONTEND=noninteractive
-RUN printf "Acquire::http::Pipeline-Depth 0;\nAcquire::http::No-Cache true;\nAcquire::BrokenProxy true;\n" > /etc/apt/apt.conf.d/99no-cache 
+RUN printf "Acquire::http::Pipeline-Depth 0;\nAcquire::http::No-Cache true;\nAcquire::BrokenProxy true;\n" > /etc/apt/apt.conf.d/99no-cache
 
 # Install Python 3.11, minimal OS dependencies, and tools for downloading/extracting
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,16 +28,6 @@ RUN echo "Downloading FFmpeg from ${FFMPEG_DOWNLOAD_URL}" && \
     ln -s /opt/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe && \
     ln -s /opt/ffmpeg/bin/ffplay /usr/local/bin/ffplay # Optional
 
-# Set working directory
-WORKDIR /app
-
-# Install Python dependencies (pinned in requirements.txt)
-COPY python/services/embedding-service/requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY python/services/embedding-service/ .
-
 # Set default port for FastAPI server
 ENV PYTHON_PORT=3456
 
@@ -47,11 +37,20 @@ EXPOSE 3456
 # Set default volume mount point for public media
 VOLUME ["/media"]
 
+# Install Python dependencies (pinned in requirements.txt)
+COPY python/services/embedding-service/requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy entire application code, including entrypoint script
+COPY --chmod=755 python/services/embedding-service /app
+
+# Set working directory
+WORKDIR /app
+
 # Final configuration
 ENV PYTHONUNBUFFERED=1
 # The CMD will be executed by the entrypoint
 CMD ["python3", "server.py"]
 
-# Add startup script
-COPY --chmod=755 python/services/embedding-service/docker-entrypoint.sh /app/docker-entrypoint.sh
+# Use startup script as entrypoint
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
