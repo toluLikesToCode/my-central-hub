@@ -413,19 +413,16 @@ class VideoProcessor:
             "ffmpeg",
             "-y",
             "-loglevel",
-            "warning",  # Consider "debug" or "verbose" temporarily if issues persist to get more FFmpeg output
+            "warning",  # Can be changed to "debug" or "verbose" for more detailed ffmpeg output if needed
             "-hwaccel",
             self.hwaccel_method,
         ]
-        if self.hwaccel_method in [
-            "cuda",
-            "vaapi",
-            "qsv",
-            "vulkan",
-            "amf",
-            "opencl",
-        ]:  # True for cuda
-            cmd_base.extend(["-hwaccel_output_format", self.hwaccel_method])
+        # Ensure decoded frames stay on GPU initially for hwdownload to process
+        if self.hwaccel_method == "cuda":  # Be specific for cuda
+            cmd_base.extend(["-hwaccel_output_format", "cuda"])
+
+        # --- MODIFICATION HERE ---
+        video_filter = "hwdownload,format=nv12,scale=format=yuvj420p"
 
         command = cmd_base + [
             "-ss",
@@ -433,26 +430,30 @@ class VideoProcessor:
             "-i",
             self.video_path,
             "-vf",
-            "hwdownload",  # MODIFIED LINE: Download in native/compatible GPU format
+            video_filter,  # Use the new explicit filter chain
             "-vframes",
             "1",
             "-f",
             "image2pipe",
             "-c:v",
-            "mjpeg",  # Outputting as MJPEG for PIL
+            "mjpeg",
             "-q:v",
-            "2",  # MJPEG quality
+            "2",
             "-",
         ]
-        cmd_str_preview = " ".join(command[:10]) + "..."  # For brevity in events
+        cmd_str_preview = (
+            " ".join(command[:11]) + "..."
+        )  # Adjusted for potentially longer base command
 
         try:
+            # Added command logging for easier debugging from console
+            self.logger.debug(f"Executing FFmpeg command: {' '.join(command)}")
             result = subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True,
-                timeout=25,
+                timeout=25,  # Increased timeout slightly, can be adjusted
             )
             if not result.stdout:
                 stderr_output = (
@@ -466,7 +467,7 @@ class VideoProcessor:
                     extra={
                         "time_sec": time_sec,
                         "stderr": stderr_output,
-                        "command_preview": cmd_str_preview,
+                        "full_command": " ".join(command),
                     },
                 )
                 raise RuntimeError(
@@ -477,7 +478,7 @@ class VideoProcessor:
             self.logger.error(
                 f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout at {time_sec:.2f}s. Command: {' '.join(command)}",
                 error=e_timeout,
-                extra={"time_sec": time_sec, "command_preview": cmd_str_preview},
+                extra={"time_sec": time_sec, "full_command": " ".join(command)},
             )
             raise RuntimeError(
                 f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout extracting frame at {time_sec:.2f}s. Command: {' '.join(command)}"
@@ -488,26 +489,27 @@ class VideoProcessor:
                 if e_call.stderr
                 else "N/A"
             )
+            # Construct a more informative error message for the RuntimeError
+            runtime_error_message = (
+                f"HWAccel ({self.hwaccel_method}) frame extraction failed (code {e_call.returncode}) "
+                f"at {time_sec:.2f}s. Stderr: {stderr_output}. Command: {' '.join(command)}"
+            )
             self.logger.error(
-                f"ffmpeg (HWAccel: {self.hwaccel_method}) error code {e_call.returncode} at {time_sec:.2f}s. Stderr: {stderr_output}. Command: {' '.join(command)}",
+                runtime_error_message,  # Log the more detailed message
                 error=e_call,
                 extra={
                     "time_sec": time_sec,
                     "return_code": e_call.returncode,
-                    "stderr": stderr_output,
-                    "command_preview": cmd_str_preview,
+                    "stderr": stderr_output,  # Already captured
+                    "full_command": " ".join(command),  # Already captured
                 },
             )
-            raise RuntimeError(
-                f"HWAccel ({self.hwaccel_method}) frame extraction failed (code {e_call.returncode}) at {time_sec:.2f}s. Stderr: {stderr_output}. Command: {' '.join(command)}"
-            ) from e_call
-        except (
-            Exception
-        ) as e_generic:  # Catch other errors like UnidentifiedImageError if pipe is empty/corrupt
+            raise RuntimeError(runtime_error_message) from e_call
+        except Exception as e_generic:
             self.logger.error(
                 f"Frame extraction (HWAccel: {self.hwaccel_method}) failed at {time_sec:.2f}s: {e_generic}. Command: {' '.join(command)}",
                 error=e_generic,
-                extra={"time_sec": time_sec, "command_preview": cmd_str_preview},
+                extra={"time_sec": time_sec, "full_command": " ".join(command)},
             )
             raise RuntimeError(
                 f"Failed to extract frame at {time_sec:.2f}s using HWAccel ({self.hwaccel_method}): {e_generic}. Command: {' '.join(command)}"
