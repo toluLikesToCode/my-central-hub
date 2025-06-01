@@ -238,6 +238,53 @@ class CLIPEmbedder:
     model: Any
     preprocess: Callable[[Any], torch.Tensor]
 
+    @staticmethod
+    def _parse_clip_model_spec(model_spec: str) -> Tuple[str, str]:
+        """
+        Parse a CLIP_MODEL specification into a (model_arch, pretrained_tag) tuple
+        compatible with open_clip.create_model_and_transforms.
+
+        Supports:
+          - openai/clip-vit-base-patch32
+          - any huggingface CLIP hub ID (e.g. laion/CLIP-ViT-H-14-laion2B-s32B-b79K)
+          - bare arch names like "ViT-B-32" or "vit-l-14"
+        """
+        spec = model_spec.strip()
+        size_map = {"base": "B", "large": "L", "huge": "H"}
+
+        # Hugging Face or OpenAI hub notation
+        if "/" in spec:
+            author, name = spec.split("/", 1)
+            author_l = author.lower()
+            # OpenAI official models
+            if author_l == "openai":
+                toks = name.lower().split("-")
+                # find the "vit" token
+                try:
+                    vidx = toks.index("vit")
+                except ValueError:
+                    vidx = 0
+                # next is size, then patch#
+                size = toks[vidx + 1]
+                patch = toks[vidx + 2].replace("patch", "")
+                arch = f"ViT-{ size_map.get(size, size.upper()) }-{ patch }"
+                pretrained = "openai"
+            else:
+                # HF models like "CLIP-ViT-H-14-..."
+                parts = name.split("-")
+                if parts[0].upper() == "CLIP" and len(parts) >= 4:
+                    arch = "-".join(parts[1:4])
+                else:
+                    arch = name
+                # prefix with hf-hub: so open_clip fetches from HF
+                pretrained = f"hf-hub:{ spec }"
+        else:
+            # no slash → treat as a bare architecture, default to OpenAI weights
+            arch = spec
+            pretrained = "openai"
+
+        return arch, pretrained
+
     def __init__(
         self,
         model_name: str = "openai/clip-vit-base-patch32",
@@ -264,62 +311,15 @@ class CLIPEmbedder:
 
         init_start_time = time.time()
         try:
-            arch_name_map = {
-                "vit-base-patch32": "ViT-B-32",
-                "vit-b-32": "ViT-B-32",
-                "vit-large-patch14": "ViT-L-14",
-                "vit-l-14": "ViT-L-14",
-            }
-            model_arch = self.model_name
-            pretrained_tag = "openai"
-
-            if "/" in self.model_name:
-                author_part, model_part = self.model_name.split("/", 1)
-                if author_part.lower() == "openai":
-                    for key, val in arch_name_map.items():
-                        if key in model_part.lower():
-                            model_arch = val
-                            break
-                else:  # Non-OpenAI model, likely from HF Hub
-                    # Attempt to map common HF naming patterns to OpenCLIP arch names if possible
-                    # Example: "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" -> model_arch="ViT-B-32"
-                    model_arch_candidate_parts = model_part.split("-")
-                    if (
-                        len(model_arch_candidate_parts) > 1
-                        and "CLIP" in model_arch_candidate_parts[0].upper()
-                    ):
-                        arch_try = "-".join(
-                            model_arch_candidate_parts[1:3]
-                        )  # e.g., ViT-B-32
-                        for (
-                            key,
-                            val,
-                        ) in arch_name_map.items():  # Check against our known mappings
-                            if key == arch_try.lower():
-                                model_arch = val
-                                break
-                    # If no specific mapping found, assume model_name is directly usable or OpenCLIP handles it.
-                    # For HF Hub models not 'openai', pretrained tag must be prefixed.
-                    pretrained_tag = (
-                        f"hf-hub:{self.model_name}"
-                        if not self.model_name.startswith("hf-hub:")
-                        and author_part.lower() != "openai"
-                        else self.model_name
-                    )
-
+            model_arch, pretrained_tag = self._parse_clip_model_spec(self.model_name)
             self.logger.debug(
-                f"Attempting to load OpenCLIP model_arch='{model_arch}', pretrained='{pretrained_tag}'"
+                f"Parsed CLIP spec → model_arch='{model_arch}', pretrained='{pretrained_tag}'"
             )
-
-            (
-                self.model,
-                _,
-                self.preprocess,
-            ) = open_clip.create_model_and_transforms(
+            self.model, _, self.preprocess = open_clip.create_model_and_transforms(
                 model_name=model_arch,
                 pretrained=pretrained_tag,
                 device=self.device,
-                jit=False,  # JIT can cause issues with some models/devices, ensure it's False or configurable
+                jit=False,
             )
             self.model.eval()  # Ensure model is in eval mode
 
