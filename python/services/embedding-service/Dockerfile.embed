@@ -5,18 +5,28 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN printf "Acquire::http::Pipeline-Depth 0;\nAcquire::http::No-Cache true;\nAcquire::BrokenProxy true;\n" > /etc/apt/apt.conf.d/99no-cache
 
-# (Optional) Switch to a reliable Ubuntu mirror for apt sources
-# RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list
-
-# Install Python 3.11 and minimal OS dependencies
+# Install Python 3.11, minimal OS dependencies, and tools for downloading/extracting
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv python3-pip python3.11-dev \ 
-    # (Include any other system libraries needed by your packages, e.g.:
-    libgl1-mesa-glx libglib2.0-0 ) && \
+    python3.11 python3.11-venv python3-pip python3.11-dev \
+    libgl1-mesa-glx libglib2.0-0 \
+    ca-certificates wget xz-utils && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Ensure `python3` points to Python 3.11 (Ubuntu may default python3 to 3.10)
+# Ensure `python3` points to Python 3.11
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Install FFmpeg static build with NVIDIA support (from BtbN's "latest" release)
+ENV FFMPEG_TARBALL_FILENAME=ffmpeg-master-latest-linux64-gpl.tar.xz
+ENV FFMPEG_DOWNLOAD_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/${FFMPEG_TARBALL_FILENAME}
+
+RUN echo "Downloading FFmpeg from ${FFMPEG_DOWNLOAD_URL}" && \
+    wget -q -O /tmp/ffmpeg.tar.xz "${FFMPEG_DOWNLOAD_URL}" && \
+    mkdir -p /opt/ffmpeg && \
+    tar -xJf /tmp/ffmpeg.tar.xz -C /opt/ffmpeg --strip-components=1 && \
+    rm /tmp/ffmpeg.tar.xz && \
+    ln -s /opt/ffmpeg/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    ln -s /opt/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe && \
+    ln -s /opt/ffmpeg/bin/ffplay /usr/local/bin/ffplay # Optional
 
 # Set working directory
 WORKDIR /app
@@ -25,11 +35,23 @@ WORKDIR /app
 COPY python/services/embedding-service/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# (If using a multi-stage build, you could copy wheels here instead of pip installing from internet)
-
 # Copy application code
 COPY python/services/embedding-service/ .
 
-# Final configuration (if any ENV or CMD)
+# Set default port for FastAPI server
+ENV PYTHON_PORT=3456
+
+# Expose the port for FastAPI
+EXPOSE 3456
+
+# Set default volume mount point for public media
+VOLUME ["/media"]
+
+# Final configuration
 ENV PYTHONUNBUFFERED=1
+# The CMD will be executed by the entrypoint
 CMD ["python3", "server.py"]
+
+# Add startup script
+COPY --chmod=755 python/services/embedding-service/docker-entrypoint.sh /app/docker-entrypoint.sh
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

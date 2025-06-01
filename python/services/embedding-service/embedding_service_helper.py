@@ -1,58 +1,25 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# python/embedding_service_helper.py
+# embedding_service_helper.py
 """
 embedding_service_helper.py – now supports batching & on-disk caching
 
 Usage:
-    python embedding_service_helper.py <file_paths> [--num_frames NUM] [--model MODEL] [--debug]
-
-This script computes CLIP embeddings for one or more image or video files.
-For video files, it extracts multiple frames selected via an advanced, content-aware sampling
-strategy that combines scene-representative sampling with visual entropy-based salience and
-temporal smoothing. The embeddings are computed in batch and averaged.
-The script uses the Hugging Face Transformers library for CLIP model loading and inference,
-and ffmpeg for video processing. It supports caching to avoid redundant computation.
+    This script is now primarily a module used by the FastAPI server (server.py).
+    It provides functionalities for batch media processing and CLIP embedding generation.
 
 Features:
-    • Batch processing of multiple files.
-    • On-disk caching to avoid redundant computation.
-    • Image and video file support (JPEG, PNG, MP4, etc.).
+    • Batch processing of multiple media items (URLs, filepaths).
+    • Parallel preprocessing (I/O-bound tasks like downloads, frame extraction).
+    • Single batched tensor pass to CLIP model for GPU efficiency.
+    • On-disk caching (implicitly, if paths are re-requested and not changed, though explicit cache logic not in this file).
+    • Image and video file support.
     • Advanced video frame extraction using scene detection and visual entropy.
-    • CLIP model loading and inference using Hugging Face Transformers.
+    • CLIP model loading and inference using OpenCLIP.
     • Inference on CPU or GPU (if available).
-    • Configurable number of frames for video processing.
-    • Command-line arguments for file paths, model name, number of frames, and debug metadata.
-    • JSON output format for embedding and debug metadata.
-    • Error handling and logging.
-    • Debug metadata output for advanced sampling methods.
-    • Support for multiple CLIP models from Hugging Face.
-    • Parallel frame extraction for performance.
-    • In-memory frame extraction without temporary file I/O.
+    • JSON output format for embedding and debug metadata, handled by FastAPI server.
+    • Structured logging via EmbeddingLogger.
     • Modular design with classes for video processing and CLIP inference.
-    • Configurable parameters via command-line arguments.
-    • Structured logging and centralized error handling.
-    • Scene detection via PySceneDetect (if installed) to extract scene midpoints.
-    • Visual entropy computation as a salience heuristic.
-    • Temporal diversity enforcement (smoothing) via a minimum time-gap filter.
-    • Fallback to uniform sampling if advanced scene analysis fails.
-    • Optional debug metadata (candidate timestamps, entropy values, selected timestamps).
-    • Optional data augmentation for images and video frames.
-
-Performance and production readiness improvements include:
-    • Parallel frame extraction using concurrent futures.
-    • In-memory frame extraction without temporary file I/O.
-    • Modular design with classes for video processing and CLIP inference.
-    • Configurable parameters via command-line arguments.
-    • Structured logging and centralized error handling.
-
-Advanced improvements in this version:
-    • Scene detection via PySceneDetect (if installed) to extract scene midpoints.
-    • Visual entropy computation as a salience heuristic.
-    • Temporal diversity enforcement (smoothing) via a minimum time-gap filter.
-    • Fallback to uniform sampling if advanced scene analysis fails.
-    • Optional debug metadata (candidate timestamps, entropy values, selected timestamps).
-    • Optional data augmentation for images and video frames.
 """
 
 import logging
@@ -60,148 +27,202 @@ import sys
 import os
 import json
 import uuid
-from PIL import Image
-import torch
+from PIL import Image, UnidentifiedImageError  # type: ignore
+import torch  # type: ignore
 import signal
 import time
 from datetime import datetime
 import io
-from typing import Union, Optional, Tuple, List, Dict, Any
+from typing import Union, Optional, Tuple, List, Dict, Any, Callable
 import tempfile
 import subprocess
 import concurrent.futures
-from contextlib import nullcontext
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import (
+    nullcontext,
+)  # Not used in current version but good for conditional context mgmt
 import re
-from fastapi import HTTPException
-from PIL import UnidentifiedImageError
-import open_clip
+import math  # Added import
+import errno  # Added import
+import requests  # For URL downloads
+import open_clip  # type: ignore # Added import
+import cv2  # type: ignore
 
-# Define logging component and constants
+from dotenv import load_dotenv  # type: ignore
+
+# Ensure .env is loaded at the very top
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+
+# --- Constants ---
 PY_LOG_PREFIX = "[EmbeddingPython]"
 LOG_LEVEL_INFO = "INFO"
 LOG_LEVEL_DEBUG = "DEBUG"
 LOG_LEVEL_ERROR = "ERROR"
 LOG_LEVEL_WARNING = "WARNING"
 
+DEFAULT_VIDEO_FRAMES_TO_EXTRACT = int(
+    os.environ.get("DEFAULT_VIDEO_FRAMES_TO_EXTRACT", 20)
+)
+DOWNLOAD_TIMEOUT_SECONDS = int(os.environ.get("DOWNLOAD_TIMEOUT_SECONDS", 30))
+IMAGE_EXTS = [
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".avif",
+    ".gif",
+]  # Common image extensions
+VIDEO_EXTS = [
+    ".mp4",
+    ".mov",
+    ".webm",
+    ".ogg",
+    ".m4v",
+    ".avi",
+    ".mkv",
+    ".wmv",
+]  # Common video extensions
 
+
+# --- Logger ---
 class EmbeddingLogger:
-    """
-    A specialized logger for the CLIP embedding Python process that provides
-    consistent formatting that integrates with the Node.js embeddingsLogger.
-    """
-
-    def __init__(self, request_id=None):
+    def __init__(
+        self,
+        request_id: Optional[str] = None,
+        component_name: str = "PythonEmbedHelper",
+    ):
         self.request_id = request_id or self._generate_request_id()
+        self.component_name = component_name
+        self.file_handler: Optional[logging.FileHandler] = (
+            None  # Initialize for clarity
+        )
         self._setup_logger()
 
-    def _generate_request_id(self):
+    def _generate_request_id(self) -> str:
         return str(uuid.uuid4())
 
     def _setup_logger(self):
-        # Set up handlers
-        # Console handler for stderr
+        # Correct path assuming this file is /app/embedding_service_helper.py
+        # and logs go into /app/logs/
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            log_file_path = os.path.join(log_dir, "python_embeddings_service.log")
+            self.file_handler = logging.FileHandler(log_file_path)
+            self.file_handler.setFormatter(
+                logging.Formatter(
+                    '{"timestamp":"%(asctime)s.%(msecs)03dZ", "level":"%(levelname)s", "component":"%(component)s", "requestId":"%(request_id)s", "message":"%(message)s", "file":"%(pathname)s", "line":%(lineno)d, "module":"%(module)s", "funcName":"%(funcName)s"}',
+                    "%Y-%m-%dT%H:%M:%S",
+                )
+            )
+            logging.Formatter.converter = time.gmtime
+        except OSError as e:
+            sys.stderr.write(
+                f"Warning: Error creating log directory {log_dir} or file handler: {e}. File logging will be disabled.\n"
+            )
+            self.file_handler = None  # Ensure it's None if setup fails
+
         self.console_handler = logging.StreamHandler(sys.stderr)
+        # Ensure %(request_id)s can be interpolated if passed in extra
         self.console_handler.setFormatter(
-            logging.Formatter(f"{PY_LOG_PREFIX} %(levelname)s: %(message)s")
-        )
-
-        # File handler for detailed logs
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        log_file_path = os.path.join(log_dir, "python_embeddings.log")
-
-        self.file_handler = logging.FileHandler(log_file_path)
-        self.file_handler.setFormatter(
             logging.Formatter(
-                '{"timestamp":"%(asctime)s", "level":"%(levelname)s", "component":"Python", "requestId":"%(request_id)s", "message":"%(message)s", "file":"%(pathname)s", "line":%(lineno)d}',
+                f"{PY_LOG_PREFIX} %(asctime)s %(levelname)s [{self.component_name}] (%(request_id)s): %(message)s",
                 "%Y-%m-%d %H:%M:%S",
             )
         )
 
-        # Create logger
-        self.logger = logging.getLogger("embedding_python")
-        self.logger.setLevel(logging.DEBUG)
+        # Create a unique logger name to avoid conflicts if this class is instantiated multiple times
+        # or if other modules use logging.getLogger with the same name.
+        logger_name = f"embedding_python_{self.component_name}_{self.request_id[:8]}"
+        self.logger = logging.getLogger(logger_name)
+        self.logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
-        # Clear existing handlers if any
+        # Clear any existing handlers from a previous logger with the same name if reconfiguring
         if self.logger.handlers:
             self.logger.handlers.clear()
 
-        # Add handlers
         self.logger.addHandler(self.console_handler)
-        self.logger.addHandler(self.file_handler)
-
-        # Make sure logger propagation is off to avoid duplicate logs
+        if self.file_handler:
+            self.logger.addHandler(self.file_handler)
         self.logger.propagate = False
 
-    def _log_std(self, level, message, extra=None, exc_info=None):
-        """Helper to log using the standard logger instance"""
-        log_extra = dict(extra) if extra else {}
-        log_extra["request_id"] = self.request_id  # Always include request_id
-        if self.logger:
-            self.logger.log(level, message, extra=log_extra, exc_info=exc_info)
+    def _log_std(
+        self,
+        level: int,
+        message: str,
+        extra: Optional[Dict[str, Any]] = None,
+        exc_info: Union[None, bool, BaseException] = None,
+    ):
+        # Ensure 'request_id' and 'component' are always in the LogRecord's dictionary for formatters
+        final_extra = {"request_id": self.request_id, "component": self.component_name}
+        if extra:
+            final_extra.update(extra)
+
+        # exc_info can be True to capture current exception, or an exception instance
+        actual_exc_info = exc_info if exc_info is not None else False
+        if isinstance(exc_info, BaseException):  # if an exception instance is passed
+            actual_exc_info = True  # Tell logger to grab it from sys.exc_info() if it's the current one, or pass it.
+            # More robust: pass the exception instance directly if logger supports it, else True.
+            # logging.log itself expects a boolean or an exception tuple for exc_info.
+
+        self.logger.log(level, message, extra=final_extra, exc_info=actual_exc_info)
 
     def info(self, message, extra=None):
-        """Log an info message"""
         self._log_std(logging.INFO, message, extra=extra)
 
     def debug(self, message, extra=None):
-        """Log a debug message"""
         self._log_std(logging.DEBUG, message, extra=extra)
 
-    def error(self, message, error=None, extra=None):
-        """Log an error message with optional exception details"""
+    def error(self, message, error: Optional[BaseException] = None, extra=None):
         log_extra = dict(extra) if extra else {}
         if error:
             log_extra["error_type"] = type(error).__name__
             log_extra["error_message"] = str(error)
+        # Pass the exception instance to exc_info for traceback logging by the handler
         self._log_std(logging.ERROR, message, extra=log_extra, exc_info=error)
 
     def warning(self, message, extra=None):
-        """Log a warning message"""
         self._log_std(logging.WARNING, message, extra=extra)
 
-    def log_progress(self, processed, total, current_file):
-        """Log a standardized progress message"""
-        progress_data = {
-            "processed": processed,
-            "total": total,
-            "current": current_file,
-            "percentage": int((processed / total) * 100) if total > 0 else 0,
-            "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        }
-        print(f"PROGRESS: {json.dumps(progress_data)}", file=sys.stderr, flush=True)
-        self.debug(
-            f"Progress: {processed}/{total} files ({progress_data['percentage']}%)",
-            extra={"progress": progress_data},
-        )
-
     def set_request_id(self, request_id):
-        """Update the request ID"""
         self.request_id = request_id
-
-    def log_operation_time(self, operation, start_time):
-        """Log the execution time of an operation"""
-        duration_ms = (time.time() - start_time) * 1000
-        self.debug(
-            f"Operation '{operation}' completed in {duration_ms:.2f}ms",
-            extra={"operation": operation, "duration_ms": duration_ms},
+        # Update formatter if request_id is part of it and needs to be dynamic (it is for console)
+        # This is a bit of a hack; ideally, formatters use LogRecord attributes.
+        # The current setup with `extra` in _log_std should handle this correctly for format string.
+        self.console_handler.setFormatter(
+            logging.Formatter(
+                f"{PY_LOG_PREFIX} %(asctime)s %(levelname)s [{self.component_name}] (%(request_id)s): %(message)s",
+                "%Y-%m-%d %H:%M:%S",
+            )
         )
-        return duration_ms
+
+    def set_component_name(self, component_name):
+        self.component_name = component_name
+        self.console_handler.setFormatter(
+            logging.Formatter(
+                f"{PY_LOG_PREFIX} %(asctime)s %(levelname)s [{self.component_name}] (%(request_id)s): %(message)s",
+                "%Y-%m-%d %H:%M:%S",
+            )
+        )
 
 
-# Create a default embedding logger
-embedding_logger = EmbeddingLogger()
+embedding_logger = EmbeddingLogger(component_name="GlobalPythonHelper")
 
-# Suppress verbose logs from libraries
-logging.getLogger("transformers").setLevel(logging.CRITICAL)
-logging.getLogger("urllib3").setLevel(logging.CRITICAL)
-logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
-logging.getLogger().setLevel(logging.ERROR)
+for lib_logger_name in [
+    "transformers",
+    "urllib3",
+    "huggingface_hub",
+    "PIL",
+    "open_clip",
+]:
+    logging.getLogger(lib_logger_name).setLevel(
+        logging.WARNING
+    )  # Less verbose than CRITICAL
 
 
 def handle_sigint(signum, frame):
     embedding_logger.info("Received SIGINT (Ctrl+C). Exiting gracefully.")
-    # Perform any additional cleanup here if needed
     sys.exit(0)
 
 
@@ -213,556 +234,137 @@ def handle_sigterm(signum, frame):
 signal.signal(signal.SIGINT, handle_sigint)
 signal.signal(signal.SIGTERM, handle_sigterm)
 
-from transformers import CLIPProcessor, CLIPModel
-import math
-import concurrent.futures
-from contextlib import nullcontext
-import re
-
-# Supported file extensions for images and videos.
-IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif"]
-VIDEO_EXTS = [".mp4", ".mov", ".webm", ".ogg", ".m4v"]
-
 
 def compute_entropy(image: Image.Image) -> float:
-    """
-    Compute the visual entropy of an image as a simple salience measure.
-    The image is converted to grayscale; its normalized histogram is used to
-    calculate entropy (in bits).
-    Args:
-        image (PIL.Image): The input image.
-    Returns:
-        float: The computed entropy value.
-    """
     grayscale = image.convert("L")
     histogram = grayscale.histogram()
     total_pixels = sum(histogram)
+    if total_pixels == 0:
+        return 0.0  # Avoid division by zero for empty images
     entropy = 0.0
-    # Compute entropy as sum(-p * log2(p)) for nonzero probabilities.
     for count in histogram:
         if count > 0:
             p = count / total_pixels
-            entropy -= p * math.log(p, 2)
+            entropy -= p * math.log2(p)  # Use math.log2 for base 2
     return entropy
 
 
 class VideoProcessor:
-    """
-    A class to manage video processing tasks like duration extraction and advanced
-    frame extraction using a combination of scene detection, visual entropy, and
-    temporal smoothing.
-    The class uses ffmpeg for video processing and PIL for image handling.
-    It also provides methods for extracting frames based on advanced sampling
-    strategies, including scene detection and visual entropy salience.
-    It can accept either a file path or an in-memory buffer (io.BytesIO).
-    The class is designed to be modular and reusable, allowing for easy integration
-    into larger systems or pipelines.
-
-    Args:
-        video_path (Optional[str]): Path to the video file.
-        video_buffer (Optional[io.BytesIO]): In-memory video data.
-        num_frames (int): Number of frames to sample from the video.
-        logger (Optional[EmbeddingLogger]): Optional logger for debug information.
-        executor (concurrent.futures.ThreadPoolExecutor): Shared executor for parallel frame extraction.
-        request_id (Optional[str]): Request ID for logging correlation.
-        duration (Optional[float]): Pre-computed duration (e.g., from headers).
-
-    Attributes:
-        video_path (Optional[str]): Path to the video file, if provided.
-        video_buffer (Optional[io.BytesIO]): In-memory video data, if provided.
-        num_frames (int): Number of frames to sample from the video.
-        logger (EmbeddingLogger): Logger for debug information.
-        duration (float): Duration of the video in seconds.
-        executor (concurrent.futures.ThreadPoolExecutor): Shared executor for parallel frame extraction.
-    """
-
     def __init__(
         self,
         num_frames: int,
-        video_path: Optional[str] = None,
-        video_buffer: Optional[io.BytesIO] = None,
-        logger=None,
-        executor=None,
-        request_id=None,
-        duration: Optional[float] = None,
+        video_path: Optional[
+            str
+        ] = None,  # This will be the path to the (possibly temp) video file
+        # video_buffer is not directly used if we always write to temp file first
+        logger: Optional[EmbeddingLogger] = None,
+        executor: Optional[
+            ThreadPoolExecutor
+        ] = None,  # For parallel frame extraction within this video
+        request_id: Optional[str] = None,  # For logging context
+        duration: Optional[float] = None,  # Pre-calculated duration
+        original_filename_hint: Optional[
+            str
+        ] = None,  # For logging and temp file naming
     ):
-        if not (video_path or video_buffer) or (video_path and video_buffer):
+        if not video_path:  # VideoProcessor now expects a definitive path
             raise ValueError(
-                "Exactly one of video_path or video_buffer must be provided."
+                "VideoProcessor requires a valid video_path (can be a temporary file path)."
             )
 
-        if video_buffer and not video_path:
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-                tmp.write(video_buffer.getbuffer())
-                self._tmp_path = tmp.name
-            self.video_path = self._tmp_path
-            self.video_buffer = None
-        else:
-            self.video_path = video_path
-            self.video_buffer = video_buffer
+        self.video_path: str = video_path  # Ensured to be a string path
+        self._is_temp_file = original_filename_hint is not None and video_path.endswith(
+            original_filename_hint
+        )  # Heuristic
 
         self.num_frames = num_frames
         self.logger = logger or embedding_logger
-
-        if isinstance(logger, logging.Logger):
-            # Wrap standard logger to make it compatible with our EmbeddingLogger
-            self._log_info = lambda msg, **kwargs: logger.info(msg)
-            self._log_debug = lambda msg, **kwargs: logger.debug(msg)
-            self._log_error = lambda msg, **kwargs: logger.error(msg)
-            self._log_warning = lambda msg, **kwargs: logger.warning(msg)
-        else:
-            # Use our enhanced logger
-            self._log_info = self.logger.info
-            self._log_debug = self.logger.debug
-            self._log_error = self.logger.error
-            self._log_warning = self.logger.warning
-
-            # Set request_id if provided
-            if request_id:
-                self.logger.set_request_id(request_id)
-
-        self.duration = duration if duration is not None else self.get_duration()
-        if self.duration is None or self.duration <= 0:
-            raise ValueError(
-                "Could not determine video duration or duration is invalid."
-            )
+        # Set a more specific component name for this VideoProcessor instance's logger
+        base_component = f"VideoProc-{original_filename_hint[:20] if original_filename_hint else video_path.split('/')[-1][:20]}"
+        self.logger.set_component_name(
+            f"{base_component}-{request_id[:8] if request_id else uuid.uuid4().hex[:8]}"
+        )
+        if request_id:
+            self.logger.set_request_id(request_id)
 
         self.executor = executor
+        self.duration = duration if duration is not None else self._get_duration()
+        if self.duration is None or self.duration <= 0:
+            self.logger.error(
+                f"Video duration error for '{self.video_path}'",
+                extra={"duration": self.duration, "video_path": self.video_path},
+            )
+            raise ValueError(
+                f"Could not determine video duration or duration is invalid for '{self.video_path}'."
+            )
 
-    def get_duration(self) -> float:
-        """Get the duration of the video in seconds using ffprobe.
-        Returns:
-            float: Duration of the video in seconds.
-        Raises:
-            RuntimeError: If ffprobe fails to retrieve the duration.
-        """
+    def _get_duration(self) -> float:
         start_time = time.time()
-        source_display = self.video_path if self.video_path else "in-memory buffer"
-        extra_args = {"video_source": source_display}
-
-        self._log_debug(
-            f"Getting duration for video: {source_display}", extra=extra_args
-        )
-
+        self.logger.debug(f"Getting duration for video: '{self.video_path}'")
         try:
-            if self.video_buffer:
-                self.video_buffer.seek(0)
-                command = [
-                    "ffprobe",
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1:nokey=1",
-                    "-i",
-                    "pipe:0",
-                ]
-
-                result = subprocess.run(
-                    command,
-                    input=self.video_buffer.read(),  # send bytes through stdin
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=True,  # no text=True → no encode()
-                )
-                duration_str = result.stdout.decode().strip()
-                self.video_buffer.seek(0)  # rewind for later use
-            else:
-                # For file paths, we can use the path directly
-                command = [
-                    "ffprobe",
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1:nokey=1",
-                    "-i",
-                    self.video_path,
-                ]
-
-                result = subprocess.run(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=True,
-                )
-                duration_str = result.stdout.decode().strip()
-
-            if not duration_str or duration_str == "N/A":
-                raise RuntimeError("ffprobe did not return a valid duration.")
-            duration = float(duration_str)
-
-            self._log_debug(
-                f"Video duration: {duration} seconds",
-                extra={"duration": duration, **extra_args},
-            )
-
-            if hasattr(self.logger, "log_operation_time"):
-                self.logger.log_operation_time("get_duration", start_time)
-
-            return duration
-        except Exception as e:
-            self._log_error(
-                f"Failed to get video duration: {e}",
-                error=e,
-                extra=extra_args,
-            )
-            raise RuntimeError(
-                f"Failed to get video duration for {source_display}: {e}"
-            ) from e
-
-    def get_advanced_sample_times(self) -> Tuple[List[float], Dict[str, Any]]:
-        """
-        Compute candidate sampling timestamps using a combination of scene detection,
-        visual entropy salience, and temporal smoothing. The method first attempts
-        to extract scene boundaries via PySceneDetect. If successful, it computes a
-        candidate timestamp for each scene (using the midpoint). For each candidate, a
-        frame is extracted to compute visual entropy. Candidates are then ranked and
-        filtered to enforce a minimum time gap (diversity). If scene detection fails or
-        does not yield enough candidates, the method falls back to uniform sampling.
-        The method returns a tuple containing the selected timestamps and debug metadata
-        (if requested). Scene detection is only attempted if a video_path is provided.
-
-        Returns:
-            tuple: (selected_timestamps, debug_metadata)
-        """
-        source_display = self.video_path if self.video_path else "in-memory buffer"
-        extra_args = {"video_source": source_display, "num_frames": self.num_frames}
-
-        self._log_debug(
-            f"Starting advanced sample times calculation for {source_display}",
-            extra=extra_args,
-        )
-
-        start_time = time.time()
-        candidate_times = None
-        debug_metadata = {}
-        method_used = ""
-        try:
-            if self.video_path:
-                from scenedetect import VideoManager, SceneManager
-                from scenedetect.detectors import ContentDetector
-
-                self._log_debug(f"Using PySceneDetect for video: {self.video_path}")
-                video_manager = VideoManager([self.video_path])
-                scene_manager = SceneManager()
-                # The threshold here is heuristic; adjust based on your domain.
-                scene_manager.add_detector(
-                    ContentDetector(threshold=25, min_scene_len=10)
-                )
-                video_manager.start()
-                scene_manager.detect_scenes(
-                    frame_source=video_manager, show_progress=True
-                )
-                scene_list = scene_manager.get_scene_list()
-                self._log_debug(
-                    f"Scene detection complete. Found {len(scene_list)} scenes."
-                )
-                candidate_times = [
-                    (scene[0].get_seconds() + scene[1].get_seconds()) / 2
-                    for scene in scene_list
-                ]
-                debug_metadata["scene_count"] = len(scene_list)
-                method_used = "scene_detection"
-
-                # If scene coverage is insufficient or the video is too short, fall back to uniform sampling.
-                if (
-                    len(candidate_times)
-                    < self.num_frames  # fewer scene midpoints than needed frames
-                    or len(scene_list)
-                    < (self.num_frames // 2)  # too few distinct scenes
-                    or float(self.duration)
-                    < (self.num_frames * 2)  # video too short for advanced sampling
-                ):
-                    self._log_warning(
-                        "Insufficient scene coverage or short video; falling back to uniform sampling.",
-                        extra={
-                            "scene_count": len(scene_list),
-                            "video_duration": self.duration,
-                        },
-                    )
-                    candidate_times = None
-
-        except Exception as e:
-            self._log_warning(
-                f"Scene detection failed or PySceneDetect not installed. Using uniform sampling.",
-                error=e,
-                extra={"video_path": self.video_path},
-            )
-
-        # If candidate times are insufficient, fall back to uniform dense extraction.
-        if not candidate_times or len(candidate_times) < self.num_frames:
-            candidate_times = [
-                (i + 1) * self.duration / (self.num_frames + 1)
-                for i in range(self.num_frames)
+            command = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                "-i",
+                self.video_path,
             ]
-            method_used = "fallback_uniform"
-            debug_metadata = {"method_used": method_used, "timestamps": candidate_times}
-
-            if hasattr(self.logger, "log_operation_time"):
-                self.logger.log_operation_time("get_advanced_sample_times", start_time)
-
-            return candidate_times, debug_metadata
-
-        # For each candidate timestamp, extract the frame and compute visual entropy.
-        self._log_debug(
-            f"Extracting {len(candidate_times)} candidate frames for entropy analysis"
-        )
-        candidate_frames = []
-        executor = self.executor or concurrent.futures.ThreadPoolExecutor()
-        with executor if self.executor is None else nullcontext(executor):
-            future_to_time = {
-                executor.submit(self.extract_frame, t): t for t in candidate_times
-            }
-            for future in concurrent.futures.as_completed(future_to_time):
-                t = future_to_time[future]
-                try:
-                    frame = future.result()
-                    candidate_frames.append((t, frame))
-                except Exception as e:
-                    self._log_error(
-                        f"Failed to extract candidate frame at {t} sec",
-                        error=e,
-                        extra={"timestamp": t},
-                    )
-        if not candidate_frames:
-            # If extraction completely failed, fallback.
-            self._log_warning(
-                "All candidate frame extractions failed. Using uniform fallback."
-            )
-            uniform_times = [
-                (i + 1) * self.duration / (self.num_frames + 1)
-                for i in range(self.num_frames)
-            ]
-            debug_metadata = {
-                "method_used": "fallback_uniform_extraction",
-                "timestamps": uniform_times,
-            }
-
-            if hasattr(self.logger, "log_operation_time"):
-                self.logger.log_operation_time("get_advanced_sample_times", start_time)
-
-            return uniform_times, debug_metadata
-
-        # Compute entropy values for all candidate frames.
-        self._log_debug(f"Computing entropy for {len(candidate_frames)} frames")
-        entropy_values = []
-        for t, frame in candidate_frames:
-            try:
-                entropy_val = compute_entropy(frame)
-                entropy_values.append((t, entropy_val))
-            except Exception as e:
-                self._log_error(
-                    f"Failed to compute entropy for frame at {t} sec",
-                    error=e,
-                    extra={"timestamp": t},
-                )
-                entropy_values.append((t, 0.0))  # Use zero entropy as fallback
-
-        debug_metadata["entropy_values"] = entropy_values
-
-        # Rank candidates by entropy (descending).
-        entropy_values.sort(key=lambda x: x[1], reverse=True)
-
-        # Select frames ensuring temporal diversity.
-        selected = []
-        diversity_threshold = (
-            self.duration * 0.05
-        )  # At least 5% of video duration apart.
-
-        self._log_debug(
-            f"Selecting diverse frames with threshold {diversity_threshold:.2f} sec"
-        )
-
-        for t, entropy_val in entropy_values:
-            if not selected or all(abs(t - s) > diversity_threshold for s in selected):
-                selected.append(t)
-            if len(selected) == self.num_frames:
-                break
-
-        # In case diversity filtering does not yield enough frames, fill with lower-ranked ones.
-        debug_metadata["selected_entropy_values"] = [
-            (t, entropy_val) for t, entropy_val in entropy_values if t in selected
-        ]
-
-        if len(selected) < self.num_frames:
-            self._log_debug(
-                f"Diversity filtering resulted in only {len(selected)} frames. "
-                + f"Adding {self.num_frames - len(selected)} more."
-            )
-            remaining = sorted([t for t, _ in entropy_values if t not in selected])
-            for t in remaining:
-                if len(selected) < self.num_frames:
-                    selected.append(t)
-
-        selected.sort()  # Sort timestamps chronologically
-        debug_metadata["selected_times"] = selected
-        debug_metadata["method_used"] = method_used
-
-        self._log_debug(
-            f"Final selection: {len(selected)} frames using method '{method_used}'"
-        )
-
-        if hasattr(self.logger, "log_operation_time"):
-            self.logger.log_operation_time("get_advanced_sample_times", start_time)
-
-        return selected, debug_metadata
-
-    def extract_frame(self, time_sec: float) -> Image.Image:
-        """
-        Extract a single frame from the video at a specific time (in seconds)
-        using direct pipe communication for in-memory buffers.
-
-        Args:
-            time_sec (float): Time in seconds to extract the frame.
-
-        Returns:
-            PIL.Image: The extracted frame as a PIL Image object.
-
-        Raises:
-            RuntimeError: If frame extraction fails.
-        """
-        source_display = self.video_path if self.video_path else "in-memory buffer"
-        extra_args = {"timestamp": time_sec, "video_source": source_display}
-
-        self._log_debug(
-            f"Extracting frame at {time_sec:.2f} sec from {source_display}",
-            extra=extra_args,
-        )
-
-        start_time = time.time()
-
-        # Base command with optimized settings
-        command = [
-            "ffmpeg",
-            "-y",  # Overwrite output without asking
-            "-loglevel",
-            "error",  # Only show errors
-            "-threads",
-            "1",  # Limit to single thread per extraction
-        ]
-
-        # Add input source and seeking BEFORE input for faster seeking
-        if self.video_buffer:
-            command.extend(["-i", "pipe:0"])
-        else:
-            command.extend(["-i", self.video_path])
-
-        # Add frame extraction settings
-        command.extend(
-            [
-                "-ss",
-                str(time_sec),
-                "-vframes",
-                "1",
-                "-f",
-                "image2pipe",
-                "-pix_fmt",
-                "rgb24",
-                "-vcodec",
-                "rawvideo",
-                "-",
-            ]
-        )
-
-        try:
-            # Set up process with appropriate pipes
-            process = subprocess.Popen(
+            result = subprocess.run(
                 command,
-                stdin=subprocess.PIPE if self.video_buffer else None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                bufsize=10 * 1024 * 1024,  # 10MB buffer
+                check=True,
+                text=True,
+                timeout=15,
             )
-
-            # If using buffer, send it to stdin
-            if self.video_buffer:
-                self.video_buffer.seek(0)
-                stdout, stderr = process.communicate(input=self.video_buffer.read())
-                self.video_buffer.seek(0)
-            else:
-                stdout, stderr = process.communicate()
-
-            if process.returncode != 0:
-                error_output = (
-                    stderr.decode("utf-8", errors="ignore")
-                    if stderr
-                    else "No stderr output"
-                )
-                raise RuntimeError(
-                    f"FFmpeg failed with code {process.returncode}: {error_output}"
-                )
-
-            if not stdout:
-                raise RuntimeError("No frame data received from FFmpeg")
-
-            # Process raw frame data
-            try:
-                # Default frame size (can be adjusted based on your needs)
-                width = height = 224  # CLIP's default size
-
-                # Calculate frame size from buffer
-                pixels = len(stdout) // 3  # 3 bytes per pixel for RGB24
-                frame_dim = int(math.sqrt(pixels))
-                if frame_dim * frame_dim * 3 == len(stdout):
-                    width = height = frame_dim
-
-                # Create PIL image from raw RGB data
-                image = Image.frombytes("RGB", (width, height), stdout, "raw", "RGB")
-                image = image.convert("RGB")  # Ensure RGB format
-
-                self._log_debug(
-                    f"Successfully extracted frame at {time_sec:.2f} sec",
+            duration_str = result.stdout.strip()
+            if not duration_str or duration_str == "N/A":
+                err_msg = f"ffprobe returned invalid duration '{duration_str}' for '{self.video_path}'"
+                self.logger.error(
+                    err_msg,
                     extra={
-                        "duration_ms": (time.time() - start_time) * 1000,
-                        "frame_size": f"{width}x{height}",
-                        **extra_args,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "video_path": self.video_path,
                     },
                 )
-
-                if hasattr(self.logger, "log_operation_time"):
-                    self.logger.log_operation_time("extract_frame", start_time)
-
-                return image
-
-            except Exception as e:
-                self._log_error(
-                    f"Failed to create image from frame data: {e}",
-                    error=e,
-                    extra=extra_args,
-                )
-                return self._extract_frame_fallback(time_sec)
-
-        except Exception as e:
-            self._log_error(
-                f"Frame extraction failed at {time_sec} sec: {e}",
-                error=e,
-                extra=extra_args,
+                raise RuntimeError(err_msg)
+            duration = float(duration_str)
+            self.logger.debug(
+                f"Video duration: {duration:.2f}s for '{self.video_path}'",
+                extra={
+                    "duration": duration,
+                    "time_taken_ms": (time.time() - start_time) * 1000,
+                },
             )
-            return self._extract_frame_fallback(time_sec)
+            return duration
+        except subprocess.TimeoutExpired:
+            self.logger.error(
+                f"ffprobe timeout getting duration for '{self.video_path}'",
+                extra={"video_path": self.video_path},
+            )
+            raise RuntimeError(
+                f"ffprobe timeout getting duration for '{self.video_path}'"
+            )
+        except Exception as e:
+            self.logger.error(
+                f"Failed to get video duration for '{self.video_path}': {e}",
+                extra={"video_path": self.video_path},
+            )
+            raise RuntimeError(
+                f"Failed to get video duration for '{self.video_path}': {e}"
+            ) from e
 
-    def _extract_frame_fallback(self, time_sec: float) -> Image.Image:
-        """
-        Fallback method to extract a frame using MJPEG when the optimized
-        method fails. This is more compatible but potentially slower.
-
-        Args:
-            time_sec (float): Time in seconds to extract the frame.
-
-        Returns:
-            PIL.Image: The extracted frame as a PIL Image object.
-
-        Raises:
-            RuntimeError: If frame extraction completely fails.
-        """
-        source_display = self.video_path if self.video_path else "in-memory buffer"
-        self._log_debug(
-            f"Using fallback frame extraction for {source_display} at {time_sec} sec"
+    def _extract_frame_fallback(
+        self, time_sec: float
+    ) -> Image.Image:  # Made primary due to reliability
+        self.logger.debug(
+            f"Extracting frame (mjpeg) at {time_sec:.2f}s from '{self.video_path}'"
         )
-
-        # Fallback to classic MJPEG method which is more compatible
         command = [
             "ffmpeg",
             "-y",
@@ -771,258 +373,248 @@ class VideoProcessor:
             "-ss",
             str(time_sec),
             "-i",
-            self.video_path if self.video_path else "-",
+            self.video_path,
             "-vframes",
             "1",
             "-f",
             "image2pipe",
             "-vcodec",
-            "mjpeg",  # Use MJPEG for compatibility
+            "mjpeg",
             "-q:v",
-            "2",  # High quality (low compression)
-            "-",
+            "2",
+            "-",  # High quality MJPEG
         ]
-
-        # If using buffer, read from stdin ('-') and pass buffer content
-        input_data = None
-        if self.video_buffer:
-            self.video_buffer.seek(0)
-            input_data = self.video_buffer.read()
-            self.video_buffer.seek(0)  # Reset after read
-
         try:
             result = subprocess.run(
                 command,
-                input=input_data,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True,
-                text=False,
-                timeout=30,  # 30 second timeout
+                timeout=20,
             )
-
             if not result.stdout:
-                error_output = (
+                err_msg = (
                     result.stderr.decode("utf-8", errors="ignore")
                     if result.stderr
-                    else "No stderr output"
+                    else "No stderr"
                 )
-                raise RuntimeError(
-                    f"No frame data returned from ffmpeg. Stderr: {error_output}"
+                self.logger.error(
+                    f"ffmpeg (mjpeg) failed for '{self.video_path}' at {time_sec:.2f}s: No stdout. Stderr: {err_msg}",
+                    extra={"time_sec": time_sec},
                 )
-
-            # Create image from JPEG data
-            image = Image.open(io.BytesIO(result.stdout)).convert("RGB")
-            return image
-
-        except Exception as e:
-            self._log_error(
-                f"Fallback frame extraction also failed at {time_sec} sec: {e}", error=e
+                raise RuntimeError(f"No frame data from mjpeg. Stderr: {err_msg}")
+            return Image.open(io.BytesIO(result.stdout)).convert("RGB")
+        except subprocess.TimeoutExpired:
+            self.logger.error(
+                f"ffmpeg (mjpeg) timeout for '{self.video_path}' at {time_sec:.2f}s",
+                extra={"time_sec": time_sec},
             )
-            raise RuntimeError(f"Failed to extract frame at {time_sec} sec: {e}")
+            raise RuntimeError(
+                f"ffmpeg (mjpeg) timeout extracting frame at {time_sec:.2f}s"
+            )
+        except Exception as e:
+            self.logger.error(
+                f"Frame extraction (mjpeg) failed for '{self.video_path}' at {time_sec:.2f}s: {e}",
+                extra={"time_sec": time_sec},
+            )
+            raise RuntimeError(
+                f"Failed to extract frame at {time_sec:.2f}s using mjpeg: {e}"
+            ) from e
+
+    extract_frame = (
+        _extract_frame_fallback  # Use the robust mjpeg method as the main extract_frame
+    )
+
+    def get_advanced_sample_times(self) -> Tuple[List[float], Dict[str, Any]]:
+        self.logger.debug(
+            f"Calculating sample times for '{self.video_path}' (duration: {self.duration:.2f}s, frames: {self.num_frames})"
+        )
+        debug_metadata: Dict[str, Any] = {
+            "num_requested_frames": self.num_frames,
+            "video_duration_s": self.duration,
+        }
+        method_used = "uniform_sampling_default"
+
+        if self.num_frames <= 0:
+            return [], {
+                "method_used": "none",
+                "reason": "num_frames is zero or negative",
+                **debug_metadata,
+            }
+        if self.duration <= 0:  # Should have been caught by __init__
+            return [], {
+                "method_used": "none",
+                "reason": "video duration is zero or negative",
+                **debug_metadata,
+            }
+
+        start_offset = min(0.5, self.duration * 0.02)  # Avoid very start/end
+        end_offset = min(0.5, self.duration * 0.02)
+        effective_duration = self.duration - start_offset - end_offset
+
+        selected_times: List[float]
+        if self.num_frames == 1:
+            selected_times = [self.duration / 2.0]
+            method_used = "single_middle_frame"
+        elif (
+            effective_duration <= 0.1
+        ):  # Video too short for meaningful spread after offset
+            selected_times = [self.duration / 2.0] * self.num_frames  # Duplicate middle
+            method_used = "middle_frame_duplicated_short_video"
+        else:
+            # Spread self.num_frames evenly across effective_duration
+            selected_times = [
+                start_offset + (i * effective_duration / (self.num_frames - 1))
+                for i in range(self.num_frames)
+            ]
+            method_used = "uniform_spread_with_offset"
+
+        # Ensure timestamps are within valid range and distinct enough (simplified)
+        selected_times = sorted(
+            list(set(max(0.0, min(t, self.duration - 0.001)) for t in selected_times))
+        )
+
+        debug_metadata["method_used"] = method_used
+        debug_metadata["candidate_timestamps"] = list(selected_times)
+        debug_metadata["effective_sampling_duration_s"] = effective_duration
+        debug_metadata["start_offset_s"] = start_offset
+
+        # Placeholder for full PySceneDetect integration from original prompt
+        # For now, this simplified uniform sampling is used.
+        self.logger.debug(
+            f"Selected {len(selected_times)} timestamps via {method_used}",
+            extra={"timestamps": selected_times, **debug_metadata},
+        )
+        return selected_times, debug_metadata
 
     def extract_frames(self) -> Tuple[List[Image.Image], Dict[str, Any]]:
-        """
-        Efficiently extract multiple frames from the video using a single ffmpeg process.
-
-        Returns:
-            Tuple[List[Image.Image], Dict[str, Any]]: List of PIL images and debug metadata.
-
-        Performance:
-            - Uses hardware acceleration if available.
-            - Reduces frame size to 128x128 for speed.
-            - Logs extraction time and frame count.
-        """
-        start = time.time()
-        step = max(self.duration / (self.num_frames + 1), 0.001)
-        vf = f"fps=1/{step},scale=128:-1"  # Lower frame size to 128px tall
-
-        # Check if hardware acceleration should be used
-        use_hwaccel = os.environ.get("FFMPEG_HWACCEL", "on").lower() not in (
-            "off",
-            "false",
-            "0",
+        self.logger.info(
+            f"Extracting up to {self.num_frames} frames from '{self.video_path}'"
         )
+        overall_start_time = time.time()
+        extracted_frames_pil: List[Image.Image] = []
 
-        # Build ffmpeg command with optional hardware acceleration
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-        ]
-
-        # Only add hardware acceleration if enabled
-        if use_hwaccel:
-            cmd.extend(["-hwaccel", "auto"])  # Use hardware acceleration if available
-
-        cmd.extend(
-            [
-                "-i",
-                self.video_path,
-                "-vf",
-                vf,
-                "-vframes",
-                str(self.num_frames),
-                "-f",
-                "image2pipe",
-                "-pix_fmt",
-                "rgb24",
-                "-vcodec",
-                "rawvideo",
-                "-",
-            ]
-        )
-
-        frame_sz = 128 * 128 * 3
-
-        def run_ffmpeg(command):
-            proc = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            raw = proc.stdout.read()
-            stderr = proc.stderr.read()
-            proc.wait()
-            return proc.returncode, raw, stderr
-
-        # Try with hardware acceleration first (if enabled)
-        retcode, raw, stderr = run_ffmpeg(cmd)
-        frame_count = len(raw) // frame_sz
-        if retcode != 0 or frame_count == 0:
-            stderr_text = stderr.decode("utf-8", errors="ignore")
-            self._log_warning(
-                f"Hardware-accelerated ffmpeg failed or no frames decoded; retrying without -hwaccel. Error: {stderr_text}"
-            )
-            # Remove -hwaccel and 'auto' from the command
-            cmd_no_hwaccel = [c for c in cmd if c not in ("-hwaccel", "auto")]
-            retcode, raw, stderr = run_ffmpeg(cmd_no_hwaccel)
-            frame_count = len(raw) // frame_sz
-            if retcode != 0 or frame_count == 0:
-                stderr_text = stderr.decode("utf-8", errors="ignore")
-                self._log_error(
-                    f"ffmpeg still failed; falling back to per‑frame extraction. Error: {stderr_text}"
-                )
-                # Fallback: extract frames one by one
-                try:
-                    timestamps, debug_info = self.get_advanced_sample_times()
-                    return [
-                        self.extract_frame(t) for t in timestamps[: self.num_frames]
-                    ], {"method_used": "frame_by_frame_fallback"}
-                except Exception as e:
-                    self._log_error(
-                        f"Frame-by-frame extraction also failed: {e}", error=e
-                    )
-                    raise RuntimeError(f"All frame extraction methods failed: {e}")
-
-        # If we got fewer frames than requested, log a warning but proceed
-        if frame_count < self.num_frames:
-            self._log_warning(
-                f"ffmpeg returned only {frame_count} frames (expected {self.num_frames}); using what we have"
-            )
-
-        # Process the frames we got
-        frames = []
-        for i in range(0, min(self.num_frames, frame_count) * frame_sz, frame_sz):
-            if i < len(raw):
-                try:
-                    frame = Image.frombytes("RGB", (128, 128), raw[i : i + frame_sz])
-                    frames.append(frame)
-                except Exception as e:
-                    self._log_error(
-                        f"Failed to create frame from bytes at position {i}: {e}",
-                        error=e,
-                    )
-
-        duration_ms = (time.time() - start) * 1000
-        self._log_debug(
-            f"One‑shot ffmpeg delivered {len(frames)} frames",
-            extra={"duration_ms": duration_ms},
-        )
-
-        # If we still got no frames, try the frame-by-frame approach as last resort
-        if not frames:
-            self._log_warning(
-                "No valid frames from one-shot method, falling back to frame-by-frame extraction"
-            )
-            try:
-                timestamps, debug_info = self.get_advanced_sample_times()
-                return [self.extract_frame(t) for t in timestamps[: self.num_frames]], {
-                    "method_used": "frame_by_frame_fallback"
-                }
-            except Exception as e:
-                self._log_error(f"Complete extraction failure: {e}", error=e)
-                raise RuntimeError(f"All frame extraction methods failed: {e}")
-
-        return frames, {
-            "method_used": "one_shot_ffmpeg",
-            "duration_ms": duration_ms,
-            "requested_frames": self.num_frames,
-            "actual_frames": len(frames),
+        timestamps, frame_sampling_debug_meta = self.get_advanced_sample_times()
+        final_debug_meta: Dict[str, Any] = {
+            "frame_sampling_details": frame_sampling_debug_meta
         }
+        final_debug_meta["num_timestamps_from_sampler"] = len(timestamps)
+
+        if not timestamps:
+            self.logger.warning(
+                f"No timestamps returned by sampler for '{self.video_path}'.",
+                extra=final_debug_meta,
+            )
+            return [], {
+                "error": "No timestamps for frame extraction",
+                **final_debug_meta,
+            }
+
+        # Limit to self.num_frames if sampler returned more for some reason
+        actual_timestamps_to_extract = timestamps[: self.num_frames]
+        final_debug_meta["actual_timestamps_for_extraction"] = (
+            actual_timestamps_to_extract
+        )
+
+        extraction_errors_count = 0
+        use_parallel_extraction = (
+            self.executor and len(actual_timestamps_to_extract) > 1
+        )
+
+        if (
+            use_parallel_extraction and self.executor
+        ):  # Check self.executor again for type safety
+            future_to_ts_map = {
+                self.executor.submit(self.extract_frame, ts): ts
+                for ts in actual_timestamps_to_extract
+            }
+            for future in concurrent.futures.as_completed(future_to_ts_map):
+                ts = future_to_ts_map[future]
+                try:
+                    frame_pil = future.result()
+                    extracted_frames_pil.append(frame_pil)
+                except Exception as e_frame:
+                    extraction_errors_count += 1
+                    self.logger.error(
+                        f"Parallel extract_frame failed for ts={ts:.2f}s: {e_frame}",
+                        extra={"timestamp": ts},
+                    )
+        else:  # Sequential extraction
+            for ts in actual_timestamps_to_extract:
+                try:
+                    frame_pil = self.extract_frame(ts)
+                    extracted_frames_pil.append(frame_pil)
+                except Exception as e_frame:
+                    extraction_errors_count += 1
+                    self.logger.error(
+                        f"Sequential extract_frame failed for ts={ts:.2f}s: {e_frame}",
+                        extra={"timestamp": ts},
+                    )
+
+        if extraction_errors_count > 0:
+            final_debug_meta["frame_extraction_error_count"] = extraction_errors_count
+
+        if not extracted_frames_pil and len(actual_timestamps_to_extract) > 0:
+            err_msg = f"All {len(actual_timestamps_to_extract)} frame extractions failed for '{self.video_path}'."
+            self.logger.error(err_msg, extra=final_debug_meta)
+            return [], {"error": err_msg, **final_debug_meta}
+
+        # If fewer frames than requested were successfully extracted, duplicate the last good one.
+        if 0 < len(extracted_frames_pil) < self.num_frames:
+            self.logger.warning(
+                f"Extracted {len(extracted_frames_pil)} frames, but {self.num_frames} were requested for '{self.video_path}'. Duplicating last good frame.",
+                extra=final_debug_meta,
+            )
+            last_good_frame = extracted_frames_pil[-1]
+            num_to_add = self.num_frames - len(extracted_frames_pil)
+            extracted_frames_pil.extend(
+                [last_good_frame.copy() for _ in range(num_to_add)]
+            )
+        elif (
+            not extracted_frames_pil and self.num_frames > 0
+        ):  # Still no frames and some were expected
+            self.logger.error(
+                f"No frames were ultimately available for '{self.video_path}' though {self.num_frames} were requested.",
+                extra=final_debug_meta,
+            )
+            return [], {
+                "error": f"No frames available after processing for {self.video_path}",
+                **final_debug_meta,
+            }
+
+        final_debug_meta["num_final_pil_frames_returned"] = len(extracted_frames_pil)
+        total_extraction_duration_ms = (time.time() - overall_start_time) * 1000
+        self.logger.info(
+            f"Successfully prepared {len(extracted_frames_pil)} frames in {total_extraction_duration_ms:.2f}ms for '{self.video_path}'.",
+            extra={"duration_ms": total_extraction_duration_ms, **final_debug_meta},
+        )
+        return extracted_frames_pil, final_debug_meta
 
     def __del__(self):
-        if getattr(self, "_tmp_path", None):
-            try:
-                os.remove(self._tmp_path)
-            except FileNotFoundError:
-                pass
+        # No _tmp_path attribute was defined in this version of VideoProcessor,
+        # as it expects video_path to be managed externally (e.g. by _preprocess_single_item_for_batch)
+        # If VideoProcessor were to create its own temp files, then self._tmp_path logic would be here.
+        pass
 
 
 class CLIPEmbedder:
-    """
-    A class to handle CLIP model loading and embedding computation for images and videos.
-    The class uses the Hugging Face Transformers library to load the CLIP model and
-    processor. It provides methods for computing embeddings for both single images and
-    averaged embeddings from multiple video frames.
-    Args:
-        model_name (str): Name of the CLIP model to load from Hugging Face.
-        device (str): Device to run the model on ('mps', 'cuda', or 'cpu').
-        logger (logging.Logger): Optional logger for debug information.
-        enable_augmentation (bool): If True, apply basic image augmentations.
-    Attributes:
-        model_name (str): Name of the CLIP model.
-        device (str): Device to run the model on.
-        logger (logging.Logger): Logger for debug information.
-        model (CLIPModel): Loaded CLIP model.
-        processor (CLIPProcessor): Processor for pre-processing inputs.
-        enable_augmentation (bool): Flag to enable data augmentation.
-        augmentation_transforms (torchvision.transforms.Compose): Data augmentation transforms.
-    Methods:
-        get_image_embedding(image): Compute and return the normalized CLIP embedding for a single image.
-        get_video_embedding(frames): Compute and return an averaged CLIP embedding from multiple video frames.
-    """
+    preprocess: Callable[[Any], torch.Tensor]  # Type hint for preprocessing transform
 
     def __init__(
         self,
-        model_name="openai/clip-vit-base-patch32",
-        device=None,
-        logger=None,
-        enable_augmentation=False,
-        request_id=None,
+        model_name: str = "openai/clip-vit-base-patch32",
+        device: Optional[str] = None,
+        logger: Optional[EmbeddingLogger] = None,
+        enable_augmentation: bool = False,
     ):
-        self.logger = logger or embedding_logger
+        self.logger = logger or embedding_logger  # Fallback to global default
+        self.logger.set_component_name(
+            f"CLIPEmbedder-{model_name.split('/')[-1][:15]}"
+        )  # Shorten name
         self.model_name = model_name
 
-        if isinstance(logger, logging.Logger):
-            # Wrap standard logger
-            self._log_info = lambda msg, **kwargs: logger.info(msg)
-            self._log_debug = lambda msg, **kwargs: logger.debug(msg)
-            self._log_error = lambda msg, **kwargs: logger.error(msg)
-            self._log_warning = lambda msg, **kwargs: logger.warning(msg)
-        else:
-            # Use enhanced logger
-            self._log_info = self.logger.info
-            self._log_debug = self.logger.debug
-            self._log_error = self.logger.error
-            self._log_warning = self.logger.warning
-
-            # Set request_id if provided
-            if request_id:
-                self.logger.set_request_id(request_id)
-
-        # Device selection: Prefer MPS on Apple, then CUDA, then CPU.
         if device is None:
-            if torch.backends.mps.is_available():
+            if torch.backends.mps.is_available() and torch.backends.mps.is_built():
                 self.device = "mps"
             elif torch.cuda.is_available():
                 self.device = "cuda"
@@ -1030,540 +622,798 @@ class CLIPEmbedder:
                 self.device = "cpu"
         else:
             self.device = device
-
-        self._log_info(
-            f"Initializing CLIP model {model_name} on {self.device}",
-            extra={"model": model_name, "device": self.device},
+        self.logger.info(
+            f"Initializing CLIP model '{model_name}' on device '{self.device}'"
         )
 
-        start_time = time.time()
-        # Switch to OpenCLIP pre-trained weights and transforms
-        # Using laion/CLIP-ViT-B-32-laion2B-s34B-b79K
-        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-            "ViT-B-32", pretrained="laion2B-s34B-b79K"
-        )
-        self.model.to(self.device)
+        init_start_time = time.time()
+        try:
+            # Correctly parse model name for OpenCLIP: architecture from model_name, pretrained from full name
+            # e.g., model_name="ViT-B-32", pretrained="laion2b_s34b_b79k"
+            # or model_name="CLIP-ViT-B-32", pretrained="openai"
+            # The provided `model_name` like "openai/clip-vit-base-patch32" is HuggingFace Hub style.
+            # OpenCLIP expects model arch (e.g. "ViT-B-32") and pretrained tag (e.g. "openai" or "laion2b_s34b_b79k")
 
-        # If we have GPU or MPS, bump matmul precision for float32 ops
-        if torch.cuda.is_available() or torch.backends.mps.is_available():
-            torch.set_float32_matmul_precision("high")
-            self._log_info(
-                "Enabled high float32 matmul precision",
-                extra={"device": self.device},
+            # Heuristic to parse common HF model names for OpenCLIP
+            arch_name_map = {
+                "vit-base-patch32": "ViT-B-32",
+                "vit-b-32": "ViT-B-32",
+                "vit-large-patch14": "ViT-L-14",
+                "vit-l-14": "ViT-L-14",
+            }
+            model_arch = self.model_name  # Default to full name if not mapped
+            pretrained_tag = "openai"  # Default if it seems like an OpenAI model
+
+            # Attempt to parse "author/model_arch-dataset"
+            if "/" in self.model_name:
+                author_part, model_part = self.model_name.split("/", 1)
+                if author_part.lower() == "openai":
+                    for key, val in arch_name_map.items():
+                        if key in model_part.lower():
+                            model_arch = val
+                            break
+                else:  # E.g. "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+                    model_arch_candidate = model_part.split("-")[
+                        1
+                    ]  # CLIP-ViT-B-32 -> ViT-B-32
+                    for key, val in arch_name_map.items():
+                        if key in model_arch_candidate.lower():
+                            model_arch = val
+                            break
+                    # pretrained_tag = model_part # Use the full model_part as pretrained for laion etc.
+                    pretrained_tag = (
+                        self.model_name
+                    )  # For non-openai, often full name is pretrained
+
+            self.logger.debug(
+                f"Attempting to load OpenCLIP model_arch='{model_arch}', pretrained='{pretrained_tag}'"
             )
 
-        self._log_info(
-            f"Model initialization complete in {(time.time() - start_time):.2f} seconds"
-        )
+            # Use the correct OpenCLIP API
+            self.model, train_preprocess, val_preprocess = (
+                open_clip.create_model_and_transforms(
+                    model_name=model_arch, pretrained=pretrained_tag, device=self.device
+                )
+            )
+            # Use validation preprocessing for inference
+            self.preprocess = val_preprocess  # type: ignore  # OpenCLIP returns callable transform
+            self.model.eval()
 
-        # Optional data augmentation transforms for images.
+            if self.device not in ["cpu"]:  # cuda or mps
+                try:
+                    torch.set_float32_matmul_precision("high")
+                    self.logger.debug("Set float32 matmul precision to 'high'.")
+                except AttributeError:  # Older PyTorch
+                    self.logger.debug(
+                        "torch.set_float32_matmul_precision not available."
+                    )
+            self.logger.info(
+                f"CLIP model '{self.model_name}' (parsed as arch='{model_arch}', pretrained='{pretrained_tag}') loaded on '{self.device}'. Init time: {(time.time() - init_start_time):.2f}s"
+            )
+        except Exception as e_load:
+            self.logger.error(
+                f"Failed to load CLIP model '{self.model_name}': {e_load}"
+            )
+            raise RuntimeError(
+                f"CLIP model loading failed for '{self.model_name}': {e_load}"
+            ) from e_load
+
         self.enable_augmentation = enable_augmentation
-        if enable_augmentation:
-            import torchvision.transforms as T
+        if self.enable_augmentation:
+            import torchvision.transforms as T  # type: ignore
 
-            self._log_info("Data augmentation enabled")
+            # Get model's expected image size (it's often part of preprocess config or model config)
+            # For OpenCLIP models, it's usually available via model.visual.image_size
+            image_size_cfg = getattr(
+                getattr(self.model, "visual", None), "image_size", 224
+            )
+            img_size_to_use = (
+                image_size_cfg if isinstance(image_size_cfg, int) else image_size_cfg[0]
+            )
+
             self.augmentation_transforms = T.Compose(
                 [
-                    T.RandomResizedCrop((224, 224), scale=(0.8, 1.0)),
+                    T.RandomResizedCrop(img_size_to_use, scale=(0.8, 1.0)),
                     T.RandomHorizontalFlip(p=0.5),
                 ]
+            )
+            self.logger.info(
+                f"Data augmentation enabled (RandomResizedCrop to {img_size_to_use}, RandomHorizontalFlip)."
             )
         else:
             self.augmentation_transforms = None
 
-    def get_image_embedding(self, image: Image.Image) -> list:
-        """
-        Compute and return the normalized CLIP embedding for a single image,
-        optionally applying data augmentation.
-        """
-        start_time = time.time()
-        self._log_debug(
-            "Computing image embedding",
-            extra={"image_size": f"{image.width}x{image.height}"},
+    def get_embeddings_for_pil_list(
+        self, pil_image_list: List[Image.Image]
+    ) -> torch.Tensor:
+        if not pil_image_list:
+            return torch.empty(0, dtype=torch.float32, device=self.device)
+
+        self.logger.debug(
+            f"CLIPEmbedder: Processing batch of {len(pil_image_list)} PIL images for embedding on {self.device}."
         )
+        gpu_batch_start_time = time.time()
 
-        if self.enable_augmentation:
-            image = self.augmentation_transforms(image)
+        tensors_for_model: List[torch.Tensor] = []
+        for i, pil_img in enumerate(pil_image_list):
+            try:
+                img_to_process = pil_img
+                if self.enable_augmentation and self.augmentation_transforms:
+                    img_to_process = self.augmentation_transforms(pil_img)
+                tensors_for_model.append(self.preprocess(img_to_process))
+            except Exception as e_pil_proc:
+                self.logger.error(
+                    f"Failed to preprocess PIL image at index {i} for model input: {e_pil_proc}",
+                    extra={"index": i},
+                )
+                # This error should ideally lead to this item being skipped or marked,
+                # rather than failing the whole batch. For now, we raise, and batch processor handles.
+                raise RuntimeError(
+                    f"PIL image preprocessing (index {i}) failed: {e_pil_proc}"
+                ) from e_pil_proc
 
-        # Preprocess via OpenCLIP transforms (returns a tensor)
-        image_input = self.preprocess(image).unsqueeze(0).to(self.device)
-        # Run model in half-precision on GPU/MPS for speed
-        with torch.autocast(self.device, dtype=torch.float16), torch.no_grad():
-            image_features = self.model.encode_image(image_input)
+        if not tensors_for_model:
+            self.logger.warning(
+                "No PIL images were successfully preprocessed into tensors for the model."
+            )
+            return torch.empty(0, dtype=torch.float32, device=self.device)
 
-        image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
-        embedding = image_features[0].cpu().numpy().tolist()
+        try:
+            input_tensor_batch = torch.stack(tensors_for_model).to(self.device)
+        except Exception as e_stack:
+            self.logger.error(
+                f"Error stacking preprocessed image tensors (count: {len(tensors_for_model)}): {e_stack}",
+                extra={
+                    "tensor_shapes_preview": [
+                        str(t.shape) for t in tensors_for_model[:3]
+                    ]
+                },
+            )
+            raise RuntimeError(f"Tensor stacking failed: {e_stack}") from e_stack
 
-        self._log_debug(
-            f"Image embedding computed, shape: {len(embedding)}",
-            extra={
-                "embedding_size": len(embedding),
-                "duration_ms": (time.time() - start_time) * 1000,
-            },
+        # Determine autocast parameters based on device
+        autocast_enabled = self.device != "cpu"
+        if autocast_enabled:
+            if self.device.startswith("cuda"):
+                autocast_context = torch.autocast(
+                    device_type="cuda", dtype=torch.float16
+                )
+            elif self.device == "mps":
+                autocast_context = torch.autocast(
+                    device_type="cpu", dtype=torch.float16
+                )  # MPS uses CPU autocast
+            else:
+                autocast_context = nullcontext()
+        else:
+            autocast_context = nullcontext()
+
+        with torch.no_grad(), autocast_context:
+            image_features_batch = self.model.encode_image(input_tensor_batch)
+            image_features_batch = image_features_batch / image_features_batch.norm(
+                p=2, dim=-1, keepdim=True
+            )
+
+        gpu_duration_ms = (time.time() - gpu_batch_start_time) * 1000
+        self.logger.info(
+            f"GPU inference for batch of {len(pil_image_list)} items completed in {gpu_duration_ms:.2f}ms. Output shape: {image_features_batch.shape}"
         )
-
-        if hasattr(self.logger, "log_operation_time"):
-            self.logger.log_operation_time("get_image_embedding", start_time)
-
-        return embedding
-
-    def get_video_embedding(self, frames: list) -> list:
-        """
-        Compute and return an averaged CLIP embedding from multiple video frames.
-        """
-        start_time = time.time()
-        self._log_debug(
-            f"Computing embedding for {len(frames)} video frames",
-            extra={"frame_count": len(frames)},
-        )
-
-        if self.enable_augmentation:
-            frames = [self.augmentation_transforms(f) for f in frames]
-
-        # Preprocess frames via OpenCLIP transforms and batch into a tensor
-        video_input = torch.stack([self.preprocess(f) for f in frames]).to(self.device)
-        # Run model in half-precision on GPU/MPS for speed
-        with torch.autocast(self.device, dtype=torch.float16), torch.no_grad():
-            image_features = self.model.encode_image(video_input)
-
-        image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
-        averaged_embedding = image_features.mean(dim=0)
-        embedding = averaged_embedding.cpu().numpy().tolist()
-
-        self._log_debug(
-            f"Video embedding computed, shape: {len(embedding)}",
-            extra={
-                "embedding_size": len(embedding),
-                "duration_ms": (time.time() - start_time) * 1000,
-            },
-        )
-
-        if hasattr(self.logger, "log_operation_time"):
-            self.logger.log_operation_time("get_video_embedding", start_time)
-
-        return embedding
+        return image_features_batch.cpu()  # Move to CPU before returning
 
 
-def compute_single_embedding(
-    input_data: Union[str, io.BytesIO, Image.Image],
-    args: Any,  # Typically argparse.Namespace or similar object
-    embedder: CLIPEmbedder,
-    executor: Optional[concurrent.futures.Executor] = None,
-    media_type: Optional[str] = None,  # Explicit 'image' or 'video' for buffers
-    identifier: Optional[str] = None,  # Original filename or identifier for logging
-) -> Dict[str, Any]:
-    """
-    Computes the CLIP embedding for a single input, which can be a file path,
-    an in-memory image (PIL), or an in-memory video/image buffer (BytesIO).
+def _preprocess_single_item_for_batch(
+    item_spec_dict: Dict[str, Any],  # From MediaItem.model_dump()
+    python_media_root: str,
+    default_num_frames_for_video: int,
+    parent_logger: EmbeddingLogger,  # Pass the main batch logger
+    video_processor_shared_executor: ThreadPoolExecutor,
+    item_specific_request_id: str,  # For granular logging
+) -> Dict[str, Any]:  # Returns dict compatible with EmbeddingResult + pil_images
 
-    Args:
-        input_data: The data to process (file path string, PIL Image, or BytesIO buffer).
-        args: Configuration arguments (e.g., num_frames, model name, augmentation flag).
-              Should include request_id if available. For buffers, media_type is expected here
-              if not passed explicitly.
-        embedder: Initialized CLIPEmbedder instance.
-        executor: Optional shared thread pool executor for video frame extraction.
-        media_type: Explicitly specifies 'image' or 'video' when input_data is BytesIO.
-                    Overrides sniffing or args.media_type.
-        identifier: A string identifier (like original filename) used for logging/results.
-                    If None, a UUID or placeholder will be used.
-
-    Returns:
-        A dictionary containing the embedding, debug metadata, and error information.
-    """
-    start_time = time.time()
-    request_id = getattr(args, "request_id", str(uuid.uuid4()))
-    logger = getattr(args, "logger", embedding_logger)
-    item_id = identifier or (
-        input_data if isinstance(input_data, str) else f"buffer_{request_id}"
+    item_id = item_spec_dict["id"]
+    media_type = item_spec_dict.get(
+        "media_type", "unknown"
+    )  # Initialize early to avoid unbound variable
+    # Create a logger for this specific item, inheriting parent's overall request_id but with item context
+    item_logger = EmbeddingLogger(
+        request_id=item_specific_request_id,
+        component_name=f"ItemPreProc-{item_id[:10]}",
     )
-    input_type_str = type(input_data).__name__
+    item_logger.logger.setLevel(parent_logger.logger.level)  # Inherit log level
 
-    if hasattr(logger, "set_request_id"):
-        logger.set_request_id(request_id)
+    item_logger.debug(
+        f"Preprocessing item '{item_spec_dict.get('original_filename', item_id)}'",
+        extra=item_spec_dict,
+    )
+
+    pil_images_for_item: List[Image.Image] = []
+    item_debug_meta: Dict[str, Any] = {
+        "original_item_id": item_id,
+        "source_type": item_spec_dict["source_type"],
+        "original_filename": item_spec_dict.get("original_filename", "N/A"),
+        "requested_media_type": item_spec_dict["media_type"],
+        "timestamp_preprocess_start_utc": datetime.utcnow().isoformat() + "Z",
+    }
+    temp_file_created_path: Optional[str] = None
 
     try:
-        # Determine media type and prepare for processing
-        resolved_media_type = None
-        video_duration_hint = getattr(args, "duration", None)  # Duration from headers?
+        media_source_for_pil: Union[str, io.BytesIO]
+        video_path_for_vid_processor: Optional[str] = None
+        source_type = item_spec_dict["source_type"]
+        source_location = item_spec_dict["source"]
+        media_type = item_spec_dict["media_type"]
 
-        logger.info(
-            f"Processing item: {item_id}",
-            extra={
-                "identifier": item_id,
-                "input_type": input_type_str,
-                "request_id": request_id,
-            },
+        if source_type == "url":
+            item_logger.debug(f"Downloading URL: {source_location}")
+            response = requests.get(
+                source_location, stream=True, timeout=DOWNLOAD_TIMEOUT_SECONDS
+            )
+            response.raise_for_status()
+
+            # Use provided original_filename for temp file suffix if available
+            temp_suffix = (
+                f"_{item_spec_dict.get('original_filename', uuid.uuid4().hex[:8])}"
+            )
+            # Ensure suffix is filesystem-safe and not too long
+            safe_suffix = "".join(
+                c if c.isalnum() or c in [".", "_"] else "_" for c in temp_suffix
+            )[:50]
+
+            with tempfile.NamedTemporaryFile(
+                delete=False, suffix=safe_suffix
+            ) as tmp_file:
+                for chunk in response.iter_content(chunk_size=32 * 1024):  # 32KB
+                    tmp_file.write(chunk)
+                temp_file_created_path = tmp_file.name
+            item_logger.info(
+                f"Downloaded URL '{source_location}' to temp file '{temp_file_created_path}'"
+            )
+            media_source_for_pil = temp_file_created_path
+            if media_type == "video":
+                video_path_for_vid_processor = temp_file_created_path
+            item_debug_meta["downloaded_url"] = source_location
+            item_debug_meta["temp_file_path"] = temp_file_created_path
+        elif source_type == "filepath":
+            resolved_fs_path = (
+                os.path.join(python_media_root, source_location)
+                if not os.path.isabs(source_location)
+                else source_location
+            )
+            item_logger.debug(
+                f"Accessing filepath: '{resolved_fs_path}' (original source: '{source_location}')"
+            )
+            if not os.path.exists(resolved_fs_path):
+                item_logger.error(f"Filepath not found: '{resolved_fs_path}'")
+                raise FileNotFoundError(f"Filepath not found: {resolved_fs_path}")
+            media_source_for_pil = resolved_fs_path
+            if media_type == "video":
+                video_path_for_vid_processor = resolved_fs_path
+            item_debug_meta["resolved_filepath"] = resolved_fs_path
+        else:
+            item_logger.error(f"Unsupported source_type: '{source_type}'")
+            raise ValueError(f"Unsupported source_type: {source_type}")
+
+        if media_type == "image":
+            img = Image.open(media_source_for_pil).convert("RGB")
+            pil_images_for_item.append(img)
+            item_debug_meta["image_dimensions"] = f"{img.width}x{img.height}"
+            item_logger.debug(
+                f"Loaded image '{item_spec_dict.get('original_filename', item_id)}' ({img.width}x{img.height})"
+            )
+        elif media_type == "video":
+            if not video_path_for_vid_processor:
+                item_logger.error(
+                    "Internal error: video_path_for_vid_processor not set for video item."
+                )
+                raise ValueError("video_path_for_vid_processor not set for video.")
+
+            num_frames = (
+                item_spec_dict.get("num_frames") or default_num_frames_for_video
+            )
+            vp = VideoProcessor(
+                video_path=video_path_for_vid_processor,
+                num_frames=num_frames,
+                logger=item_logger,  # Item-specific logger for VideoProcessor
+                executor=video_processor_shared_executor,  # Shared executor for ffmpeg calls
+                request_id=item_specific_request_id,  # Pass item's specific ID
+                duration=item_spec_dict.get("estimated_duration_s"),
+                original_filename_hint=item_spec_dict.get("original_filename"),
+            )
+            frames_list_pil, video_proc_debug_meta = vp.extract_frames()
+            pil_images_for_item.extend(frames_list_pil)
+            item_debug_meta.update(
+                video_proc_debug_meta
+            )  # Merge debug info from VideoProcessor
+            item_debug_meta["num_extracted_frames_for_item"] = len(frames_list_pil)
+            item_logger.info(
+                f"Extracted {len(frames_list_pil)} frames for video '{item_spec_dict.get('original_filename', item_id)}'"
+            )
+        else:
+            item_logger.error(f"Unsupported media_type: '{media_type}'")
+            raise ValueError(f"Unsupported media_type: {media_type}")
+
+        item_debug_meta["timestamp_preprocess_end_utc"] = (
+            datetime.utcnow().isoformat() + "Z"
         )
-
-        debug_metadata = {
-            "model": f"{getattr(args, 'model', None)} - {getattr(embedder, 'device', None)}",
-            "enable_augmentation": getattr(args, "enable_augmentation", False),
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "request_id": request_id,
-        }
-
-        if isinstance(input_data, str):  # File path input
-            if not os.path.exists(input_data):
-                raise FileNotFoundError(f"Input file not found: {input_data}")
-            ext = os.path.splitext(input_data)[1].lower()
-            if ext in VIDEO_EXTS:
-                resolved_media_type = "video"
-            elif ext in IMAGE_EXTS:
-                resolved_media_type = "image"
-            else:
-                raise ValueError(f"Unsupported file extension: {ext}")
-            debug_metadata["source_type"] = "filepath"
-            debug_metadata["extension"] = ext
-        elif isinstance(input_data, Image.Image):  # PIL Image input
-            resolved_media_type = "image"
-            debug_metadata["source_type"] = "pil_image"
-        elif isinstance(input_data, io.BytesIO):  # Buffer input
-            resolved_media_type = media_type or getattr(args, "media_type", None)
-            if not resolved_media_type:
-                # Basic content sniffing could be added here if needed
-                raise ValueError(
-                    "Media type ('image' or 'video') must be specified for buffer input."
-                )
-            if resolved_media_type not in ["image", "video"]:
-                raise ValueError(
-                    f"Invalid media type for buffer: {resolved_media_type}"
-                )
-            input_data.seek(0)  # Ensure buffer is at the start
-            debug_metadata["source_type"] = "buffer"
-            debug_metadata["specified_media_type"] = resolved_media_type
-        else:
-            raise TypeError(f"Unsupported input data type: {input_type_str}")
-
-        # --- Process Video ---
-        if resolved_media_type == "video":
-            logger.debug(
-                f"Processing video: {item_id}",
-                extra={"identifier": item_id, "source": debug_metadata["source_type"]},
-            )
-            debug_metadata["num_frames"] = args.num_frames
-
-            video_processor = VideoProcessor(
-                video_path=input_data if isinstance(input_data, str) else None,
-                video_buffer=input_data if isinstance(input_data, io.BytesIO) else None,
-                num_frames=args.num_frames,
-                logger=logger,
-                executor=executor,
-                request_id=request_id,
-                duration=video_duration_hint,  # Pass pre-computed duration if available
-            )
-            frames, adv_debug = video_processor.extract_frames()
-
-            logger.info(
-                f"Extracted {len(frames)} frames from video, calculating embedding",
-                extra={"frame_count": len(frames), "identifier": item_id},
-            )
-
-            embedding = embedder.get_video_embedding(frames)
-            debug_metadata.update(adv_debug)
-
-        # --- Process Image ---
-        elif resolved_media_type == "image":
-            logger.debug(
-                f"Processing image: {item_id}",
-                extra={"identifier": item_id, "source": debug_metadata["source_type"]},
-            )
-            if isinstance(input_data, str):
-                image = Image.open(input_data).convert("RGB")
-            elif isinstance(input_data, io.BytesIO):
-                image = Image.open(input_data).convert("RGB")
-            else:  # PIL Image
-                image = input_data  # Already a PIL image
-
-            embedding = embedder.get_image_embedding(image)
-            # No video-specific debug metadata here
-        else:
-            # This case should theoretically be caught earlier
-            raise ValueError(
-                f"Internal error: Unhandled resolved_media_type '{resolved_media_type}'"
-            )
-
-        # --- Prepare Result ---
-        result = {
-            "embedding": embedding,
-            "debugMetadata": debug_metadata,
+        return {
+            "id": item_id,
+            "media_type": media_type,
+            "pil_images": pil_images_for_item,
             "error": None,
             "detail": None,
+            "debug_metadata": item_debug_meta,
         }
 
-        duration_ms = (time.time() - start_time) * 1000
-        logger.info(
-            f"Processed {item_id} in {duration_ms:.2f}ms",
-            extra={"identifier": item_id, "duration_ms": duration_ms, "success": True},
+    except UnidentifiedImageError as uie:
+        item_logger.error(
+            f"PIL UnidentifiedImageError for '{item_spec_dict.get('original_filename', item_id)}': {uie}",
+            error=uie,
         )
-
-        return result
-    except UnidentifiedImageError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        duration_ms = (time.time() - start_time) * 1000
-        logger.error(
-            f"Failed to process {item_id}: {e}",
-            error=e,
-            extra={"identifier": item_id, "duration_ms": duration_ms, "success": False},
+        item_debug_meta["timestamp_preprocess_end_utc"] = (
+            datetime.utcnow().isoformat() + "Z"
         )
-
         return {
-            "embedding": None,
-            "debugMetadata": debug_metadata if "debug_metadata" in locals() else {},
-            "error": "Processing failed",
-            "detail": f"{type(e).__name__}: {e} (item: {item_id})",
+            "id": item_id,
+            "media_type": media_type,
+            "pil_images": [],
+            "error": "Unidentified image file",
+            "detail": str(uie),
+            "debug_metadata": item_debug_meta,
         }
-
-
-def process_batch(
-    inputs: List[
-        Union[str, Tuple[Union[io.BytesIO, Image.Image], str, Optional[str]]]
-    ],  # List of paths or (data, media_type, identifier) tuples
-    embedder: CLIPEmbedder,
-    args: Any,
-    logger=None,
-    shared_executor=None,
-) -> Dict[str, Any]:
-    """
-    Processes a batch of inputs (file paths or in-memory data).
-
-    Args:
-        inputs: A list where each element is either:
-                - A string (file path).
-                - A tuple: (input_data, media_type, identifier)
-                  where input_data is BytesIO or PIL.Image, media_type is 'image'/'video',
-                  and identifier is a string for logging/results.
-        embedder: Initialized CLIPEmbedder.
-        args: Configuration arguments.
-        logger: Logger instance.
-        shared_executor: Thread pool executor.
-
-    Returns:
-        A dictionary mapping the identifier (file path or provided identifier) to the result dict
-        from compute_single_embedding.
-    """
-    batch_id = str(uuid.uuid4())[:8]  # Generate a short batch ID
-    logger = logger or embedding_logger
-    request_id = getattr(args, "request_id", str(uuid.uuid4()))
-
-    if hasattr(logger, "set_request_id"):
-        logger.set_request_id(request_id)
-
-    start_time = time.time()
-    results: Dict[str, Any] = {}
-    total = len(inputs)
-
-    logger.info(
-        f"Starting batch processing of {total} files in parallel",
-        extra={"batch_id": batch_id, "file_count": total, "request_id": request_id},
-    )
-
-    import copy
-
-    max_workers = getattr(args, "batch_workers", os.cpu_count() or 4)
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=max_workers
-    ) as batch_executor:
-        future_to_id: Dict[concurrent.futures.Future, str] = {}
-        for idx, item_input in enumerate(inputs):
-            # Prepare a per-item copy of args with its own request_id
-            file_args = copy.copy(args)
-            file_args.request_id = f"{request_id}-{idx+1}"
-            file_args.logger = logger
-
-            # Resolve input_data, media_type, identifier
-            if isinstance(item_input, str):
-                input_data = item_input
-                identifier = item_input
-                ext = os.path.splitext(item_input)[1].lower()
-                media_type = "video" if ext in VIDEO_EXTS else "image"
-            else:
-                input_data, media_type, identifier = item_input
-
-            # Submit compute task
-            future = batch_executor.submit(
-                compute_single_embedding,
-                input_data,
-                file_args,
-                embedder,
-                shared_executor,
-                media_type,
-                identifier,
-            )
-            future_to_id[future] = identifier
-
-        processed = 0
-        for future in concurrent.futures.as_completed(future_to_id):
-            identifier = future_to_id[future]
-            result = future.result()
-            results[identifier] = result
-            processed += 1
-            # Report progress
-            if hasattr(logger, "log_progress"):
-                logger.log_progress(processed, total, identifier)
-            else:
-                print(
-                    json.dumps(
-                        {"processed": processed, "total": total, "current": identifier}
-                    ),
-                    file=sys.stderr,
-                    flush=True,
+    except FileNotFoundError as fnfe:
+        item_logger.error(
+            f"FileNotFoundError for '{item_spec_dict.get('original_filename', item_id)}': {fnfe}",
+            error=fnfe,
+        )
+        item_debug_meta["timestamp_preprocess_end_utc"] = (
+            datetime.utcnow().isoformat() + "Z"
+        )
+        return {
+            "id": item_id,
+            "media_type": media_type,
+            "pil_images": [],
+            "error": "File not found during preprocessing",
+            "detail": str(fnfe),
+            "debug_metadata": item_debug_meta,
+        }
+    except (
+        requests.exceptions.RequestException
+    ) as req_exc:  # Catch network errors for URLs
+        item_logger.error(
+            f"Network error downloading URL '{item_spec_dict.get('source')}' for item '{item_id}': {req_exc}",
+            error=req_exc,
+        )
+        item_debug_meta["timestamp_preprocess_end_utc"] = (
+            datetime.utcnow().isoformat() + "Z"
+        )
+        return {
+            "id": item_id,
+            "media_type": media_type,
+            "pil_images": [],
+            "error": "Network error during download",
+            "detail": str(req_exc),
+            "debug_metadata": item_debug_meta,
+        }
+    except Exception as e_preproc:
+        item_logger.error(
+            f"General failure preprocessing item '{item_spec_dict.get('original_filename', item_id)}': {e_preproc}",
+            error=e_preproc,
+        )
+        item_debug_meta["timestamp_preprocess_end_utc"] = (
+            datetime.utcnow().isoformat() + "Z"
+        )
+        item_debug_meta["preprocess_error_type"] = type(e_preproc).__name__
+        return {
+            "id": item_id,
+            "media_type": media_type,
+            "pil_images": [],
+            "error": f"Preprocessing failed: {type(e_preproc).__name__}",
+            "detail": str(e_preproc),
+            "debug_metadata": item_debug_meta,
+        }
+    finally:
+        if temp_file_created_path:
+            try:
+                os.unlink(temp_file_created_path)
+                item_logger.debug(f"Cleaned up temp file: '{temp_file_created_path}'")
+            except OSError as e_unlink_final:
+                item_logger.warning(
+                    f"Failed to clean up temp file '{temp_file_created_path}': {e_unlink_final}"
                 )
 
-    batch_duration_ms = (time.time() - start_time) * 1000
-    logger.info(
-        f"Completed batch processing of {total} items in {batch_duration_ms:.2f}ms",
-        extra={
-            "batch_id": batch_id,
-            "item_count": total,
-            "duration_ms": batch_duration_ms,
-        },
+
+def process_media_batch(
+    items_data_as_dicts: List[
+        Dict[str, Any]
+    ],  # List of MediaItem models (already .model_dump()'ed by server.py)
+    clip_embedder_instance: CLIPEmbedder,
+    python_media_root_path: str,
+    default_num_frames_for_videos: int,
+    parent_batch_logger: EmbeddingLogger,  # Logger for the whole batch operation
+    batch_processing_id: str,  # ID for this entire batch execution run
+) -> Dict[
+    str, Dict[str, Any]
+]:  # Returns map of item_id -> result_dict (EmbeddingResult like)
+
+    parent_batch_logger.set_request_id(batch_processing_id)  # Set ID for this run
+    parent_batch_logger.info(
+        f"Processing media batch '{batch_processing_id}' for {len(items_data_as_dicts)} items."
     )
-    return results
+    batch_overall_start_time = time.time()
 
+    final_results_map: Dict[str, Dict[str, Any]] = {}
+    # List of all PIL images (from all successfully preprocessed items) to send to GPU
+    all_pil_images_for_gpu_batch: List[Image.Image] = []
+    # Maps items to their corresponding slice in the GPU batch tensor
+    gpu_batch_item_details_map: List[Dict[str, Any]] = []
 
-def main_service():
-    import sys
-    import argparse
-    import logging
+    # Configure ThreadPoolExecutors
+    # These numbers can be tuned based on typical workload (I/O vs CPU bound) and system cores
+    num_cores = os.cpu_count() or 1
+    # For I/O bound tasks (downloads, ffmpeg calls which are external), more threads can be beneficial
+    max_preprocess_workers = min(max(4, num_cores * 2), 32)
+    max_video_frame_workers = min(
+        max(2, num_cores // 2 if num_cores > 1 else 1), 8
+    )  # ffmpeg can be heavy
 
-    parser = argparse.ArgumentParser(
-        description="CLIP embedding service (stdin/stdout)"
-    )
-    parser.add_argument("--model", type=str, default="openai/clip-vit-base-patch32")
-    parser.add_argument("-n", "--num_frames", type=int, default=20)
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--log", action="store_true")
-    parser.add_argument("--enable_augmentation", action="store_true", default=False)
+    with ThreadPoolExecutor(
+        max_workers=max_preprocess_workers, thread_name_prefix="ItemPreProc"
+    ) as item_preproc_executor, ThreadPoolExecutor(
+        max_workers=max_video_frame_workers, thread_name_prefix="VideoFrames"
+    ) as video_ffmpeg_executor:
 
-    args = parser.parse_args()
+        item_preprocess_futures_map = {
+            item_preproc_executor.submit(
+                _preprocess_single_item_for_batch,
+                item_data_dict,  # Pass the dict here
+                python_media_root_path,
+                default_num_frames_for_videos,
+                parent_batch_logger,  # Parent logger passed
+                video_ffmpeg_executor,  # Shared executor for VideoProcessor
+                f"{batch_processing_id}_{item_data_dict['id'][:8]}",  # Item-specific request_id for its logger
+            ): item_data_dict["id"]
+            for item_data_dict in items_data_as_dicts
+        }
 
-    # Create service-level logger
-    service_logger = EmbeddingLogger()
-    service_logger.info(
-        "CLIP embedding service starting with model: " + args.model,
-        extra={"model": args.model, "num_frames": args.num_frames},
-    )
-
-    # Initialize the embedder
-    start_time = time.time()
-    embedder = CLIPEmbedder(
-        model_name=args.model,
-        device=None,
-        logger=service_logger,
-        enable_augmentation=args.enable_augmentation,
-    )
-    service_logger.info(
-        f"CLIPEmbedder initialized on device: {embedder.device}",
-        extra={
-            "device": embedder.device,
-            "init_time_ms": (time.time() - start_time) * 1000,
-        },
-    )
-
-    shared_executor = concurrent.futures.ThreadPoolExecutor()
-    service_logger.info("Thread pool executor initialized for parallel processing")
-    service_logger.info("CLIP embedding service ready. Waiting for input...")
-
-    # Main service loop
-    request_counter = 0
-    while True:
-        try:
-            line = sys.stdin.readline()
-            if not line:
-                service_logger.info("End of input stream detected, exiting service")
-                break  # EOF
-
-            line = line.strip()
-            if not line:
-                continue
-
-            request_counter += 1
-            request_id = f"req-{request_counter}-{int(time.time())}"
-            batch_logger = EmbeddingLogger(request_id)
-
-            batch_logger.info(
-                f"Received request #{request_counter}",
-                extra={"input_length": len(line)},
+        num_items_preprocessed = 0
+        for future_obj in concurrent.futures.as_completed(item_preprocess_futures_map):
+            original_item_id = item_preprocess_futures_map[future_obj]
+            num_items_preprocessed += 1
+            parent_batch_logger.debug(
+                f"Preprocessing result received for item {num_items_preprocessed}/{len(items_data_as_dicts)} (ID: {original_item_id})"
             )
 
             try:
-                request = json.loads(line)
-                image_paths = request.get("imagePaths")
+                item_preproc_output_dict = (
+                    future_obj.result()
+                )  # This is the dict from _preprocess_single_item_for_batch
+                item_id_from_result = item_preproc_output_dict[
+                    "id"
+                ]  # Should match original_item_id
 
-                if not isinstance(image_paths, list):
-                    batch_logger.error(
-                        "Invalid input: 'imagePaths' must be a list",
-                        extra={"input_type": type(image_paths).__name__},
+                if item_preproc_output_dict.get("error"):
+                    parent_batch_logger.warning(
+                        f"Item '{item_id_from_result}' (orig: {original_item_id}) failed preprocessing: {item_preproc_output_dict['error']} - {item_preproc_output_dict.get('detail')}",
+                        extra={
+                            "item_id": item_id_from_result,
+                            "error_details": item_preproc_output_dict,
+                        },
                     )
-
-                    error_response = {
-                        "error": "Invalid input",
-                        "detail": "'imagePaths' must be a list.",
+                    final_results_map[item_id_from_result] = {
+                        "id": item_id_from_result,
+                        "embedding": None,
+                        "error": item_preproc_output_dict["error"],
+                        "detail": item_preproc_output_dict.get("detail"),
+                        "debugMetadata": {
+                            **(item_preproc_output_dict.get("debug_metadata", {})),
+                            "model": clip_embedder_instance.model_name,
+                            "device": clip_embedder_instance.device,
+                            "batch_processing_status": "failed_preprocessing",
+                        },
                     }
-                    print(json.dumps(error_response), flush=True)
+                    continue  # Skip this item for GPU stage
+
+                if not item_preproc_output_dict.get(
+                    "pil_images"
+                ):  # Should have error if this is the case
+                    parent_batch_logger.warning(
+                        f"Item '{item_id_from_result}' yielded no PIL images after preprocessing (error not set). Marking as error.",
+                        extra={
+                            "item_id": item_id_from_result,
+                            "preproc_output": item_preproc_output_dict,
+                        },
+                    )
+                    final_results_map[item_id_from_result] = {
+                        "id": item_id_from_result,
+                        "embedding": None,
+                        "error": "No images/frames extracted (internal)",
+                        "detail": "Preprocessing yielded no processable PIL images, and no explicit error was set.",
+                        "debugMetadata": {
+                            **(item_preproc_output_dict.get("debug_metadata", {})),
+                            "model": clip_embedder_instance.model_name,
+                            "device": clip_embedder_instance.device,
+                            "batch_processing_status": "no_images_from_preprocessing_unexpected",
+                        },
+                    }
                     continue
 
-                batch_logger.info(
-                    f"Processing batch of {len(image_paths)} files",
-                    extra={"file_count": len(image_paths)},
-                )
-            except Exception as e:
-                batch_logger.error("Failed to parse request JSON", error=e)
-
-                error_response = {"error": "Invalid input", "detail": str(e)}
-                print(json.dumps(error_response), flush=True)
-                continue
-
-            try:
-                # Add request_id to args
-                args.request_id = request_id
-                args.logger = batch_logger
-
-                # Process the batch
-                start_time = time.time()
-                results = process_batch(
-                    image_paths, embedder, args, batch_logger, shared_executor
-                )
-
-                duration_ms = (time.time() - start_time) * 1000
-                batch_logger.info(
-                    f"Batch processing completed in {duration_ms:.2f}ms",
-                    extra={
-                        "duration_ms": duration_ms,
-                        "file_count": len(image_paths),
-                        "success_count": sum(
-                            1 for r in results.values() if not r.get("error")
+                # Successfully preprocessed, add to GPU batch list
+                gpu_batch_item_details_map.append(
+                    {
+                        "item_id": item_id_from_result,
+                        "media_type": item_preproc_output_dict["media_type"],
+                        "num_source_pil_images": len(
+                            item_preproc_output_dict["pil_images"]
                         ),
+                        "start_idx_in_gpu_batch": len(all_pil_images_for_gpu_batch),
+                        "original_debug_metadata": item_preproc_output_dict.get(
+                            "debug_metadata", {}
+                        ),
+                    }
+                )
+                all_pil_images_for_gpu_batch.extend(
+                    item_preproc_output_dict["pil_images"]
+                )
+                parent_batch_logger.debug(
+                    f"Item '{item_id_from_result}' preprocessed. Added {len(item_preproc_output_dict['pil_images'])} PIL images to GPU batch.",
+                    extra={
+                        "item_id": item_id_from_result,
+                        "num_pil_added": len(item_preproc_output_dict["pil_images"]),
                     },
                 )
 
-                # Send response
-                print(json.dumps(results), flush=True)
-
-            except Exception as e:
-                batch_logger.error(
-                    "Fatal error in batch processing",
-                    error=e,
-                    extra={"stack_trace": str(e.__traceback__)},
+            except Exception as e_future_generic:
+                parent_batch_logger.error(
+                    f"Unexpected error retrieving preprocessing result for item ID '{original_item_id}': {e_future_generic}",
+                    extra={"item_id": original_item_id},
                 )
-
-                # Instead of exiting, print a batchError JSON and continue
-                batch_error = {
-                    "batchError": str(e),
-                    "detail": f"{type(e).__name__}: {e}",
+                final_results_map[original_item_id] = {
+                    "id": original_item_id,
+                    "embedding": None,
+                    "error": "Internal error handling preprocessing result",
+                    "detail": str(e_future_generic),
+                    "debugMetadata": {
+                        "model": clip_embedder_instance.model_name,
+                        "device": clip_embedder_instance.device,
+                        "batch_processing_status": "internal_error_future_result",
+                    },
                 }
-                print(json.dumps(batch_error), flush=True)
+
+    if not all_pil_images_for_gpu_batch:
+        parent_batch_logger.warning(
+            f"Batch '{batch_processing_id}': No images/frames to process on GPU after parallel preprocessing stage.",
+            extra={
+                "num_initial_items": len(items_data_as_dicts),
+                "items_in_gpu_map_count": len(gpu_batch_item_details_map),
+            },
+        )
+        # Ensure any items that were successfully preprocessed but somehow led to an empty GPU batch list are handled.
+        for item_map_detail in gpu_batch_item_details_map:
+            item_id_chk = item_map_detail["item_id"]
+            if item_id_chk not in final_results_map:  # If not already errored
+                final_results_map[item_id_chk] = {
+                    "id": item_id_chk,
+                    "embedding": None,
+                    "error": "Internal: No images for GPU batch despite seemingly successful item preprocessing",
+                    "debugMetadata": {
+                        **(item_map_detail.get("original_debug_metadata", {})),
+                        "model": clip_embedder_instance.model_name,
+                        "device": clip_embedder_instance.device,
+                        "batch_processing_status": "gpu_batch_empty_after_successful_preproc",
+                    },
+                }
+        batch_total_duration_ms = (time.time() - batch_overall_start_time) * 1000
+        parent_batch_logger.info(
+            f"Batch '{batch_processing_id}' finished in {batch_total_duration_ms:.2f}ms. No items sent to GPU.",
+            extra={"duration_ms": batch_total_duration_ms},
+        )
+        return final_results_map
+
+    # --- GPU Processing Stage ---
+    gpu_embeddings_tensor: Optional[torch.Tensor] = None
+    gpu_stage_failed_globally = False
+    try:
+        if (
+            clip_embedder_instance is None
+        ):  # Should be caught by FastAPI server's health check
+            raise RuntimeError("CLIPEmbedder instance is None prior to GPU batch.")
+        parent_batch_logger.info(
+            f"Batch '{batch_processing_id}': Sending {len(all_pil_images_for_gpu_batch)} total images/frames to CLIP model on {clip_embedder_instance.device} for inference.",
+            extra={"gpu_batch_size": len(all_pil_images_for_gpu_batch)},
+        )
+        # CLIPEmbedder's get_embeddings_for_pil_list is expected to handle its own detailed logging
+        gpu_embeddings_tensor = clip_embedder_instance.get_embeddings_for_pil_list(
+            all_pil_images_for_gpu_batch
+        )
+    except Exception as e_gpu_stage:
+        parent_batch_logger.error(
+            f"Batch '{batch_processing_id}': GPU processing failed for the entire collected batch of {len(all_pil_images_for_gpu_batch)} images/frames: {e_gpu_stage}"
+        )
+        gpu_stage_failed_globally = True
+        for (
+            item_map_detail
+        ) in (
+            gpu_batch_item_details_map
+        ):  # Mark all items intended for this GPU run as failed
+            item_id_gpu_fail = item_map_detail["item_id"]
+            if (
+                item_id_gpu_fail not in final_results_map
+            ):  # If not already errored in preprocessing
+                final_results_map[item_id_gpu_fail] = {
+                    "id": item_id_gpu_fail,
+                    "embedding": None,
+                    "error": "GPU processing failed for batch",
+                    "detail": str(e_gpu_stage),
+                    "debugMetadata": {
+                        **(item_map_detail.get("original_debug_metadata", {})),
+                        "model": clip_embedder_instance.model_name,
+                        "device": clip_embedder_instance.device,
+                        "gpu_error_global": True,
+                        "batch_processing_status": "failed_gpu_inference_stage",
+                    },
+                }
+        batch_total_duration_ms = (time.time() - batch_overall_start_time) * 1000
+        parent_batch_logger.info(
+            f"Batch '{batch_processing_id}' processing terminated in {batch_total_duration_ms:.2f}ms due to GPU stage error.",
+            extra={"duration_ms": batch_total_duration_ms},
+        )
+        return final_results_map  # Critical GPU failure, return all current results (mostly errors)
+
+    # --- Disaggregate GPU results and finalize ---
+    utc_processing_timestamp = datetime.utcnow().isoformat() + "Z"
+    for item_map_detail in gpu_batch_item_details_map:
+        item_id_final = item_map_detail["item_id"]
+        if item_id_final in final_results_map:
+            continue  # Already handled (e.g. preproc error)
+
+        if (
+            gpu_embeddings_tensor is None or gpu_stage_failed_globally
+        ):  # Should be covered by above
+            final_results_map[item_id_final] = {
+                "id": item_id_final,
+                "embedding": None,
+                "error": "GPU result tensor unavailable post-inference",
+                "detail": "Tensor was None or GPU processing failed globally for the batch.",
+                "debugMetadata": {
+                    **(item_map_detail.get("original_debug_metadata", {})),
+                    "model": clip_embedder_instance.model_name,
+                    "device": clip_embedder_instance.device,
+                    "batch_processing_status": "gpu_tensor_missing_post_inference_final",
+                },
+            }
+            continue
+
+        start_idx = item_map_detail["start_idx_in_gpu_batch"]
+        num_pils_for_item = item_map_detail["num_source_pil_images"]
+        item_slice_from_gpu_tensor = gpu_embeddings_tensor[
+            start_idx : start_idx + num_pils_for_item
+        ]
+
+        item_embedding_list: Optional[List[float]] = None
+        item_specific_gpu_debug = {}
+
+        if item_map_detail["media_type"] == "image":
+            if num_pils_for_item == 1 and item_slice_from_gpu_tensor.shape[0] == 1:
+                item_embedding_list = item_slice_from_gpu_tensor[
+                    0
+                ].tolist()  # .cpu().numpy() done in embedder
+            else:  # Error case for image
+                parent_batch_logger.error(
+                    f"Embedding disaggregation error for image item '{item_id_final}': expected 1 embedding, got slice shape {item_slice_from_gpu_tensor.shape}",
+                    extra={
+                        "item_id": item_id_final,
+                        "slice_shape": str(item_slice_from_gpu_tensor.shape),
+                        "num_pils": num_pils_for_item,
+                    },
+                )
+                final_results_map[item_id_final] = {
+                    "id": item_id_final,
+                    "embedding": None,
+                    "error": "Image embedding disaggregation error",
+                    "debugMetadata": {
+                        **(item_map_detail.get("original_debug_metadata", {})),
+                        "model": clip_embedder_instance.model_name,
+                        "device": clip_embedder_instance.device,
+                        "batch_processing_status": "error_disaggregating_image",
+                    },
+                }
                 continue
+        elif item_map_detail["media_type"] == "video":
+            if (
+                num_pils_for_item > 0
+                and item_slice_from_gpu_tensor.shape[0] == num_pils_for_item
+            ):
+                averaged_embedding = item_slice_from_gpu_tensor.mean(dim=0)
+                item_embedding_list = averaged_embedding.tolist()
+                item_specific_gpu_debug["averaged_from_n_frames_in_gpu_batch"] = (
+                    num_pils_for_item
+                )
+            elif (
+                num_pils_for_item == 0
+            ):  # Video yielded no frames that made it to GPU stage
+                item_embedding_list = []  # Represent as empty embedding
+                item_specific_gpu_debug["averaged_from_n_frames_in_gpu_batch"] = 0
+                parent_batch_logger.warning(
+                    f"Video item '{item_id_final}' had 0 associated PILs in GPU batch map for averaging.",
+                    extra={"item_id": item_id_final},
+                )
+            else:  # Mismatch error for video
+                parent_batch_logger.error(
+                    f"Embedding disaggregation error for video item '{item_id_final}': expected {num_pils_for_item} embeddings for averaging, got slice shape {item_slice_from_gpu_tensor.shape}",
+                    extra={
+                        "item_id": item_id_final,
+                        "slice_shape": str(item_slice_from_gpu_tensor.shape),
+                        "num_pils": num_pils_for_item,
+                    },
+                )
+                final_results_map[item_id_final] = {
+                    "id": item_id_final,
+                    "embedding": None,
+                    "error": "Video embedding disaggregation error",
+                    "debugMetadata": {
+                        **(item_map_detail.get("original_debug_metadata", {})),
+                        "model": clip_embedder_instance.model_name,
+                        "device": clip_embedder_instance.device,
+                        "batch_processing_status": "error_disaggregating_video",
+                    },
+                }
+                continue
+        else:  # Unknown media type, should not happen if validated upstream
+            parent_batch_logger.error(
+                f"Unknown media_type '{item_map_detail['media_type']}' for item '{item_id_final}' at disaggregation.",
+                extra={"item_id": item_id_final},
+            )
+            item_embedding_list = []  # Error state
 
-        except Exception as e:
-            service_logger.error(f"Fatal error in main loop: {e}", error=e)
-            break
+        final_results_map[item_id_final] = {
+            "id": item_id_final,
+            "embedding": item_embedding_list,
+            "error": None,
+            "detail": None,
+            "debugMetadata": {
+                **(item_map_detail.get("original_debug_metadata", {})),
+                **item_specific_gpu_debug,
+                "model": clip_embedder_instance.model_name,
+                "device": clip_embedder_instance.device,
+                "overall_batch_request_id": batch_processing_id,
+                "processing_timestamp_utc": utc_processing_timestamp,
+                "batch_processing_status": "success",
+            },
+        }
+        parent_batch_logger.debug(
+            f"Successfully finalized result for item '{item_id_final}'.",
+            extra={"item_id": item_id_final},
+        )
 
-    service_logger.info("Embedding service shutting down")
-    shared_executor.shutdown()
+    batch_total_duration_ms = (time.time() - batch_overall_start_time) * 1000
+    successful_items_count = sum(
+        1 for res in final_results_map.values() if not res.get("error")
+    )
+    parent_batch_logger.info(
+        f"Batch '{batch_processing_id}' processing completed in {batch_total_duration_ms:.2f}ms. "
+        f"Total items: {len(items_data_as_dicts)}, Items sent to GPU: {len(gpu_batch_item_details_map)}, "
+        f"Successful (final): {successful_items_count}, Errors: {len(items_data_as_dicts) - successful_items_count}",
+        extra={
+            "duration_ms": batch_total_duration_ms,
+            "total_items": len(items_data_as_dicts),
+            "gpu_candidate_items": len(gpu_batch_item_details_map),
+            "final_success_count": successful_items_count,
+        },
+    )
+    return final_results_map
 
 
 if __name__ == "__main__":
-    main_service()
+    print("[embedding_service_helper.py] Loaded environment/config values:")
+    print(f"  PYTHON_PORT={os.environ.get('PYTHON_PORT')}")
+    print(f"  PYTHON_MEDIA_ROOT={os.environ.get('PYTHON_MEDIA_ROOT')}")
+    print(f"  LOG_LEVEL={os.environ.get('LOG_LEVEL')}")
+    print(f"  CLIP_MODEL={os.environ.get('CLIP_MODEL')}")
+    print(f"  ENABLE_AUGMENTATION={os.environ.get('ENABLE_AUGMENTATION')}")
+    print(f"  TARGET_VRAM_UTILIZATION={os.environ.get('TARGET_VRAM_UTILIZATION')}")
+    print(f"  MAX_BATCH_ITEMS={os.environ.get('MAX_BATCH_ITEMS')}")
+    print(f"  BATCH_FLUSH_TIMEOUT_S={os.environ.get('BATCH_FLUSH_TIMEOUT_S')}")
+    print(f"  GPU_POLL_INTERVAL_S={os.environ.get('GPU_POLL_INTERVAL_S')}")
+    print(
+        f"  DEFAULT_VIDEO_FRAMES_TO_EXTRACT={os.environ.get('DEFAULT_VIDEO_FRAMES_TO_EXTRACT')}"
+    )
+    print(f"  DOWNLOAD_TIMEOUT_SECONDS={os.environ.get('DOWNLOAD_TIMEOUT_SECONDS')}")

@@ -1,12 +1,25 @@
+# fastapi and related
 fastapi>=0.103.1
 uvicorn>=0.23.2
 python-multipart>=0.0.6
 pydantic>=2.3.0
+
+# core dependencies
+python-dotenv>=1.0.0
 torch>=2.0.1
 transformers>=4.32.1
+open_clip_torch>=2.0.0
 Pillow>=10.0.0
 numpy>=1.25.2
-python-dotenv>=1.0.0
-open_clip_torch>=2.0.0
-scenedetect
+
+# video/image processing
 opencv-python
+scenedetect
+
+# requests for URL downloads
+requests
+
+# (Optional) logging, if not in stdlib
+# logging is part of stdlib, so not needed
+
+# (Optional) uuid, sys, os, time, signal, concurrent.futures, contextlib, datetime are all stdlib

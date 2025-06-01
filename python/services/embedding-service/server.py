@@ -1,522 +1,597 @@
 #!/usr/bin/env python3
-"""
-Embedding Service API
-
-This FastAPI microservice provides CLIP embeddings for images and videos.
-It is designed for high-throughput, low-latency inference in a Dockerized environment.
-
-Endpoints:
-    - GET /health         : Service health and model/device status
-    - GET /gpu-metrics    : (Optional) GPU metrics (if available)
-    - POST /embed         : Compute CLIP embedding for an image or video (accepts binary data)
-
-Performance:
-    - Video frame extraction is optimized: the video buffer is written to a temp file once,
-      and all frames are extracted in a single ffmpeg process using hardware acceleration if available.
-    - All major steps are timed and logged for observability.
-
-Usage:
-    - Run as a Docker container or locally.
-    - POST binary image/video data to /embed with appropriate headers.
-    - Returns embedding and debug metadata.
-"""
-
+# server.py - FastAPI server for embedding service with batching support
 import os
 import sys
 import time
+import json
 import uuid
+import asyncio
 import logging
-import io
 from typing import List, Dict, Any, Optional, Union
+from contextlib import asynccontextmanager
+from dotenv import load_dotenv  # type: ignore
 
 import torch
-import uvicorn
-from fastapi import (
-    FastAPI,
-    Request,
-)
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from PIL import Image
-import numpy as np
-from datetime import datetime
+import uvicorn  # type: ignore
+from fastapi import FastAPI, HTTPException, Request, Body  # type: ignore
+from fastapi.responses import JSONResponse  # type: ignore
+from pydantic import BaseModel, Field, ValidationError  # type: ignore
 
-# Import the embedding helper module
-sys.path.append("/app")
-from . import embedding_service_helper as emb_helper
+# Load environment variables from .env file, if present
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-logger = logging.getLogger("embedding-service")
+# Assuming embedding_service_helper is in the same directory or PYTHONPATH
+import embedding_service_helper as emb_helper
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Embedding Service API",
-    description="API for computing CLIP embeddings for images and videos",
-    version="1.0.0",
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict this to your domain
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Initialize global variables
+# --- Globals ---
 SERVICE_START_TIME = time.time()
-PROCESSED_FILES_COUNT = 0
-EMBEDDING_MODEL = None
-EMBEDDING_DEVICE = None
+PROCESSED_FILES_COUNT_TOTAL = 0  # Atomic counter for total items
+EMBEDDING_MODEL: Optional[emb_helper.CLIPEmbedder] = None
+EMBEDDING_DEVICE: Optional[str] = None
+PYTHON_MEDIA_ROOT = os.environ.get(
+    "PYTHON_MEDIA_ROOT", "/media"
+)  # Mount point in Docker
+TARGET_VRAM_UTILIZATION = float(os.environ.get("TARGET_VRAM_UTILIZATION", 0.85))
+MAX_BATCH_ITEMS = int(
+    os.environ.get("MAX_BATCH_ITEMS", 128)
+)  # Max items in a single GPU batch
+BATCH_FLUSH_TIMEOUT_S = float(os.environ.get("BATCH_FLUSH_TIMEOUT_S", 0.5))  # Seconds
+GPU_POLL_INTERVAL_S = float(os.environ.get("GPU_POLL_INTERVAL_S", 0.1))  # Seconds
+DEFAULT_VIDEO_FRAMES_TO_EXTRACT_CONFIG = int(
+    os.environ.get("DEFAULT_VIDEO_FRAMES_TO_EXTRACT", 20)
+)
 
 
-# Define Pydantic models (updated for Pydantic v2)
-class EmbeddingResponse(BaseModel):
-    embedding: List[float]
-    debug_metadata: Optional[Dict[str, Any]] = Field(None, alias="debugMetadata")
-    error: Optional[str] = None
-    detail: Optional[str] = None
+# --- Log all config values on startup ---
+logger = logging.getLogger("embedding_service_api")
+logger.info("[Startup Config] Loaded environment/config values:")
+logger.info(f"  PYTHON_PORT={os.environ.get('PYTHON_PORT')}")
+logger.info(f"  PYTHON_MEDIA_ROOT={os.environ.get('PYTHON_MEDIA_ROOT')}")
+logger.info(f"  LOG_LEVEL={os.environ.get('LOG_LEVEL')}")
+logger.info(f"  CLIP_MODEL={os.environ.get('CLIP_MODEL')}")
+logger.info(f"  ENABLE_AUGMENTATION={os.environ.get('ENABLE_AUGMENTATION')}")
+logger.info(f"  TARGET_VRAM_UTILIZATION={os.environ.get('TARGET_VRAM_UTILIZATION')}")
+logger.info(f"  MAX_BATCH_ITEMS={os.environ.get('MAX_BATCH_ITEMS')}")
+logger.info(f"  BATCH_FLUSH_TIMEOUT_S={os.environ.get('BATCH_FLUSH_TIMEOUT_S')}")
+logger.info(f"  GPU_POLL_INTERVAL_S={os.environ.get('GPU_POLL_INTERVAL_S')}")
+logger.info(
+    f"  DEFAULT_VIDEO_FRAMES_TO_EXTRACT={os.environ.get('DEFAULT_VIDEO_FRAMES_TO_EXTRACT')}"
+)
+logger.info(f"  DOWNLOAD_TIMEOUT_SECONDS={os.environ.get('DOWNLOAD_TIMEOUT_SECONDS')}")
+
+
+# Configure logging (can be more sophisticated)
+# BasicConfig should be called only once.
+if not logging.getLogger().handlers:  # Check if root logger is already configured
+    logging.basicConfig(
+        stream=sys.stdout,
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+    )
+
+logger = logging.getLogger("embedding_service_api")
+# Pass the logger instance to the helper module if it expects one
+if hasattr(emb_helper, "embedding_logger") and isinstance(
+    emb_helper.embedding_logger, emb_helper.EmbeddingLogger
+):
+    # If emb_helper has its own logger setup, we might not need to overwrite it,
+    # or we make its logger a child of this one.
+    # For simplicity, if we want helper to use THIS logger's stream/config:
+    emb_helper.embedding_logger.logger = (
+        logger  # Make helper use API's configured logger instance
+    )
+    emb_helper.embedding_logger.console_handler.setLevel(logger.level)
+    if emb_helper.embedding_logger.file_handler:
+        emb_helper.embedding_logger.file_handler.setLevel(logger.level)
+
+
+# --- Pydantic Models ---
+class MediaItem(BaseModel):
+    id: str = Field(
+        ..., description="Unique identifier for this media item, provided by client."
+    )
+    media_type: str = Field(..., description="'image' or 'video'")
+    source_type: str = Field(
+        ..., description="'url', 'filepath', or 'buffer_id' (if multipart)"
+    )
+    source: str = Field(..., description="URL, relative filepath, or buffer identifier")
+    num_frames: Optional[int] = Field(
+        None, description="Number of frames for video (uses default if None)"
+    )
+    original_filename: Optional[str] = Field(
+        None, description="Original filename for logging/debugging"
+    )
+    # For pre-computation in BatchingManager, not part of external API necessarily unless client sends it.
+    estimated_duration_s: Optional[float] = Field(None, exclude=True)
 
 
 class BatchEmbeddingRequest(BaseModel):
-    image_paths: List[str] = Field(..., alias="imagePaths")
+    items: List[MediaItem]
+    request_id: Optional[str] = None
+
+
+class EmbeddingResult(BaseModel):
+    id: str
+    embedding: Optional[List[float]] = None
+    error: Optional[str] = None
+    detail: Optional[str] = None
+    debug_metadata: Optional[Dict[str, Any]] = Field(None, alias="debugMetadata")
 
 
 class BatchEmbeddingResponse(BaseModel):
-    embeddings: Dict[str, EmbeddingResponse]
-
-
-class GPUMetrics(BaseModel):
-    available: bool
-    device_index: Optional[int] = None
-    device_name: Optional[str] = None
-    driver_version: Optional[str] = None
-    memory_allocated_mb: Optional[float] = None
-    memory_reserved_mb: Optional[float] = None
-    memory_free_mb: Optional[float] = None
-    memory_total_mb: Optional[float] = None
-    utilization_percent: Optional[float] = None
-    mps_info: Optional[Dict[str, Any]] = None  # For MPS-specific details
-    compute_capability: Optional[str] = None
-    multiprocessor_count: Optional[int] = None
-    gpu_clock_mhz: Optional[int] = None
-    pci_bus_id: Optional[str] = None
-    cuda_capability: Optional[str] = None
+    results: List[EmbeddingResult]
+    batch_id: str  # ID of the client's overall request, not individual Python batches
+    processed_by_request_id: Optional[str] = None
 
 
 class ServiceHealth(BaseModel):
     status: str
     uptime_seconds: float
-    processed_files: int
+    processed_items_count: int
     gpu_available: bool
     model_loaded: bool
     model_name: Optional[str] = None
     device: Optional[str] = None
+    request_queue_size: int
 
 
-def init_model():
-    """Initialize the CLIP model for embeddings with proper error handling and cleanup"""
-    global EMBEDDING_MODEL, EMBEDDING_DEVICE
+# --- Batching Manager ---
+class BatchingManager:
+    def __init__(self):
+        self.queue = asyncio.Queue()
+        self.batch_id_counter = 0
+        self.active_items_in_gpu_processing = (
+            0  # Number of items currently in a GPU batch
+        )
+        self.vram_total_gb = 0.0
+        self.vram_reserved_static_gb = 0.0  # Model, etc.
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.init()  # Ensure CUDA is initialized
+                self.vram_total_gb = torch.cuda.get_device_properties(
+                    0
+                ).total_memory / (1024**3)
+            except Exception as e:
+                logger.error(f"Failed to get CUDA device properties: {e}")
+                self.vram_total_gb = 0.0  # Indicate VRAM info unavailable
+        elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+            self.vram_total_gb = 8.0  # Placeholder for MPS
+        logger.info(
+            f"BatchingManager initialized. Detected Total VRAM: {self.vram_total_gb:.2f} GB"
+        )
+
+    def estimate_vram_gb(self, item: MediaItem) -> float:
+        base_img_vram_gb = (3 * 224 * 224 * 2) / (1024**3)  # Approx for float16 224x224
+        if item.media_type == "video":
+            num_frames = item.num_frames or DEFAULT_VIDEO_FRAMES_TO_EXTRACT_CONFIG
+            return base_img_vram_gb * num_frames
+        return base_img_vram_gb
+
+    async def _get_available_dynamic_vram_gb(self) -> float:
+        if torch.cuda.is_available():
+            try:
+                free_mem_bytes, _ = torch.cuda.mem_get_info()
+                # Consider static reservation made at startup
+                # available_for_dynamic = (free_mem_bytes / (1024**3))
+                # A simpler approach: total - static_reserved - current_active_batch_guess
+                # This is still tricky. Let's use `free_mem_bytes` as the basis.
+                return (free_mem_bytes / (1024**3)) * TARGET_VRAM_UTILIZATION
+            except Exception as e:
+                logger.warning(
+                    f"Could not query CUDA memory: {e}. Falling back to conservative estimate."
+                )
+                return (
+                    self.vram_total_gb - self.vram_reserved_static_gb
+                ) * 0.5  # Conservative fallback
+        elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+            # Very rough heuristic for MPS
+            # Assume 2GB for model+system, then use a fraction of the rest
+            active_batch_est_gb = (
+                self.active_items_in_gpu_processing * 0.01
+            )  # Rough guess per item
+            return (
+                max(0, self.vram_total_gb - 2.0 - active_batch_est_gb)
+                * TARGET_VRAM_UTILIZATION
+            )
+        return 1.0  # Default to allowing some small batches if no GPU info
+
+    async def worker(self):
+        logger.info("BatchingManager worker started.")
+        while True:
+            current_batch_items_with_futures: List[Dict[str, Any]] = []
+            current_batch_estimated_vram_gb = 0.0
+
+            # Try to fill a batch
+            try:
+                while True:  # Inner loop to accumulate batch items
+                    if (
+                        not current_batch_items_with_futures
+                    ):  # First item in a potential batch
+                        # Block until at least one item is available
+                        item_with_future = await self.queue.get()
+                        self.queue.task_done()  # Mark as processed from queue perspective
+                    else:
+                        # Try to get more items with a very short timeout if batch has started forming
+                        try:
+                            item_with_future = await asyncio.wait_for(
+                                self.queue.get(), timeout=GPU_POLL_INTERVAL_S
+                            )
+                            self.queue.task_done()
+                        except asyncio.TimeoutError:
+                            # No more items arrived quickly, process current batch
+                            break
+
+                    item_data: MediaItem = item_with_future["item_data"]
+                    item_vram_gb = self.estimate_vram_gb(item_data)
+                    available_vram_gb = await self._get_available_dynamic_vram_gb()
+
+                    if (
+                        current_batch_estimated_vram_gb + item_vram_gb
+                        <= available_vram_gb
+                        and len(current_batch_items_with_futures) < MAX_BATCH_ITEMS
+                    ):
+                        current_batch_items_with_futures.append(item_with_future)
+                        current_batch_estimated_vram_gb += item_vram_gb
+                    else:
+                        # Item doesn't fit, or max items reached. Put back and process current.
+                        await self.queue.put(
+                            item_with_future
+                        )  # Re-queue item that didn't fit
+                        logger.debug(
+                            f"Item {item_data.id} (est: {item_vram_gb:.3f}GB) does not fit or batch full. Available VRAM: {available_vram_gb:.3f}GB. Current batch: {len(current_batch_items_with_futures)} items, {current_batch_estimated_vram_gb:.3f}GB."
+                        )
+                        break  # Process the batch accumulated so far
+
+                    # If BATCH_FLUSH_TIMEOUT_S is very small, this check might not be effective for timeout-based flushing
+                    # The primary flush mechanism is now the short timeout in wait_for above when a batch is forming.
+
+            except Exception as e:  # Should not happen often with queue.get()
+                logger.error(f"Exception in batch accumulation loop: {e}")
+                await asyncio.sleep(0.1)  # Prevent tight loop on error
+                continue  # Restart accumulation logic
+
+            if current_batch_items_with_futures:
+                self.batch_id_counter += 1
+                internal_batch_id = (
+                    f"pygpu-{self.batch_id_counter}-{uuid.uuid4().hex[:6]}"
+                )
+                actual_items_to_process_dicts = [
+                    item_wf["item_data"].model_dump()
+                    for item_wf in current_batch_items_with_futures
+                ]
+                futures_to_resolve_map = {
+                    item_wf["item_data"].id: item_wf["future"]
+                    for item_wf in current_batch_items_with_futures
+                }
+
+                self.active_items_in_gpu_processing += len(
+                    actual_items_to_process_dicts
+                )
+                logger.info(
+                    f"Processing batch '{internal_batch_id}' with {len(actual_items_to_process_dicts)} items. Est. VRAM: {current_batch_estimated_vram_gb:.3f}GB. Queue size: {self.queue.qsize()}"
+                )
+
+                try:
+                    if EMBEDDING_MODEL is None:
+                        raise RuntimeError("EMBEDDING_MODEL is None - model not loaded")
+
+                    loop = asyncio.get_event_loop()
+                    batch_results_map = await loop.run_in_executor(
+                        None,  # Default ThreadPoolExecutor
+                        emb_helper.process_media_batch,
+                        actual_items_to_process_dicts,  # Pass as list of dicts
+                        EMBEDDING_MODEL,
+                        PYTHON_MEDIA_ROOT,
+                        DEFAULT_VIDEO_FRAMES_TO_EXTRACT_CONFIG,
+                        emb_helper.embedding_logger,  # Use EmbeddingLogger instance instead of standard logger
+                        internal_batch_id,  # Pass internal batch_id for per-item logging context
+                    )
+
+                    global PROCESSED_FILES_COUNT_TOTAL
+                    PROCESSED_FILES_COUNT_TOTAL += len(actual_items_to_process_dicts)
+
+                    for item_id_key, result_data_val in batch_results_map.items():
+                        future = futures_to_resolve_map.get(item_id_key)
+                        if future and not future.done():
+                            try:
+                                # process_media_batch returns dicts, parse them to EmbeddingResult
+                                parsed_result = EmbeddingResult(**result_data_val)
+                                future.set_result(parsed_result)
+                            except ValidationError as parse_exc:
+                                logger.error(
+                                    f"Failed to parse result for item {item_id_key} into EmbeddingResult: {parse_exc}",
+                                    extra={
+                                        "item_id": item_id_key,
+                                        "raw_result": result_data_val,
+                                    },
+                                )
+                                error_res = EmbeddingResult(
+                                    id=item_id_key,
+                                    embedding=None,
+                                    error="Result parsing failed",
+                                    detail=str(parse_exc),
+                                    debugMetadata={
+                                        "raw_result_preview": str(result_data_val)[:200]
+                                    },
+                                )
+                                future.set_result(error_res)
+                            except (
+                                Exception
+                            ) as generic_exc:  # Catch any other error during set_result
+                                logger.error(
+                                    f"Generic error setting future result for item {item_id_key}: {generic_exc}",
+                                    extra={"item_id": item_id_key},
+                                )
+                                error_res = EmbeddingResult(
+                                    id=item_id_key,
+                                    embedding=None,
+                                    error="Internal server error post-processing",
+                                    detail=str(generic_exc),
+                                    debugMetadata={},
+                                )
+                                future.set_result(error_res)
+                        elif future and future.done():
+                            logger.warning(
+                                f"Future for item {item_id_key} was already done.",
+                                extra={"item_id": item_id_key},
+                            )
+
+                except Exception as e_batch_proc:
+                    logger.error(
+                        f"Core processing for batch '{internal_batch_id}' failed: {e_batch_proc}"
+                    )
+                    for item_id_key_err in futures_to_resolve_map:
+                        future = futures_to_resolve_map.get(item_id_key_err)
+                        if future and not future.done():
+                            item_error_result = EmbeddingResult(
+                                id=item_id_key_err,
+                                embedding=None,
+                                error="Batch processing pipeline failed",
+                                detail=str(e_batch_proc),
+                                debugMetadata={"batch_id": internal_batch_id},
+                            )
+                            future.set_result(item_error_result)
+                finally:
+                    self.active_items_in_gpu_processing -= len(
+                        actual_items_to_process_dicts
+                    )
+            elif (
+                self.queue.empty()
+            ):  # No items in batch, and queue is empty, sleep a bit
+                await asyncio.sleep(BATCH_FLUSH_TIMEOUT_S)
+
+
+batch_manager = BatchingManager()
+
+
+# --- FastAPI Lifecycle and Endpoints ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global EMBEDDING_MODEL, EMBEDDING_DEVICE, batch_manager
+    logger.info("Application startup...")
+    model_name = os.environ.get("CLIP_MODEL", "openai/clip-vit-base-patch32")
+    if (
+        torch.backends.mps.is_available() and torch.backends.mps.is_built()
+    ):  # Check MPS is built
+        EMBEDDING_DEVICE = "mps"
+    elif torch.cuda.is_available():
+        EMBEDDING_DEVICE = "cuda"
+    else:
+        EMBEDDING_DEVICE = "cpu"
 
     try:
-        logger.info("Initializing CLIP model...")
-
-        # Determine the device with priority:
-        # 1. MPS for M1 Mac
-        # 2. CUDA for NVIDIA GPUs
-        # 3. CPU as fallback
-        if torch.backends.mps.is_available():
-            device = "mps"
-            logger.info("Using MPS (Metal Performance Shaders) for Apple Silicon")
-        elif torch.cuda.is_available():
-            device = "cuda"
-            logger.info(f"Using CUDA on device: {torch.cuda.get_device_name(0)}")
-        else:
-            device = "cpu"
-            logger.info("Using CPU for inference")
-
-        # Get model name from environment or use default
-        model_name = os.environ.get("CLIP_MODEL", "openai/clip-vit-base-patch32")
-
-        # Clean up any existing model to free memory
-        if EMBEDDING_MODEL is not None:
-            logger.info("Cleaning up existing model...")
-            try:
-                del EMBEDDING_MODEL
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception as e:
-                logger.warning(f"Error during model cleanup: {e}")
-
-        # Initialize the embedder with proper logging
-        logger.info(f"Loading CLIP model: {model_name}")
         EMBEDDING_MODEL = emb_helper.CLIPEmbedder(
             model_name=model_name,
-            device=device,
-            logger=emb_helper.EmbeddingLogger("model-init"),
+            device=EMBEDDING_DEVICE,
+            logger=emb_helper.embedding_logger,  # Use the helper's global logger which is now configured
             enable_augmentation=os.environ.get("ENABLE_AUGMENTATION", "false").lower()
             == "true",
         )
-        EMBEDDING_DEVICE = device
+        logger.info(f"CLIP Model '{model_name}' loaded on device '{EMBEDDING_DEVICE}'.")
+        if EMBEDDING_DEVICE == "cuda" and torch.cuda.is_available():
+            try:
+                torch.cuda.init()
+                # Estimate static VRAM usage AFTER model is loaded
+                batch_manager.vram_reserved_static_gb = (
+                    torch.cuda.memory_allocated() / (1024**3)
+                )
+                logger.info(
+                    f"Static VRAM allocated (model, etc.): {batch_manager.vram_reserved_static_gb:.2f} GB of {batch_manager.vram_total_gb:.2f} GB total."
+                )
+            except Exception as cuda_err:
+                logger.error(
+                    f"Error getting CUDA memory info during startup: {cuda_err}"
+                )
+    except Exception as model_load_err:
+        logger.error(
+            f"Failed to load CLIP model '{model_name}' during startup: {model_load_err}"
+        )
+        EMBEDDING_MODEL = None  # Ensure it's None if loading fails
 
-        # Log memory usage if available
-        if device == "cuda":
-            memory_allocated = torch.cuda.memory_allocated() / (1024**2)
-            memory_reserved = torch.cuda.memory_reserved() / (1024**2)
-            logger.info(
-                f"GPU Memory after model load - Allocated: {memory_allocated:.1f}MB, "
-                f"Reserved: {memory_reserved:.1f}MB"
-            )
-
-        logger.info(f"Model initialized successfully on {device}")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to initialize model: {e}", exc_info=True)
-        EMBEDDING_MODEL = None
-        EMBEDDING_DEVICE = None
-        return False
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the model when the API starts"""
-    if not init_model():
-        logger.error("Failed to initialize model during startup")
-        # Don't exit here, let the health check handle the error state
+    asyncio.create_task(batch_manager.worker())
+    yield
+    logger.info("Application shutdown.")
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up resources when the API shuts down"""
-    global EMBEDDING_MODEL
-    try:
-        if EMBEDDING_MODEL is not None:
-            logger.info("Cleaning up model resources...")
-            del EMBEDDING_MODEL
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    except Exception as e:
-        logger.error(f"Error during shutdown cleanup: {e}")
+app = FastAPI(lifespan=lifespan, title="Embedding Service API V2 (Batching)")
 
 
 @app.get("/health", response_model=ServiceHealth)
-async def health_check(request: Request):
-    """Check the health of the embedding service"""
-    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-
-    logger.info(f"Health check requested", extra={"request_id": request_id})
-    return {
-        "status": "ok" if EMBEDDING_MODEL is not None else "initializing",
-        "uptime_seconds": time.time() - SERVICE_START_TIME,
-        "processed_files": PROCESSED_FILES_COUNT,
-        "gpu_available": torch.cuda.is_available() or torch.backends.mps.is_available(),
-        "model_loaded": EMBEDDING_MODEL is not None,
-        "model_name": getattr(EMBEDDING_MODEL, "model_name", None),
-        "device": EMBEDDING_DEVICE,
-    }
-
-
-@app.get("/gpu-metrics", response_model=GPUMetrics)
-async def get_gpu_metrics():
-    """Get GPU memory usage and other metrics"""
-    metrics = {"available": False}
-
-    if torch.cuda.is_available():
-        try:
-            device_index = 0  # Assuming single GPU
-            device_prop = torch.cuda.get_device_properties(device_index)
-            device_name = torch.cuda.get_device_name(device_index)
-            driver_version = torch.version.cuda
-            memory_allocated = torch.cuda.memory_allocated(device_index) / (
-                1024**2
-            )  # MB
-            memory_reserved = torch.cuda.memory_reserved(device_index) / (1024**2)  # MB
-            memory_total = device_prop.total_memory / (1024**2)  # MB
-            memory_free = memory_total - memory_allocated
-
-            # Try to get utilization if possible (requires pynvml or torch >= 2.1)
-            utilization = None
-            try:
-                import pynvml
-
-                pynvml.nvmlInit()
-                handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
-                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                utilization = util.gpu
-                pci_bus_id = pynvml.nvmlDeviceGetPciInfo(handle).busId.decode()
-                pynvml.nvmlShutdown()
-            except Exception:
-                pci_bus_id = getattr(device_prop, "pci_bus_id", None)
-                try:
-                    utilization = torch.cuda.utilization(device_index)
-                except Exception:
-                    utilization = None
-
-            compute_capability = f"{device_prop.major}.{device_prop.minor}"
-            multiprocessor_count = getattr(device_prop, "multi_processor_count", None)
-            gpu_clock_mhz = getattr(device_prop, "clock_rate", None)
-            cuda_capability = f"{device_prop.major}.{device_prop.minor}"
-
-            metrics = {
-                "available": True,
-                "device_index": device_index,
-                "device_name": device_name,
-                "driver_version": driver_version,
-                "memory_allocated_mb": memory_allocated,
-                "memory_reserved_mb": memory_reserved,
-                "memory_free_mb": memory_free,
-                "memory_total_mb": memory_total,
-                "utilization_percent": utilization,
-                "mps_info": None,
-                "compute_capability": compute_capability,
-                "multiprocessor_count": multiprocessor_count,
-                "gpu_clock_mhz": gpu_clock_mhz,
-                "pci_bus_id": pci_bus_id,
-                "cuda_capability": cuda_capability,
-            }
-        except Exception as e:
-            logger.error(f"Error getting CUDA metrics: {e}")
-
-    elif torch.backends.mps.is_available():
-        try:
-            # MPS (Metal Performance Shaders) for Apple Silicon - has limited metrics
-            mps_info = {
-                "is_available": torch.backends.mps.is_available(),
-                "is_built": torch.backends.mps.is_built(),
-                "device_count": 1,  # MPS is always device 0 if available
-                "torch_version": torch.__version__,
-            }
-            metrics = {
-                "available": True,
-                "device_index": 0,
-                "device_name": "Apple MPS (Metal)",
-                "driver_version": None,
-                "memory_allocated_mb": None,
-                "memory_reserved_mb": None,
-                "memory_free_mb": None,
-                "memory_total_mb": None,
-                "utilization_percent": None,
-                "mps_info": mps_info,
-                "compute_capability": None,
-                "multiprocessor_count": None,
-                "gpu_clock_mhz": None,
-                "pci_bus_id": None,
-                "cuda_capability": None,
-            }
-        except Exception as e:
-            logger.error(f"Error getting MPS metrics: {e}")
-
-    return metrics
-
-
-@app.post("/embed")
-async def embed_media(request: Request):
-    """
-    Endpoint to generate embeddings for images and videos.
-    Accepts both file uploads and direct binary data.
-
-    Performance:
-        - Measures and logs total request time.
-        - Logs per-step timing for video/image processing.
-    """
-    start_time = time.time()
-    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-    media_type = request.headers.get("X-Media-Type", "image").lower()
-    filename = request.headers.get("X-Filename", "unknown")
-
-    logger.info(
-        f"Processing {media_type} request",
-        extra={
-            "request_id": request_id,
-            "media_type": media_type,
-            "file_name": filename,
-        },
+async def health_check():
+    return ServiceHealth(
+        status="ok" if EMBEDDING_MODEL is not None else "error_model_not_loaded",
+        uptime_seconds=time.time() - SERVICE_START_TIME,
+        processed_items_count=PROCESSED_FILES_COUNT_TOTAL,
+        gpu_available=(
+            torch.cuda.is_available()
+            or (torch.backends.mps.is_available() and torch.backends.mps.is_built())
+        ),
+        model_loaded=EMBEDDING_MODEL is not None,
+        model_name=(
+            getattr(EMBEDDING_MODEL, "model_name", None) if EMBEDDING_MODEL else None
+        ),
+        device=EMBEDDING_DEVICE,
+        request_queue_size=batch_manager.queue.qsize(),
     )
 
-    try:
-        # Read the binary data into a BytesIO buffer
-        content = await request.body()
-        buffer = io.BytesIO(content)
 
-        # Log the size of the incoming data
-        logger.info(
-            f"Received {media_type} data, size: {len(content)} bytes",
-            extra={"request_id": request_id, "file_name": filename},
+@app.post("/api/embed_batch", response_model=BatchEmbeddingResponse)
+async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
+    client_request_id = (
+        data.request_id or request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    )
+    logger.info(
+        f"Received batch request '{client_request_id}' with {len(data.items)} items."
+    )
+
+    if EMBEDDING_MODEL is None:
+        logger.error(f"Model not ready for request '{client_request_id}'. Raising 503.")
+        raise HTTPException(
+            status_code=503, detail="Model not ready or failed to load."
         )
 
-        # Process based on media type
-        step_start = time.time()
-        if media_type == "video":
-            embedding = await process_video(buffer, filename, request_id)
+    item_futures: Dict[str, asyncio.Future] = {}
+
+    for item_model_instance in data.items:
+        future = asyncio.Future()
+        item_futures[item_model_instance.id] = future
+        try:
+            # MediaItem is already validated by FastAPI if type hint is BatchEmbeddingRequest
+            await batch_manager.queue.put(
+                {"item_data": item_model_instance, "future": future}
+            )
+        except Exception as q_err:  # Should not happen with asyncio.Queue
+            logger.error(
+                f"Failed to put item {item_model_instance.id} on queue for request '{client_request_id}': {q_err}"
+            )
+            error_res = EmbeddingResult(
+                id=item_model_instance.id,
+                embedding=None,
+                error="Failed to queue item",
+                detail=str(q_err),
+                debugMetadata={},
+            )
+            if not future.done():
+                future.set_result(error_res)
+
+    results_list: List[EmbeddingResult] = []
+    try:
+        # Only gather futures that were successfully created and queued
+        valid_futures_to_gather = [fut for item_id, fut in item_futures.items() if fut]
+
+        all_item_results_from_futures = await asyncio.gather(
+            *valid_futures_to_gather, return_exceptions=True
+        )
+
+        for i, res_or_exc in enumerate(all_item_results_from_futures):
+            # Need to map back to original item ID if gather doesn't preserve order of resolution with IDs
+            # Assuming results from gather are in the same order as futures passed to it
+            # This is fragile. It's better if futures carry the ID or results are dicts.
+            # The `BatchingManager` resolves futures with EmbeddingResult which has an `id`.
+
+            if isinstance(res_or_exc, EmbeddingResult):
+                results_list.append(res_or_exc)
+            elif isinstance(res_or_exc, Exception):
+                # This means an exception bubbled up from a future that wasn't caught and wrapped in EmbeddingResult by BatchManager
+                # Attempt to find which item this was for, though it's hard if only exception is returned by gather.
+                # For now, log it as a general error for the request.
+                # This should be rare if BatchingManager always resolves futures.
+                item_id_for_error = "unknown_item_due_to_gather_exception"
+                # Try to find the corresponding item if possible (e.g. if only one failed)
+                # This part is tricky and ideally BatchingManager handles all errors gracefully by resolving futures
+                logger.error(
+                    f"Raw exception from asyncio.gather for request '{client_request_id}': {res_or_exc}",
+                    exc_info=res_or_exc,
+                )
+                # If many items, it's hard to attribute.
+                # We will rely on the fact that BatchingManager resolves all futures.
+            else:  # Should be EmbeddingResult, but if not:
+                logger.warning(
+                    f"Unknown type {type(res_or_exc)} from asyncio.gather for request '{client_request_id}'. Item: {str(res_or_exc)[:200]}"
+                )
+                # This case needs an ID to form a proper EmbeddingResult. If it doesn't have one, it's problematic.
+                # This indicates a bug in BatchingManager future resolution.
+
+    except Exception as e_gather:
+        logger.error(
+            f"Critical error during asyncio.gather for request '{client_request_id}': {e_gather}"
+        )
+        # All items in this client request failed if gather itself fails.
+        results_list.clear()
+        for item_model_instance in data.items:
+            results_list.append(
+                EmbeddingResult(
+                    id=item_model_instance.id,
+                    embedding=None,
+                    error="Server error processing batch (gather failed)",
+                    detail=str(e_gather),
+                    debugMetadata={},
+                )
+            )
+
+    # Ensure all originally requested items have a result in the list sent back to client
+    final_output_results_map = {res.id: res for res in results_list}
+    complete_results_list = []
+    for requested_item in data.items:
+        if requested_item.id in final_output_results_map:
+            complete_results_list.append(final_output_results_map[requested_item.id])
         else:
-            embedding = await process_image(buffer, filename, request_id)
-        step_duration = time.time() - step_start
+            # This means the item's future was not resolved or result was lost
+            # Check if the future was created and if it resolved with an error that wasn't added to results_list
+            missing_item_future = item_futures.get(requested_item.id)
+            if missing_item_future and missing_item_future.done():
+                try:
+                    missing_item_result = missing_item_future.result()
+                    if isinstance(missing_item_result, EmbeddingResult):
+                        complete_results_list.append(missing_item_result)
+                    else:  # Fallback
+                        complete_results_list.append(
+                            EmbeddingResult(
+                                id=requested_item.id,
+                                embedding=None,
+                                error="Missing or malformed result for item",
+                                detail=f"Raw future result: {str(missing_item_result)[:100]}",
+                                debugMetadata={},
+                            )
+                        )
+                except Exception as fut_final_exc:
+                    complete_results_list.append(
+                        EmbeddingResult(
+                            id=requested_item.id,
+                            embedding=None,
+                            error="Error retrieving future result for missing item",
+                            detail=str(fut_final_exc),
+                            debugMetadata={},
+                        )
+                    )
+            else:  # Future not found or not done, means it likely errored before even gather, or logic error
+                complete_results_list.append(
+                    EmbeddingResult(
+                        id=requested_item.id,
+                        embedding=None,
+                        error="Item processing did not complete or result missing",
+                        detail="Future not found or not resolved.",
+                        debugMetadata={},
+                    )
+                )
 
-        logger.info(
-            f"{media_type.capitalize()} processing completed in {step_duration:.2f}s",
-            extra={
-                "request_id": request_id,
-                "processing_time_sec": step_duration,
-                "media_type": media_type,
-            },
-        )
+    # Extract the Python-internal batch ID from the first result's debugMetadata, if present
+    python_internal_batch_id = None
+    if complete_results_list and hasattr(complete_results_list[0], 'debug_metadata'):
+        debug_meta = getattr(complete_results_list[0], 'debug_metadata', None)
+        if not debug_meta:
+            debug_meta = getattr(complete_results_list[0], 'debugMetadata', None)
+        if debug_meta and isinstance(debug_meta, dict):
+            python_internal_batch_id = debug_meta.get('batch_id') or debug_meta.get('overallBatchRequestId')
 
-        # Track total processing time
-        total_time = time.time() - start_time
-        logger.info(
-            f"Successfully processed {media_type} (total time: {total_time:.2f}s)",
-            extra={
-                "request_id": request_id,
-                "total_processing_time_sec": total_time,
-                "media_type": media_type,
-            },
-        )
-
-        embedding_out = (
-            embedding.tolist() if hasattr(embedding, "tolist") else embedding
-        )
-
-        return {
-            "embedding": embedding_out if embedding is not None else [],
-            "debugMetadata": {
-                "model": f"{EMBEDDING_MODEL.model_name} - {EMBEDDING_DEVICE}",
-                "enable_augmentation": os.environ.get(
-                    "ENABLE_AUGMENTATION", "false"
-                ).lower()
-                == "true",
-                "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "request_id": request_id,
-                "source_type": "buffer",
-                "specified_media_type": media_type,
-                "num_frames": 20 if media_type == "video" else None,
-            },
-            "error": None,
-            "detail": None,
-        }
-
-    except Exception as e:
-        logger.error(
-            f"Failed to process {media_type}",
-            extra={
-                "request_id": request_id,
-                "error": str(e),
-                "media_type": media_type,
-            },
-        )
-        return {
-            "embedding": [],
-            "debugMetadata": {
-                "model": f"{EMBEDDING_MODEL.model_name} - {EMBEDDING_DEVICE}",
-                "enable_augmentation": os.environ.get(
-                    "ENABLE_AUGMENTATION", "false"
-                ).lower()
-                == "true",
-                "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "request_id": request_id,
-                "source_type": "buffer",
-                "specified_media_type": media_type,
-                "num_frames": 20 if media_type == "video" else None,
-            },
-            "error": "Processing failed",
-            "detail": str(e),
-        }
-
-
-async def process_video(
-    buffer: io.BytesIO, filename: str, request_id: str
-) -> np.ndarray:
-    """
-    Process a video buffer and return its embedding.
-
-    Performance:
-        - Uses a single ffmpeg process with hardware acceleration and reduced frame size.
-        - Logs timing for frame extraction and embedding computation.
-    """
-    logger.info(
-        f"Processing video: {filename}",
-        extra={"request_id": request_id, "file_name": filename},
+    return BatchEmbeddingResponse(
+        results=complete_results_list,
+        batch_id=python_internal_batch_id or client_request_id,  # Use Python-internal batch_id if available
+        processed_by_request_id=client_request_id,
     )
 
-    try:
-        # Create a VideoProcessor instance with the buffer
-        processor = emb_helper.VideoProcessor(
-            video_buffer=buffer,
-            logger=logger,
-            num_frames=int(os.environ.get("NUM_FRAMES", 20)),
-        )
 
-        # Extract all frames in a single, fast ffmpeg call
-        frame_extraction_start = time.time()
-        frames, _ = processor.extract_frames()
-        frame_extraction_time = time.time() - frame_extraction_start
-        logger.info(
-            f"Extracted {len(frames)} frames in {frame_extraction_time:.2f}s",
-            extra={"request_id": request_id, "frame_count": len(frames)},
-        )
-
-        # Compute embedding for all frames (batched)
-        embedding_start = time.time()
-        embedding = EMBEDDING_MODEL.get_video_embedding(frames)
-        embedding_time = time.time() - embedding_start
-        logger.info(
-            f"Computed video embedding in {embedding_time:.2f}s",
-            extra={"request_id": request_id},
-        )
-        return embedding
-
-    except Exception as e:
-        logger.error(
-            f"Video processing failed: {e}",
-            extra={"request_id": request_id, "error": str(e)},
-        )
-        raise
-
-
-async def process_image(
-    buffer: io.BytesIO, filename: str, request_id: str
-) -> np.ndarray:
-    """
-    Process an image buffer and return its embedding.
-
-    Performance:
-        - Logs timing for image embedding computation.
-    """
-    logger.info(
-        f"Processing image: {filename}",
-        extra={"request_id": request_id, "file_name": filename},
-    )
-
-    try:
-        # Open image from buffer
-        image = Image.open(buffer).convert("RGB")
-
-        # Compute embedding
-        embedding_start = time.time()
-        embedding = EMBEDDING_MODEL.get_image_embedding(image)
-        embedding_time = time.time() - embedding_start
-        logger.info(
-            f"Computed image embedding in {embedding_time:.2f}s",
-            extra={"request_id": request_id},
-        )
-        return embedding
-
-    except Exception as e:
-        logger.error(
-            f"Image processing failed: {e}",
-            extra={"request_id": request_id, "error": str(e)},
-        )
-        raise
-
-
-# Starting the API server
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3456))
-    uvicorn.run("server:app", host="0.0.0.0", port=port, log_level="info")
+    port = int(os.environ.get("PYTHON_PORT", 3456))
+    # Use reload for development if preferred: uvicorn.run("server:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=port)

@@ -5,11 +5,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { Socket } from 'net';
 import { IncomingRequest } from '../../entities/http';
-import { sendWithContext } from '../../entities/sendResponse';
+import { sendWithContext } from '../../entities/sendResponse'; // Ensure this path is correct
 import { ClipCacheEntry, embeddingService } from './embedding.service';
 import { embeddingsLogger, EmbeddingComponent } from './embeddingsLogger';
 import path from 'path';
-import { config } from '../../config/server.config';
+// config is not directly used in this refactored handler for path validation,
+// but embeddingService will use it.
+// import { config } from '../../config/server.config';
 import { randomUUID } from 'crypto';
 
 // Helper to summarize large arrays for logging
@@ -17,29 +19,37 @@ function summarizeArray(arr: any[]): string {
   if (!Array.isArray(arr)) return String(arr);
   const len = arr.length;
   if (len === 0) return '[]';
-  const preview = arr.slice(0, 5).map((x) => Number(x).toFixed(4));
+  const preview = arr
+    .slice(0, 5)
+    .map((x) => (typeof x === 'number' ? Number(x).toFixed(4) : String(x)));
   let min = null,
     max = null;
   try {
-    min = Math.min(...arr);
-    max = Math.max(...arr);
+    const numericArr = arr.filter((x) => typeof x === 'number');
+    if (numericArr.length > 0) {
+      min = Math.min(...numericArr);
+      max = Math.max(...numericArr);
+    }
   } catch {
-    // empty catch to handle non-numeric arrays
+    // empty catch to handle non-numeric arrays or errors in min/max
   }
-  return `[Array(len=${len}, min=${min}, max=${max}, preview=[${preview.join(', ')}]...)]`;
+  return `[Array(len=${len}${min !== null ? `, min=${min}` : ''}${max !== null ? `, max=${max}` : ''}, preview=[${preview.join(', ')}]...)]`;
 }
 
 function summarizeObject(obj: any): any {
   if (Array.isArray(obj)) return summarizeArray(obj);
   if (obj && typeof obj === 'object') {
-    const copy: any = Array.isArray(obj) ? [] : {};
+    const copy: any = {}; // Initialize as an empty object
     for (const key in obj) {
-      if (Array.isArray(obj[key]) && obj[key].length > 20) {
-        copy[key] = summarizeArray(obj[key]);
-      } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-        copy[key] = summarizeObject(obj[key]);
-      } else {
-        copy[key] = obj[key];
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        // Ensure it's an own property
+        if (Array.isArray(obj[key]) && obj[key].length > 20) {
+          copy[key] = summarizeArray(obj[key]);
+        } else if (typeof obj[key] === 'object' && obj[key] !== null) {
+          copy[key] = summarizeObject(obj[key]); // Recursively summarize
+        } else {
+          copy[key] = obj[key];
+        }
       }
     }
     return copy;
@@ -50,7 +60,7 @@ function summarizeObject(obj: any): any {
 export const embeddingsController = {
   /**
    * Handles POST requests to /api/embeddings
-   * Expects a JSON body: { "imagePaths": ["path1", "path2", ...] }
+   * Expects a JSON body: { "files": ["path1", "path2", ...] } or legacy { "imagePaths": [...] }
    * Returns JSON: { "path1": { "embedding": [...] }, "path2": { "embedding": [...] }, ... }
    */
   async handleEmbeddingsRequest(req: IncomingRequest, sock: Socket): Promise<void> {
@@ -60,7 +70,6 @@ export const embeddingsController = {
       source: 'http-request',
     });
 
-    // Log client information for better tracking
     const clientInfo = {
       remoteAddress: sock.remoteAddress,
       remotePort: sock.remotePort,
@@ -80,7 +89,6 @@ export const embeddingsController = {
         context,
         { method: req.method, clientInfo },
       );
-
       embeddingsLogger.removeContext(requestId);
       return sendWithContext(
         req,
@@ -95,7 +103,6 @@ export const embeddingsController = {
       embeddingsLogger.warn(EmbeddingComponent.HANDLER, 'Request body is empty', context, {
         clientInfo,
       });
-
       embeddingsLogger.removeContext(requestId);
       return sendWithContext(
         req,
@@ -107,7 +114,6 @@ export const embeddingsController = {
     }
 
     try {
-      // First check if the embedding service is available
       const serviceStatus = await embeddingService.getStatus(requestId);
       if (serviceStatus.state === 'ERROR' || serviceStatus.state === 'STOPPED') {
         embeddingsLogger.error(
@@ -120,7 +126,6 @@ export const embeddingsController = {
             lastError: serviceStatus.lastError,
           },
         );
-
         embeddingsLogger.removeContext(requestId);
         return sendWithContext(
           req,
@@ -135,40 +140,30 @@ export const embeddingsController = {
       }
 
       const body = JSON.parse(req.body.toString('utf-8'));
-      // Accept either legacy `imagePaths` or documented `files`
-      let requestedPaths = body.imagePaths ?? body.files;
+      let requestedPathsStrings = body.imagePaths ?? body.files;
 
       embeddingsLogger.debug(EmbeddingComponent.HANDLER, 'Parsed request body', context, {
         body: summarizeObject(body),
-        pathsRequested: Array.isArray(requestedPaths)
-          ? requestedPaths.length
-          : typeof requestedPaths === 'string'
+        pathsRequestedCount: Array.isArray(requestedPathsStrings)
+          ? requestedPathsStrings.length
+          : typeof requestedPathsStrings === 'string'
             ? 1
             : 0,
         clientInfo,
       });
 
-      // Preserve original client-provided paths for remapping in response
-      const rawPaths: string[] = Array.isArray(requestedPaths)
-        ? [...requestedPaths]
-        : [requestedPaths];
-
-      // sanitize the requested paths
-      if (typeof requestedPaths === 'string') {
-        // If a single string is provided, convert it to an array
-        requestedPaths = [requestedPaths];
-      } else if (Array.isArray(requestedPaths)) {
-        // If an array is provided, ensure all elements are strings
-        requestedPaths = requestedPaths.filter((path) => typeof path === 'string');
-      } else {
-        // Missing both `files` and `imagePaths`
+      if (typeof requestedPathsStrings === 'string') {
+        requestedPathsStrings = [requestedPathsStrings];
+      } else if (
+        !Array.isArray(requestedPathsStrings) ||
+        !requestedPathsStrings.every((p) => typeof p === 'string')
+      ) {
         embeddingsLogger.warn(
           EmbeddingComponent.HANDLER,
-          'Invalid request format—missing "files" or "imagePaths"',
+          'Invalid request format—missing "files" or "imagePaths", or they are not string/array of strings.',
           context,
-          { body, clientInfo },
+          { bodySummary: summarizeObject(body), clientInfo },
         );
-
         embeddingsLogger.removeContext(requestId);
         return sendWithContext(
           req,
@@ -177,32 +172,18 @@ export const embeddingsController = {
           { 'Content-Type': 'application/json' },
           JSON.stringify({
             error:
-              'Invalid request format. Expected "files" or "imagePaths" as an array of strings.',
+              'Invalid request format. Expected "files" or "imagePaths" as a string or an array of strings.',
           }),
         );
       }
 
-      // normalize the paths
-      // Normalize the requested paths: trim whitespace, collapse redundant segments,
-      // strip any leading slashes or parent‑directory references to keep them relative
-      requestedPaths = requestedPaths
-        .map((p: string): string => p.trim())
-        .map(
-          (p: string): string =>
-            path
-              .normalize(p)
-              .replace(/^(\.\.[/\\])+/, '') // remove "../" segments
-              .replace(/^[/\\]+/, ''), // remove leading "/" or "\"
-        );
-
-      if (!Array.isArray(requestedPaths) || requestedPaths.length === 0) {
+      if (requestedPathsStrings.length === 0) {
         embeddingsLogger.warn(
           EmbeddingComponent.HANDLER,
-          'No file paths provided after normalization',
+          'No file paths provided in "files" or "imagePaths".',
           context,
           { clientInfo },
         );
-
         embeddingsLogger.removeContext(requestId);
         return sendWithContext(
           req,
@@ -213,111 +194,61 @@ export const embeddingsController = {
         );
       }
 
-      // --- Security: Validate paths ---
-      const mediaDir = path.resolve(config.mediaDir); // Get absolute configured media directory
-      const imagePaths: string[] = []; // Store only validated paths
+      // Normalize paths for consistency and use these as keys and search terms.
+      // embeddingService.findFile will handle the actual resolution against configured media directories.
+      const normalizedClientPaths = requestedPathsStrings
+        .map((p: string) => p.trim())
+        .filter((p: string) => p.length > 0) // Filter out empty strings after trim
+        .map((p: string) => path.normalize(p)); // Basic normalization
 
-      embeddingsLogger.debug(
-        EmbeddingComponent.HANDLER,
-        `Validating ${requestedPaths.length} paths`,
-        context,
-        { mediaDir, clientInfo },
-      );
-
-      for (const reqPath of requestedPaths) {
-        if (typeof reqPath !== 'string') {
-          embeddingsLogger.warn(
-            EmbeddingComponent.HANDLER,
-            `Invalid path type received: ${typeof reqPath}`,
-            context,
-            { pathType: typeof reqPath, clientInfo },
-          );
-          continue; // Skip non-string paths
-        }
-
-        const absoluteReqPath = path.resolve(mediaDir, reqPath);
-        // TODO: remove the commented below when i figure out a better way to handle this
-        // // Check for path traversal and ensure it's within the media directory
-        // if (!absoluteReqPath.startsWith(mediaDir) && !config.testMode) {
-        //   embeddingsLogger.error(
-        //     EmbeddingComponent.HANDLER,
-        //     `Invalid path detected (outside media dir): ${reqPath}`,
-        //     context,
-        //     {
-        //       requestedPath: reqPath,
-        //       absolutePath: absoluteReqPath,
-        //       mediaDir,
-        //       clientInfo,
-        //     },
-        //   );
-
-        //   embeddingsLogger.removeContext(requestId);
-        //   return sendResponse(
-        //     sock,
-        //     400,
-        //     { 'Content-Type': 'application/json' },
-        //     JSON.stringify({
-        //       error: 'Invalid file path provided.',
-        //       detail: `Path ${reqPath} is outside the allowed directory.`,
-        //     }),
-        //   );
-        // }
-        imagePaths.push(absoluteReqPath); // Use the validated absolute path
-      }
-
-      if (imagePaths.length === 0) {
+      if (normalizedClientPaths.length === 0) {
         embeddingsLogger.warn(
           EmbeddingComponent.HANDLER,
-          'No valid paths remaining after validation.',
+          'No valid file paths remaining after trimming and normalization.',
           context,
-          { clientInfo },
+          { originalPaths: requestedPathsStrings, clientInfo },
         );
-
         embeddingsLogger.removeContext(requestId);
         return sendWithContext(
           req,
           sock,
           400,
           { 'Content-Type': 'application/json' },
-          JSON.stringify({ error: 'No valid file paths provided.' }),
+          JSON.stringify({ error: 'No valid file paths provided after normalization.' }),
         );
       }
-      // --- End Path Validation ---
 
       embeddingsLogger.info(
         EmbeddingComponent.HANDLER,
-        `Requesting embeddings for ${imagePaths.length} validated paths.`,
+        `Handler: Requesting embeddings for ${normalizedClientPaths.length} client-provided (normalized) paths.`,
         context,
         {
-          validatedPathCount: imagePaths.length,
-          mediaDir,
+          normalizedPathCount: normalizedClientPaths.length,
           clientInfo,
         },
       );
 
-      // Update context with media count
-      embeddingsLogger.updateContext(requestId, {
-        mediaCount: imagePaths.length,
-      });
+      embeddingsLogger.updateContext(requestId, { mediaCount: normalizedClientPaths.length });
 
       try {
+        // `normalizedClientPaths` are used for searching files (by embeddingService.findFile)
+        // AND as the keys in the returned ClipCache.
         const embeddingsResult = await embeddingService.getEmbeddings(
-          imagePaths,
+          normalizedClientPaths, // Paths for the service to find/resolve
           requestId,
-          rawPaths,
+          normalizedClientPaths, // Paths to use as keys in the ClipCache result
         );
 
         embeddingsLogger.info(
           EmbeddingComponent.HANDLER,
-          `Sending response for ${imagePaths.length} paths`,
+          `Sending response for ${normalizedClientPaths.length} paths.`,
           context,
           {
-            pathCount: imagePaths.length,
+            pathCount: normalizedClientPaths.length,
             hasErrors: Object.values(embeddingsResult).some((entry) => !!entry.error),
             clientInfo,
           },
         );
-
         embeddingsLogger.removeContext(requestId);
         sendWithContext(
           req,
@@ -327,22 +258,25 @@ export const embeddingsController = {
           JSON.stringify(embeddingsResult),
         );
       } catch (error: any) {
-        // If there's an error getting embeddings, provide detailed error response
         embeddingsLogger.error(
           EmbeddingComponent.HANDLER,
-          `Error getting embeddings: ${error.message}`,
+          `Error getting embeddings from service: ${error.message}`,
           context,
-          { error, clientInfo },
+          {
+            errorName: error.name,
+            errorMessage: error.message,
+            errorStack: error.stack,
+            clientInfo,
+          },
         );
 
-        // Create error response with empty embeddings that conform to the schema
         const errorResponse: Record<string, ClipCacheEntry> = {};
-        for (let i = 0; i < rawPaths.length; i++) {
-          const reqPath = rawPaths[i];
-          errorResponse[reqPath] = {
-            schemaVersion: '1.0.0',
-            filePath: reqPath,
-            mediaType: 'image',
+        // Use normalizedClientPaths for keys in the error response for consistency
+        for (const keyPath of normalizedClientPaths) {
+          errorResponse[keyPath] = {
+            schemaVersion: '1.1.0', // Consistent with other services
+            filePath: keyPath, // The key itself
+            mediaType: 'image', // Default; could be refined if type known before error
             mtime: 0,
             fileSize: 0,
             dimensions: { width: 1, height: 1 },
@@ -351,11 +285,10 @@ export const embeddingsController = {
             embeddingModel: 'unknown',
             embeddingConfig: {},
             processingTimestamp: new Date().toISOString(),
-            error: `Service error: ${error.message}`,
-            detail: error.stack,
+            error: `Service error during embedding generation: ${error.message}`,
+            detail: error.stack || 'No additional stack trace available.',
           };
         }
-
         embeddingsLogger.removeContext(requestId);
         sendWithContext(
           req,
@@ -368,18 +301,16 @@ export const embeddingsController = {
     } catch (error: any) {
       embeddingsLogger.error(
         EmbeddingComponent.HANDLER,
-        `Error processing embedding request: ${error.message}`,
+        `Critical error processing embedding request: ${error.message}`,
         context,
-        { error, clientInfo },
+        { errorName: error.name, errorMessage: error.message, errorStack: error.stack, clientInfo },
       );
 
-      // Distinguish between JSON parsing errors and service errors
       const statusCode = error instanceof SyntaxError ? 400 : 500;
       const errorMessage =
         error instanceof SyntaxError
           ? 'Invalid JSON in request body.'
-          : 'Failed to process embeddings.';
-
+          : 'Failed to process embeddings request.';
       embeddingsLogger.removeContext(requestId);
       sendWithContext(
         req,
@@ -395,7 +326,7 @@ export const embeddingsController = {
    * Handles POST requests to /api/embeddings/shutdown
    * Instructs the embedding service to stop gracefully.
    */
-  async handleShutdownRequest(req: IncomingRequest, sock: Socket) {
+  async handleShutdownRequest(req: IncomingRequest, sock: Socket): Promise<void> {
     const requestId = req.ctx?.requestId?.toString() || randomUUID().toString();
     const context = embeddingsLogger.createContext({
       requestId,
@@ -404,25 +335,28 @@ export const embeddingsController = {
 
     embeddingsLogger.info(EmbeddingComponent.HANDLER, 'Received shutdown request', context);
 
-    embeddingService.stop();
+    embeddingService.stop(); // Python service manages its own lifecycle; this is for Node.js part.
 
-    embeddingsLogger.info(EmbeddingComponent.HANDLER, 'Embedding service stop initiated.', context);
-
+    embeddingsLogger.info(
+      EmbeddingComponent.HANDLER,
+      'Embedding service stop initiated (Node.js).',
+      context,
+    );
     embeddingsLogger.removeContext(requestId);
     sendWithContext(
       req,
       sock,
       200,
       { 'Content-Type': 'application/json' },
-      JSON.stringify({ message: 'Embedding service shutdown initiated.' }),
+      JSON.stringify({ message: 'Embedding service shutdown initiated (Node.js component).' }),
     );
   },
 
   /**
    * Handles GET requests to /api/embeddings/status
-   * Returns JSON: { state, isStarting, isProcessing, queueLength, currentBatch, error }
+   * Returns JSON: { state, pythonServiceHealth, lastError, isProcessingBatch }
    */
-  async handleStatusRequest(req: IncomingRequest, sock: Socket) {
+  async handleStatusRequest(req: IncomingRequest, sock: Socket): Promise<void> {
     const requestId = req.ctx?.requestId?.toString() || randomUUID().toString();
     const context = embeddingsLogger.createContext({
       requestId,
@@ -438,7 +372,6 @@ export const embeddingsController = {
         context,
         { method: req.method },
       );
-
       embeddingsLogger.removeContext(requestId);
       return sendWithContext(
         req,
@@ -449,38 +382,49 @@ export const embeddingsController = {
       );
     }
 
-    // If service is stopped or in error, start Python process on status ping
-    let status = await embeddingService.getStatus(requestId);
-    if ((status.state === 'STOPPED' || status.state === 'ERROR') && !status.isStarting) {
-      embeddingsLogger.info(
-        EmbeddingComponent.HANDLER,
-        'Status ping received with error or stopped state.',
-        context,
-      );
+    try {
+      const status = await embeddingService.getStatus(requestId);
+      // The new embeddingService.getStatus() already handles Python health check.
+      // No need to manually "start" Python service here as it's managed independently.
 
-      // No need to start Python process as the HTTP client doesn't have this capability
-      // Just log the error and continue
-      if (status.lastError) {
-        embeddingsLogger.error(
+      if (status.state === 'ERROR' && status.lastError) {
+        embeddingsLogger.warn(
           EmbeddingComponent.HANDLER,
-          `Embedding service is in error state: ${status.lastError}`,
+          `Embedding service is reporting an error state: ${status.lastError}`,
           context,
-          { error: status.lastError },
+          { serviceStatus: status },
         );
       }
 
-      // Refresh status after logging
-      status = await embeddingService.getStatus(requestId);
+      embeddingsLogger.debug(
+        EmbeddingComponent.HANDLER,
+        `Returning status: ${status.state}`,
+        context,
+        status,
+      );
+      embeddingsLogger.removeContext(requestId);
+      sendWithContext(
+        req,
+        sock,
+        200,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify(status),
+      );
+    } catch (error: any) {
+      embeddingsLogger.error(
+        EmbeddingComponent.HANDLER,
+        `Error fetching service status: ${error.message}`,
+        context,
+        { errorName: error.name, errorMessage: error.message, errorStack: error.stack },
+      );
+      embeddingsLogger.removeContext(requestId);
+      sendWithContext(
+        req,
+        sock,
+        500,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({ error: 'Failed to fetch service status', detail: error.message }),
+      );
     }
-
-    embeddingsLogger.debug(
-      EmbeddingComponent.HANDLER,
-      `Returning status: ${status.state}`,
-      context,
-      status,
-    );
-
-    embeddingsLogger.removeContext(requestId);
-    sendWithContext(req, sock, 200, { 'Content-Type': 'application/json' }, JSON.stringify(status));
   },
 };
