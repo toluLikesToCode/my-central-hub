@@ -2,7 +2,7 @@
   {
     "itemId": "video_002",
     "originalFilename": null,
-    "itemProcessingRequestId": "pygpu-1-182154_video_00",
+    "itemProcessingRequestId": "pygpu-1-a52563_video_00",
     "batchConfiguredHwAccelMethod": "cuda",
     "videoProcessorEffectiveHwAccelMethod": "cuda",
     "videoDurationSeconds": 57.991267,
@@ -11,37 +11,37 @@
     "hardwareAccelFailures": {
       "count": 20,
       "timestamps": [
-        0.5,
         24.496322947368423,
+        0.5,
         33.49494405263158,
-        3.499540368421053,
-        18.497242210526316,
         9.498621105263158,
-        6.499080736842106,
-        30.49540368421053,
-        12.498161473684211,
-        21.496782578947368,
         27.495863315789478,
-        15.497701842105265,
+        3.499540368421053,
+        12.498161473684211,
+        18.497242210526316,
+        6.499080736842106,
+        21.496782578947368,
+        30.49540368421053,
         36.49448442105263,
-        39.494024789473684,
-        42.493565157894736,
+        15.497701842105265,
         48.492645894736846,
+        42.493565157894736,
+        39.494024789473684,
+        45.49310552631579,
         57.491267,
         51.4921862631579,
-        45.49310552631579,
         54.491726631578956
       ],
       "errorTypeCounts": {
         "RuntimeError": 20
       },
-      "sampleErrorMessage": "HWAccel (cuda) frame extraction failed (code 234) at 0.50s. Stderr: [hwdownload @ 0x7f13d8000b40] Invalid output format monow for hwframe download.\n[Parsed_hwdownload_0 @ 0x7f13d8002bc0] Failed to configure output pad on Parsed_hwdownload_0\n[vf#0:0 @ 0x562aff5efe40] Error reinitializing filters!\n[vf#0:0 @ 0x562aff5efe40] Task finished with error code: -22 (Invalid argument)\n[vf#0:0 @ 0x562aff5efe40] Terminating thread with return code -22 (Invalid argument)\n[vost#0:0/mjpeg @ 0x562aff64f500] [enc:mjpeg @ 0x562aff7170c0] Could not open encoder before EOF\n[vost#0:0/mjpeg @ 0x562aff64f500] Task finished with error code: -22 (Invalid argument)\n[vost#0:0/mjpeg @ 0x562aff64f500] Terminating thread with return code -22 (Invalid argument)\n[out#0/image2pipe @ 0x562aff6439c0] Nothing was written into output file, because at least one of its streams received no packets.. Command: ffmpeg -y -loglevel warning -hwaccel cuda -hwaccel_output_format cuda -ss 0.5 -i /app/public/0e5e7dec66c6ef519a8dfec585a7f11c.mp4 -vf hwdownloa... (truncated)"
+      "sampleErrorMessage": "HWAccel (cuda) frame extraction failed (code 8) at 24.50s. Stderr: [fc#-1 @ 0x560d39fd7e40] Error applying option 'format' to filter 'scale': Option not found\nError opening output file -.\nError opening output files: Option not found. Command: ffmpeg -y -loglevel warning -hwaccel cuda -hwaccel_output_format cuda -ss 24.496322947368423 -i /app/public/0e5e7dec66c6ef519a8dfec585a7f11c.mp4 -vf hwdownload,format=nv12,scale=format=yuvj420p -vframes 1 -f image2pipe -c:v mjpeg -q:v 2 -"
     },
     "frameSamplingMethod": "uniform_spread_with_offset",
     "requestedFramesForSampling": 20,
     "finalPilFramesReturnedForItem": 20,
     "itemFrameExtractionErrorCount": null,
-    "receivedAt": "2025-06-01T06:53:57.479Z",
-    "requestId": "f7c74e50-71c0-4724-8ba1-cea27ae72faf"
+    "receivedAt": "2025-06-01T07:02:45.346Z",
+    "requestId": "80741211-4dc1-4f70-960c-cf4788052d71"
   }
 ]

@@ -346,6 +346,7 @@ class EmbeddingService {
     requestId: string,
     rawPaths?: string[], // Exact original paths to be used as keys in the ClipCache.
     timeoutMs = SCRIPT_TIMEOUT_MS,
+    numFrames?: number | null, // Optional frame count for videos, can be set by client.
   ): Promise<ClipCache> {
     const context = embeddingsLogger.createContext({
       requestId,
@@ -388,6 +389,7 @@ class EmbeddingService {
             mtime: metadata.mtime,
             dimensions: metadata.dimensions,
             duration: metadata.duration,
+            numFrames: numFrames || undefined, // Use provided numFrames or null if not set
             // numFrames: Can be set here if specific frame counts per item are needed from Node.
             // Otherwise, Python service will use its default for videos.
           });

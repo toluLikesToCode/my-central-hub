@@ -13,6 +13,7 @@ import path from 'path';
 // but embeddingService will use it.
 // import { config } from '../../config/server.config';
 import { randomUUID } from 'crypto';
+import { getHeader } from '../../utils/httpHelpers';
 
 // Helper to summarize large arrays for logging
 function summarizeArray(arr: any[]): string {
@@ -141,6 +142,13 @@ export const embeddingsController = {
 
       const body = JSON.parse(req.body.toString('utf-8'));
       let requestedPathsStrings = body.imagePaths ?? body.files;
+      // Extract numFrames from body or header, with fallback to undefined
+      const numFrames: number | undefined = (() => {
+        const raw = body.numFrames ?? getHeader(req, 'X-Num-Frames');
+        if (raw == null) return undefined;
+        const parsed = typeof raw === 'number' ? raw : parseInt(raw, 10);
+        return Number.isInteger(parsed) ? parsed : undefined;
+      })();
 
       embeddingsLogger.debug(EmbeddingComponent.HANDLER, 'Parsed request body', context, {
         body: summarizeObject(body),
@@ -237,6 +245,7 @@ export const embeddingsController = {
           normalizedClientPaths, // Paths for the service to find/resolve
           requestId,
           normalizedClientPaths, // Paths to use as keys in the ClipCache result
+          numFrames, // Pass numFrames (can be number or undefined)
         );
 
         embeddingsLogger.info(

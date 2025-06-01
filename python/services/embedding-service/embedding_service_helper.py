@@ -421,8 +421,8 @@ class VideoProcessor:
         if self.hwaccel_method == "cuda":  # Be specific for cuda
             cmd_base.extend(["-hwaccel_output_format", "cuda"])
 
-        # --- MODIFICATION HERE ---
-        video_filter = "hwdownload,format=nv12,scale=format=yuvj420p"
+        # Corrected filter chain: download as nv12 then convert pixel format to yuvj420p via format filter
+        video_filter = "hwdownload,format=nv12,format=pix_fmts=yuvj420p"
 
         command = cmd_base + [
             "-ss",
