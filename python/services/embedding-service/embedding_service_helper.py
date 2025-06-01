@@ -1808,9 +1808,10 @@ def process_media_batch(
                 report_this_item = True
 
             extraction_events = debug_meta.get("detailed_extraction_events", [])
+            # Report any frame extraction events containing 'fail' or 'error'
             has_failure_events = any(
-                "failure" in evt.get("event_type", "")
-                or "error" in evt.get("event_type", "")
+                (evt.get("event_type", "") or "").lower().find("fail") >= 0
+                or (evt.get("event_type", "") or "").lower().find("error") >= 0
                 for evt in extraction_events
             )
 
