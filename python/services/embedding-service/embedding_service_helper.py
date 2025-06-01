@@ -255,8 +255,8 @@ class CLIPEmbedder:
         # If HuggingFace LAION model, map to open_clip's known pretrained tag
         hf_laion_map = {
             # Add more mappings as needed
-            'laion/CLIP-ViT-H-14-laion2B-s32B-b79K': ('ViT-H-14', 'laion2b_s32b_b79k'),
-            'laion/CLIP-ViT-B-32-laion2B-s34B-b79K': ('ViT-B-32', 'laion2b_s34b_b79k'),
+            "laion/CLIP-ViT-H-14-laion2B-s32B-b79K": ("ViT-H-14", "laion2b_s32b_b79k"),
+            "laion/CLIP-ViT-B-32-laion2B-s34B-b79K": ("ViT-B-32", "laion2b_s34b_b79k"),
         }
         if spec in hf_laion_map:
             return hf_laion_map[spec]
@@ -664,8 +664,8 @@ def _preprocess_single_item_for_batch(
             case "filepath":
                 # Special handling for paths starting with "/public/" - treat as relative to media root
                 if source_location.startswith("/public/"):
-                    # Strip the leading "/" to make it relative to python_media_root
-                    relative_path = source_location[1:]  # Remove the leading "/"
+                    # Strip the "/public/" prefix to get just the filename
+                    relative_path = source_location[8:]  # Remove "/public/"
                     resolved_fs_path = os.path.join(python_media_root, relative_path)
                     item_logger.debug(
                         f"Treating '/public/' path as relative: '{resolved_fs_path}' (original source: '{source_location}')"
