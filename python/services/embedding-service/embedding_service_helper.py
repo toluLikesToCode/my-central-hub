@@ -252,6 +252,15 @@ class CLIPEmbedder:
         spec = model_spec.strip()
         size_map = {"base": "B", "large": "L", "huge": "H"}
 
+        # If HuggingFace LAION model, map to open_clip's known pretrained tag
+        hf_laion_map = {
+            # Add more mappings as needed
+            'laion/CLIP-ViT-H-14-laion2B-s32B-b79K': ('ViT-H-14', 'laion2b_s32b_b79k'),
+            'laion/CLIP-ViT-B-32-laion2B-s34B-b79K': ('ViT-B-32', 'laion2b_s34b_b79k'),
+        }
+        if spec in hf_laion_map:
+            return hf_laion_map[spec]
+
         # Hugging Face or OpenAI hub notation
         if "/" in spec:
             author, name = spec.split("/", 1)
@@ -259,24 +268,17 @@ class CLIPEmbedder:
             # OpenAI official models
             if author_l == "openai":
                 toks = name.lower().split("-")
-                # find the "vit" token
                 try:
                     vidx = toks.index("vit")
                 except ValueError:
                     vidx = 0
-                # next is size, then patch#
                 size = toks[vidx + 1]
                 patch = toks[vidx + 2].replace("patch", "")
                 arch = f"ViT-{ size_map.get(size, size.upper()) }-{ patch }"
                 pretrained = "openai"
             else:
-                # HF models like "CLIP-ViT-H-14-..."
-                parts = name.split("-")
-                if parts[0].upper() == "CLIP" and len(parts) >= 4:
-                    arch = "-".join(parts[1:4])
-                else:
-                    arch = name
-                # prefix with hf-hub: so open_clip fetches from HF
+                # For other HF models, fallback to hf-hub (custom/private)
+                arch = name
                 pretrained = f"hf-hub:{ spec }"
         else:
             # no slash → treat as a bare architecture, default to OpenAI weights
