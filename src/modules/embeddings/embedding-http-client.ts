@@ -119,7 +119,7 @@ export interface MediaItemArgs {
   mtime: number;
   dimensions: { width: number; height: number };
   duration?: number | null;
-  numFrames?: number;
+  numFrames?: number | undefined; // Optional, if not provided, Python will handle it
 }
 
 // --- AJV Setup ---

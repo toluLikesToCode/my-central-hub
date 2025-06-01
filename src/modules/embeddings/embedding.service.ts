@@ -342,11 +342,19 @@ class EmbeddingService {
    * and sends a single request to the Python service via the HTTP client.
    */
   public async getEmbeddings(
-    requestedImagePaths: string[], // Client-provided paths/IDs, used for finding files.
-    requestId: string,
-    rawPaths?: string[], // Exact original paths to be used as keys in the ClipCache.
-    timeoutMs = SCRIPT_TIMEOUT_MS,
-    numFrames?: number | null, // Optional frame count for videos, can be set by client.
+    {
+      requestedImagePaths,
+      requestId,
+      rawPaths,
+      timeoutMs = SCRIPT_TIMEOUT_MS,
+      numFrames,
+    }: {
+      requestedImagePaths: string[];
+      requestId: string;
+      rawPaths?: string[];
+      timeoutMs?: number;
+      numFrames?: number | undefined;
+    }, // Optional frame count for videos, can be set by client.
   ): Promise<ClipCache> {
     const context = embeddingsLogger.createContext({
       requestId,
@@ -389,9 +397,7 @@ class EmbeddingService {
             mtime: metadata.mtime,
             dimensions: metadata.dimensions,
             duration: metadata.duration,
-            numFrames: numFrames || undefined, // Use provided numFrames or null if not set
-            // numFrames: Can be set here if specific frame counts per item are needed from Node.
-            // Otherwise, Python service will use its default for videos.
+            numFrames: numFrames, // Use provided numFrames or undefined if not set
           });
         } catch (metaError: any) {
           embeddingsLogger.warn(

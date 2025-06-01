@@ -247,10 +247,12 @@ export const embeddingsController = {
         // `normalizedClientPaths` are used for searching files (by embeddingService.findFile)
         // AND as the keys in the returned ClipCache.
         const embeddingsResult = await embeddingService.getEmbeddings(
-          normalizedClientPaths, // Paths for the service to find/resolve
-          requestId,
-          normalizedClientPaths, // Paths to use as keys in the ClipCache result
-          numFrames, // Pass numFrames (can be number or undefined)
+          {
+            requestedImagePaths: normalizedClientPaths,
+            requestId: requestId,
+            rawPaths: normalizedClientPaths,
+            numFrames: numFrames,
+          }, // Pass numFrames (can be number or undefined)
         );
 
         embeddingsLogger.info(

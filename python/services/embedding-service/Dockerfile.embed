@@ -6,7 +6,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN printf "Acquire::http::Pipeline-Depth 0;\nAcquire::http::No-Cache true;\nAcquire::BrokenProxy true;\n" > /etc/apt/apt.conf.d/99no-cache
 
 # Install Python 3.11, minimal OS dependencies, and tools for downloading/extracting
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3-pip python3.11-dev \
     libgl1-mesa-glx libglib2.0-0 \
     ca-certificates wget xz-utils && \
@@ -27,6 +28,10 @@ RUN echo "Downloading FFmpeg from ${FFMPEG_DOWNLOAD_URL}" && \
     ln -s /opt/ffmpeg/bin/ffmpeg /usr/local/bin/ffmpeg && \
     ln -s /opt/ffmpeg/bin/ffprobe /usr/local/bin/ffprobe && \
     ln -s /opt/ffmpeg/bin/ffplay /usr/local/bin/ffplay # Optional
+
+# Set NVIDIA environment variables for GPU access and video capabilities
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
 # Set default port for FastAPI server
 ENV PYTHON_PORT=3456
