@@ -607,55 +607,71 @@ class VideoProcessor:
             }
             frame_events.append(event)
 
-        if self.hwaccel_method:
-            add_frame_event("hw_extraction_attempt", {"hw_method": self.hwaccel_method})
-            try:
-                frame_pil = self._extract_frame_hw_accelerated(time_sec)
-                add_frame_event(
-                    "hw_extraction_success", {"hw_method": self.hwaccel_method}
-                )
-            except Exception as e_hw:
-                self.logger.warning(
-                    f"HW accel ({self.hwaccel_method}) failed for ts {time_sec:.2f}s: {e_hw}. Falling back.",
-                    extra={"time_sec": time_sec, "error_type": type(e_hw).__name__},
-                )
-                add_frame_event(
-                    "hw_extraction_failed_fallback_to_sw",
-                    {
-                        "hw_method": self.hwaccel_method,
-                        "error_type": type(e_hw).__name__,
-                        "error_message": str(e_hw),
-                    },
-                )
-                # Fall through to software
-        else:
-            add_frame_event("hw_accel_not_configured_using_sw")
+        try:
+            if self.hwaccel_method:
+                add_frame_event("hw_extraction_attempt", {"hw_method": self.hwaccel_method})
+                try:
+                    frame_pil = self._extract_frame_hw_accelerated(time_sec)
+                    add_frame_event(
+                        "hw_extraction_success", {"hw_method": self.hwaccel_method}
+                    )
+                except Exception as e_hw:
+                    self.logger.warning(
+                        f"HW accel ({self.hwaccel_method}) failed for ts {time_sec:.2f}s: {e_hw}. Falling back.",
+                        extra={"time_sec": time_sec, "error_type": type(e_hw).__name__},
+                    )
+                    add_frame_event(
+                        "hw_extraction_failed_fallback_to_sw",
+                        {
+                            "hw_method": self.hwaccel_method,
+                            "error_type": type(e_hw).__name__,
+                            "error_message": str(e_hw),
+                        },
+                    )
+                    # Fall through to software
+            else:
+                add_frame_event("hw_accel_not_configured_using_sw")
 
-        if not frame_pil:  # If HW not configured, or HW failed
-            reason_for_sw = (
-                "direct_attempt_no_hw_config"
-                if not self.hwaccel_method
-                else "fallback_after_hw_failure"
+            if not frame_pil:  # If HW not configured, or HW failed
+                reason_for_sw = (
+                    "direct_attempt_no_hw_config"
+                    if not self.hwaccel_method
+                    else "fallback_after_hw_failure"
+                )
+                add_frame_event("sw_extraction_attempt", {"reason": reason_for_sw})
+                try:
+                    frame_pil = self._extract_frame_software(time_sec)
+                    add_frame_event("sw_extraction_success", {"reason": reason_for_sw})
+                except Exception as e_sw:
+                    self.logger.error(
+                        f"Software extraction failed for ts {time_sec:.2f}s (reason: {reason_for_sw}): {e_sw}",
+                        error=e_sw,
+                        extra={"time_sec": time_sec},
+                    )
+                    add_frame_event(
+                        "sw_extraction_failed",
+                        {
+                            "reason": reason_for_sw,
+                            "error_type": type(e_sw).__name__,
+                            "error_message": str(e_sw),
+                        },
+                    )
+                    # Frame_pil remains None
+        except Exception as e:
+            # Catch-all for any unexpected error in the extraction logic
+            self.logger.error(
+                f"Unexpected error in extract_frame at {time_sec:.2f}s: {e}",
+                error=e,
+                extra={"time_sec": time_sec},
             )
-            add_frame_event("sw_extraction_attempt", {"reason": reason_for_sw})
-            try:
-                frame_pil = self._extract_frame_software(time_sec)
-                add_frame_event("sw_extraction_success", {"reason": reason_for_sw})
-            except Exception as e_sw:
-                self.logger.error(
-                    f"Software extraction failed for ts {time_sec:.2f}s (reason: {reason_for_sw}): {e_sw}",
-                    error=e_sw,
-                    extra={"time_sec": time_sec},
-                )
-                add_frame_event(
-                    "sw_extraction_failed",
-                    {
-                        "reason": reason_for_sw,
-                        "error_type": type(e_sw).__name__,
-                        "error_message": str(e_sw),
-                    },
-                )
-                # Frame_pil remains None
+            add_frame_event(
+                "frame_extraction_error",
+                {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                },
+            )
+            frame_pil = None
 
         return frame_pil, frame_events
 
