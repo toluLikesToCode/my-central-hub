@@ -512,15 +512,19 @@ export const embeddingsController = {
     // Only client logs should be written here: do not log server-side errors or internal events
     const fs = await import('fs/promises');
     const path = await import('path');
-    const logFilePath = path.resolve(process.cwd(), 'logs/embedding_error_logs.jsonl');
+    // Use structured JSON instead of line-delimited JSONL
+    const logFilePath = path.resolve(process.cwd(), 'logs/embedding_error_logs.json');
     try {
       await fs.mkdir(path.dirname(logFilePath), { recursive: true });
       // Overwrite the file with only the new client logs (do not append)
       // If you want to keep only the latest batch, use writeFile instead of appendFile
-      const lines = processedLogs.map((entry) =>
-        JSON.stringify({ ...entry, receivedAt: new Date().toISOString(), requestId }),
-      );
-      await fs.writeFile(logFilePath, lines.join('\n') + '\n', 'utf-8');
+      // Build a JSON array with metadata and write as pretty JSON
+      const logsToWrite = processedLogs.map((entry) => ({
+        ...entry,
+        receivedAt: new Date().toISOString(),
+        requestId,
+      }));
+      await fs.writeFile(logFilePath, JSON.stringify(logsToWrite, null, 2), 'utf-8');
     } catch (err: any) {
       embeddingsLogger.error(
         EmbeddingComponent.HANDLER,
