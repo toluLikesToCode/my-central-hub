@@ -413,27 +413,35 @@ class VideoProcessor:
             "ffmpeg",
             "-y",
             "-loglevel",
-            "warning",
+            "warning",  # Consider "debug" or "verbose" temporarily if issues persist to get more FFmpeg output
             "-hwaccel",
             self.hwaccel_method,
         ]
-        if self.hwaccel_method in ["cuda", "vaapi", "qsv", "vulkan", "amf", "opencl"]:
+        if self.hwaccel_method in [
+            "cuda",
+            "vaapi",
+            "qsv",
+            "vulkan",
+            "amf",
+            "opencl",
+        ]:  # True for cuda
             cmd_base.extend(["-hwaccel_output_format", self.hwaccel_method])
+
         command = cmd_base + [
             "-ss",
             str(time_sec),
             "-i",
             self.video_path,
             "-vf",
-            "hwdownload,format=rgb24",
+            "hwdownload",  # MODIFIED LINE: Download in native/compatible GPU format
             "-vframes",
             "1",
             "-f",
             "image2pipe",
             "-c:v",
-            "mjpeg",
+            "mjpeg",  # Outputting as MJPEG for PIL
             "-q:v",
-            "2",
+            "2",  # MJPEG quality
             "-",
         ]
         cmd_str_preview = " ".join(command[:10]) + "..."  # For brevity in events
@@ -462,17 +470,17 @@ class VideoProcessor:
                     },
                 )
                 raise RuntimeError(
-                    f"No frame data from HWAccel ({self.hwaccel_method}). Stderr: {stderr_output}"
+                    f"No frame data from HWAccel ({self.hwaccel_method}). Stderr: {stderr_output}. Command: {' '.join(command)}"
                 )
             return Image.open(io.BytesIO(result.stdout)).convert("RGB")
         except subprocess.TimeoutExpired as e_timeout:
             self.logger.error(
-                f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout at {time_sec:.2f}s",
+                f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout at {time_sec:.2f}s. Command: {' '.join(command)}",
                 error=e_timeout,
                 extra={"time_sec": time_sec, "command_preview": cmd_str_preview},
             )
             raise RuntimeError(
-                f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout extracting frame at {time_sec:.2f}s. Command: {cmd_str_preview}"
+                f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout extracting frame at {time_sec:.2f}s. Command: {' '.join(command)}"
             ) from e_timeout
         except subprocess.CalledProcessError as e_call:
             stderr_output = (
@@ -481,7 +489,7 @@ class VideoProcessor:
                 else "N/A"
             )
             self.logger.error(
-                f"ffmpeg (HWAccel: {self.hwaccel_method}) error code {e_call.returncode} at {time_sec:.2f}s. Stderr: {stderr_output}",
+                f"ffmpeg (HWAccel: {self.hwaccel_method}) error code {e_call.returncode} at {time_sec:.2f}s. Stderr: {stderr_output}. Command: {' '.join(command)}",
                 error=e_call,
                 extra={
                     "time_sec": time_sec,
@@ -491,16 +499,18 @@ class VideoProcessor:
                 },
             )
             raise RuntimeError(
-                f"HWAccel ({self.hwaccel_method}) frame extraction failed (code {e_call.returncode}) at {time_sec:.2f}s. Stderr: {stderr_output}. Command: {cmd_str_preview}"
+                f"HWAccel ({self.hwaccel_method}) frame extraction failed (code {e_call.returncode}) at {time_sec:.2f}s. Stderr: {stderr_output}. Command: {' '.join(command)}"
             ) from e_call
-        except Exception as e_generic:
+        except (
+            Exception
+        ) as e_generic:  # Catch other errors like UnidentifiedImageError if pipe is empty/corrupt
             self.logger.error(
-                f"Frame extraction (HWAccel: {self.hwaccel_method}) failed at {time_sec:.2f}s: {e_generic}",
+                f"Frame extraction (HWAccel: {self.hwaccel_method}) failed at {time_sec:.2f}s: {e_generic}. Command: {' '.join(command)}",
                 error=e_generic,
                 extra={"time_sec": time_sec, "command_preview": cmd_str_preview},
             )
             raise RuntimeError(
-                f"Failed to extract frame at {time_sec:.2f}s using HWAccel ({self.hwaccel_method}): {e_generic}. Command: {cmd_str_preview}"
+                f"Failed to extract frame at {time_sec:.2f}s using HWAccel ({self.hwaccel_method}): {e_generic}. Command: {' '.join(command)}"
             ) from e_generic
 
     def _extract_frame_software(self, time_sec: float) -> Image.Image:
@@ -609,7 +619,9 @@ class VideoProcessor:
 
         try:
             if self.hwaccel_method:
-                add_frame_event("hw_extraction_attempt", {"hw_method": self.hwaccel_method})
+                add_frame_event(
+                    "hw_extraction_attempt", {"hw_method": self.hwaccel_method}
+                )
                 try:
                     frame_pil = self._extract_frame_hw_accelerated(time_sec)
                     add_frame_event(
@@ -1820,19 +1832,33 @@ def process_media_batch(
 
             if report_this_item:
                 # Summarize hardware acceleration failures
-                hw_fail_events = [evt for evt in extraction_events if evt.get("event_type", "").startswith("hw_extraction_failed")]
-                hw_timestamps = [evt["details"].get("video_timestamp_sec") for evt in hw_fail_events]
+                hw_fail_events = [
+                    evt
+                    for evt in extraction_events
+                    if evt.get("event_type", "").startswith("hw_extraction_failed")
+                ]
+                hw_timestamps = [
+                    evt["details"].get("video_timestamp_sec") for evt in hw_fail_events
+                ]
                 hw_error_types = {}
                 for evt in hw_fail_events:
                     err_type = evt["details"].get("error_type")
                     hw_error_types[err_type] = hw_error_types.get(err_type, 0) + 1
-                sample_error_msg = hw_fail_events[0]["details"].get("error_message") if hw_fail_events else None
+                sample_error_msg = (
+                    hw_fail_events[0]["details"].get("error_message")
+                    if hw_fail_events
+                    else None
+                )
                 report_entry = {
                     "itemId": item_id,
                     "originalFilename": debug_meta.get("original_filename"),
-                    "itemProcessingRequestId": debug_meta.get("item_processing_request_id"),
+                    "itemProcessingRequestId": debug_meta.get(
+                        "item_processing_request_id"
+                    ),
                     "batchConfiguredHwAccelMethod": ffmpeg_hwaccel_method,
-                    "videoProcessorEffectiveHwAccelMethod": debug_meta.get("video_processor_instance_hwaccel_method"),
+                    "videoProcessorEffectiveHwAccelMethod": debug_meta.get(
+                        "video_processor_instance_hwaccel_method"
+                    ),
                     "videoDurationSeconds": debug_meta.get("video_duration_s"),
                     "topLevelItemError": top_level_error,
                     "topLevelItemErrorDetail": result_data.get("detail"),
@@ -1843,10 +1869,18 @@ def process_media_batch(
                         "sampleErrorMessage": sample_error_msg,
                     },
                     # Sampling details
-                    "frameSamplingMethod": debug_meta.get("frame_sampling_details", {}).get("method_used"),
-                    "requestedFramesForSampling": debug_meta.get("frame_sampling_details", {}).get("num_requested_frames"),
-                    "finalPilFramesReturnedForItem": debug_meta.get("num_final_pil_frames_returned"),
-                    "itemFrameExtractionErrorCount": debug_meta.get("frame_extraction_error_count"),
+                    "frameSamplingMethod": debug_meta.get(
+                        "frame_sampling_details", {}
+                    ).get("method_used"),
+                    "requestedFramesForSampling": debug_meta.get(
+                        "frame_sampling_details", {}
+                    ).get("num_requested_frames"),
+                    "finalPilFramesReturnedForItem": debug_meta.get(
+                        "num_final_pil_frames_returned"
+                    ),
+                    "itemFrameExtractionErrorCount": debug_meta.get(
+                        "frame_extraction_error_count"
+                    ),
                 }
                 frame_extraction_error_reports_for_batch.append(report_entry)
 
