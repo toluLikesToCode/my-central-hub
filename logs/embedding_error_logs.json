@@ -1,52 +1,8 @@
 [
   {
-    "itemId": "/Users/toluadegbehingbe/Library/Mobile Documents/com~apple~CloudDocs/goon/temp/video_2024_01_04.mp4",
-    "originalFilename": "video_2024_01_04.mp4",
-    "itemProcessingRequestId": "pygpu-117-bd491d_/Users/t",
-    "batchConfiguredHwAccelMethod": null,
-    "videoProcessorEffectiveHwAccelMethod": null,
-    "videoDurationSeconds": 2.43403,
-    "topLevelItemError": null,
-    "topLevelItemErrorDetail": null,
-    "hardwareAccelFailures": {
-      "count": 0,
-      "timestamps": [],
-      "errorTypeCounts": {},
-      "sampleErrorMessage": null
-    },
-    "frameSamplingMethod": "uniform_spread_with_offset",
-    "requestedFramesForSampling": 60,
-    "finalPilFramesReturnedForItem": 60,
-    "itemFrameExtractionErrorCount": 2,
-    "receivedAt": "2025-06-01T21:30:52.356Z",
-    "requestId": "1f986b57-8723-4c76-bd03-278c1bd360e6"
-  },
-  {
-    "itemId": "/Users/toluadegbehingbe/Library/Mobile Documents/com~apple~CloudDocs/goon/temp/video_2024_07_31_3424063132157840303_579947729.mp4",
-    "originalFilename": "video_2024_07_31_3424063132157840303_579947729.mp4",
-    "itemProcessingRequestId": "pygpu-117-bd491d_/Users/t",
-    "batchConfiguredHwAccelMethod": null,
-    "videoProcessorEffectiveHwAccelMethod": null,
-    "videoDurationSeconds": 1.533333,
-    "topLevelItemError": null,
-    "topLevelItemErrorDetail": null,
-    "hardwareAccelFailures": {
-      "count": 0,
-      "timestamps": [],
-      "errorTypeCounts": {},
-      "sampleErrorMessage": null
-    },
-    "frameSamplingMethod": "uniform_spread_with_offset",
-    "requestedFramesForSampling": 60,
-    "finalPilFramesReturnedForItem": 60,
-    "itemFrameExtractionErrorCount": 1,
-    "receivedAt": "2025-06-01T21:30:52.356Z",
-    "requestId": "1f986b57-8723-4c76-bd03-278c1bd360e6"
-  },
-  {
-    "itemId": "/Users/toluadegbehingbe/Library/Mobile Documents/com~apple~CloudDocs/goon/temp/video_2022_09_16_2928221247109318679_290991908.mp4",
-    "originalFilename": "video_2022_09_16_2928221247109318679_290991908.mp4",
-    "itemProcessingRequestId": "pygpu-117-bd491d_/Users/t",
+    "itemId": "/Users/toluadegbehingbe/Library/Mobile Documents/com~apple~CloudDocs/goon/temp/tiktokgoon267.mp4",
+    "originalFilename": "tiktokgoon267.mp4",
+    "itemProcessingRequestId": "pygpu-123-71b84b_/Users/t",
     "batchConfiguredHwAccelMethod": null,
     "videoProcessorEffectiveHwAccelMethod": null,
     "videoDurationSeconds": 8.2,
@@ -62,7 +18,29 @@
     "requestedFramesForSampling": 60,
     "finalPilFramesReturnedForItem": 60,
     "itemFrameExtractionErrorCount": 1,
-    "receivedAt": "2025-06-01T21:30:52.356Z",
-    "requestId": "1f986b57-8723-4c76-bd03-278c1bd360e6"
+    "receivedAt": "2025-06-01T21:43:39.753Z",
+    "requestId": "251e3642-bc39-4353-8eef-62b54d2af168"
+  },
+  {
+    "itemId": "/Users/toluadegbehingbe/Library/Mobile Documents/com~apple~CloudDocs/goon/temp/tiktokgoon272.mp4",
+    "originalFilename": "tiktokgoon272.mp4",
+    "itemProcessingRequestId": "pygpu-123-71b84b_/Users/t",
+    "batchConfiguredHwAccelMethod": null,
+    "videoProcessorEffectiveHwAccelMethod": null,
+    "videoDurationSeconds": 5.5,
+    "topLevelItemError": null,
+    "topLevelItemErrorDetail": null,
+    "hardwareAccelFailures": {
+      "count": 0,
+      "timestamps": [],
+      "errorTypeCounts": {},
+      "sampleErrorMessage": null
+    },
+    "frameSamplingMethod": "uniform_spread_with_offset",
+    "requestedFramesForSampling": 60,
+    "finalPilFramesReturnedForItem": 60,
+    "itemFrameExtractionErrorCount": 1,
+    "receivedAt": "2025-06-01T21:43:39.753Z",
+    "requestId": "251e3642-bc39-4353-8eef-62b54d2af168"
   }
 ]

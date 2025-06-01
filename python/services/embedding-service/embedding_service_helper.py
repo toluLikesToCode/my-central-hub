@@ -618,107 +618,133 @@ def _preprocess_single_item_for_batch(
         source_location = item_spec_dict["source"]
         # media_type already assigned from item_spec_dict.get("media_type")
 
-        if source_type == "url":
-            item_logger.debug(f"Downloading URL: {source_location}")
-            response = requests.get(
-                source_location, stream=True, timeout=DOWNLOAD_TIMEOUT_SECONDS
-            )
-            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
-            # Create a temporary file to store downloaded content
-            # Suffix from original filename or URL to help identify temp files if not cleaned up
-            temp_suffix_raw = item_spec_dict.get(
-                "original_filename", uuid.uuid4().hex[:8]
-            )
-            # Basic sanitization for suffix if it's from a filename that might contain problematic chars for a path
-            if "." not in os.path.basename(
-                temp_suffix_raw
-            ):  # if no extension, try to get from URL
-                ext_from_url = os.path.splitext(source_location)[1]
-                if ext_from_url and ext_from_url.lower() in IMAGE_EXTS + VIDEO_EXTS:
-                    temp_suffix_raw += ext_from_url
-            safe_suffix = "".join(
-                c if c.isalnum() or c in [".", "_", "-"] else "_"
-                for c in temp_suffix_raw
-            )[:64]
-
-            with tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=safe_suffix,
-                dir=os.environ.get("TEMP_DOWNLOAD_DIR"),
-            ) as tmp_file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp_file.write(chunk)
-                temp_file_created_path = tmp_file.name
-            item_logger.info(
-                f"Downloaded URL '{source_location}' to temp file '{temp_file_created_path}'"
-            )
-            media_source_for_pil = temp_file_created_path
-            if media_type == "video":
-                video_path_for_vid_processor = temp_file_created_path
-            item_debug_meta["downloaded_url"] = source_location
-            item_debug_meta["temp_file_path"] = temp_file_created_path
-        elif source_type == "filepath":
-            resolved_fs_path = (
-                os.path.join(python_media_root, source_location)
-                if not os.path.isabs(source_location)
-                else source_location
-            )
-            item_logger.debug(
-                f"Accessing filepath: '{resolved_fs_path}' (original source: '{source_location}')"
-            )
-            if not os.path.exists(resolved_fs_path):
-                item_logger.error(f"Filepath not found: '{resolved_fs_path}'")
-                raise FileNotFoundError(f"Filepath not found: {resolved_fs_path}")
-            media_source_for_pil = resolved_fs_path
-            if media_type == "video":
-                video_path_for_vid_processor = resolved_fs_path
-            item_debug_meta["resolved_filepath"] = resolved_fs_path
-        else:
-            item_logger.error(f"Unsupported source_type: '{source_type}'")
-            raise ValueError(f"Unsupported source_type: {source_type}")
-
-        if media_type == "image":
-            img = Image.open(media_source_for_pil).convert("RGB")
-            pil_images_for_item.append(img)
-            item_debug_meta["image_dimensions"] = f"{img.width}x{img.height}"
-            item_logger.debug(
-                f"Loaded image '{item_spec_dict.get('original_filename', item_id)}' ({img.width}x{img.height})"
-            )
-        elif media_type == "video":
-            if (
-                not video_path_for_vid_processor
-            ):  # Should be set if URL download or filepath access succeeded
-                item_logger.error(
-                    "Internal error: video_path_for_vid_processor not set for video item."
+        match source_type:
+            case "url":
+                item_logger.debug(f"Downloading URL: {source_location}")
+                response = requests.get(
+                    source_location, stream=True, timeout=DOWNLOAD_TIMEOUT_SECONDS
                 )
-                raise ValueError("video_path_for_vid_processor not set for video.")
-            num_frames = (
-                item_spec_dict.get("num_frames") or default_num_frames_for_video
-            )
-            vp = VideoProcessor(  # Using the imported VideoProcessor
-                video_path=video_path_for_vid_processor,
-                num_frames=num_frames,
-                logger=item_logger,  # Pass the item-specific logger
-                executor=video_processor_shared_executor,  # For parallel frame extraction if VP supports it
-                request_id=item_specific_request_id,  # This is the item's unique processing ID
-                duration=item_spec_dict.get(
-                    "estimated_duration_s"
-                ),  # Optional pre-fetched duration
-                original_filename_hint=item_spec_dict.get("original_filename"),
-                hwaccel_method=ffmpeg_hwaccel_method_for_videos,  # Pass batch-level HW accel method
-            )
-            frames_list_pil, video_proc_debug_meta = vp.extract_frames()
-            pil_images_for_item.extend(frames_list_pil)
-            item_debug_meta.update(
-                video_proc_debug_meta
-            )  # This includes detailed_extraction_events
-            item_debug_meta["num_extracted_frames_for_item"] = len(frames_list_pil)
-            item_logger.info(
-                f"Extracted {len(frames_list_pil)} frames for video '{item_spec_dict.get('original_filename', item_id)}'"
-            )
-        else:
-            item_logger.error(f"Unsupported media_type: '{media_type}'")
-            raise ValueError(f"Unsupported media_type: {media_type}")
+                response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+                # Create a temporary file to store downloaded content
+                # Suffix from original filename or URL to help identify temp files if not cleaned up
+                temp_suffix_raw = item_spec_dict.get(
+                    "original_filename", uuid.uuid4().hex[:8]
+                )
+                # Basic sanitization for suffix if it's from a filename that might contain problematic chars for a path
+                if "." not in os.path.basename(
+                    temp_suffix_raw
+                ):  # if no extension, try to get from URL
+                    ext_from_url = os.path.splitext(source_location)[1]
+                    if ext_from_url and ext_from_url.lower() in IMAGE_EXTS + VIDEO_EXTS:
+                        temp_suffix_raw += ext_from_url
+                safe_suffix = "".join(
+                    c if c.isalnum() or c in [".", "_", "-"] else "_"
+                    for c in temp_suffix_raw
+                )[:64]
+
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=safe_suffix,
+                    dir=os.environ.get("TEMP_DOWNLOAD_DIR"),
+                ) as tmp_file:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        tmp_file.write(chunk)
+                    temp_file_created_path = tmp_file.name
+                item_logger.info(
+                    f"Downloaded URL '{source_location}' to temp file '{temp_file_created_path}'"
+                )
+                media_source_for_pil = temp_file_created_path
+                if media_type == "video":
+                    video_path_for_vid_processor = temp_file_created_path
+                item_debug_meta["downloaded_url"] = source_location
+                item_debug_meta["temp_file_path"] = temp_file_created_path
+
+            case "filepath":
+                # Special handling for paths starting with "/public/" - treat as relative to media root
+                if source_location.startswith("/public/"):
+                    # Strip the leading "/" to make it relative to python_media_root
+                    relative_path = source_location[1:]  # Remove the leading "/"
+                    resolved_fs_path = os.path.join(python_media_root, relative_path)
+                    item_logger.debug(
+                        f"Treating '/public/' path as relative: '{resolved_fs_path}' (original source: '{source_location}')"
+                    )
+                else:
+                    # Standard path resolution logic
+                    resolved_fs_path = (
+                        os.path.join(python_media_root, source_location)
+                        if not os.path.isabs(source_location)
+                        else source_location
+                    )
+                    item_logger.debug(
+                        f"Accessing filepath: '{resolved_fs_path}' (original source: '{source_location}')"
+                    )
+
+                if not os.path.exists(resolved_fs_path):
+                    item_logger.error(f"Filepath not found: '{resolved_fs_path}'")
+                    raise FileNotFoundError(f"Filepath not found: {resolved_fs_path}")
+
+                media_source_for_pil = resolved_fs_path
+                if media_type == "video":
+                    video_path_for_vid_processor = resolved_fs_path
+                item_debug_meta["resolved_filepath"] = resolved_fs_path
+
+            case "buffer_id":
+                # TODO: Implement buffer_id source type handling to support in-memory buffers
+                # This would allow processing media that's already loaded in memory without writing to disk
+                item_logger.error(f"Buffer ID source type is not implemented yet")
+                raise NotImplementedError(
+                    f"Source type 'buffer_id' is not implemented yet"
+                )
+
+            case _:
+                item_logger.error(f"Unsupported source_type: '{source_type}'")
+                raise ValueError(f"Unsupported source_type: {source_type}")
+
+        match media_type:
+            case "image":
+                img = Image.open(media_source_for_pil).convert("RGB")
+                pil_images_for_item.append(img)
+                item_debug_meta["image_dimensions"] = f"{img.width}x{img.height}"
+                item_logger.debug(
+                    f"Loaded image '{item_spec_dict.get('original_filename', item_id)}' ({img.width}x{img.height})"
+                )
+
+            case "video":
+                if (
+                    not video_path_for_vid_processor
+                ):  # Should be set if URL download or filepath access succeeded
+                    item_logger.error(
+                        "Internal error: video_path_for_vid_processor not set for video item."
+                    )
+                    raise ValueError("video_path_for_vid_processor not set for video.")
+                num_frames = (
+                    item_spec_dict.get("num_frames") or default_num_frames_for_video
+                )
+                vp = VideoProcessor(  # Using the imported VideoProcessor
+                    video_path=video_path_for_vid_processor,
+                    num_frames=num_frames,
+                    logger=item_logger,  # Pass the item-specific logger
+                    executor=video_processor_shared_executor,  # For parallel frame extraction if VP supports it
+                    request_id=item_specific_request_id,  # This is the item's unique processing ID
+                    duration=item_spec_dict.get(
+                        "estimated_duration_s"
+                    ),  # Optional pre-fetched duration
+                    original_filename_hint=item_spec_dict.get("original_filename"),
+                    hwaccel_method=ffmpeg_hwaccel_method_for_videos,  # Pass batch-level HW accel method
+                )
+                frames_list_pil, video_proc_debug_meta = vp.extract_frames()
+                pil_images_for_item.extend(frames_list_pil)
+                item_debug_meta.update(
+                    video_proc_debug_meta
+                )  # This includes detailed_extraction_events
+                item_debug_meta["num_extracted_frames_for_item"] = len(frames_list_pil)
+                item_logger.info(
+                    f"Extracted {len(frames_list_pil)} frames for video '{item_spec_dict.get('original_filename', item_id)}'"
+                )
+
+            case _:
+                item_logger.error(f"Unsupported media_type: '{media_type}'")
+                raise ValueError(f"Unsupported media_type: {media_type}")
 
         item_debug_meta["timestamp_preprocess_end_utc"] = (
             datetime.utcnow().isoformat() + "Z"
@@ -968,11 +994,14 @@ def process_media_batch(
         )
 
     # ThreadPoolExecutor for item preprocessing (downloading, initial file ops)
-    with ThreadPoolExecutor(
-        max_workers=max_preprocess_workers, thread_name_prefix="ItemPreProc"
-    ) as item_preproc_executor, ThreadPoolExecutor(
-        max_workers=max_video_frame_workers, thread_name_prefix="VideoFrames"
-    ) as video_ffmpeg_executor:  # This executor is passed to VideoProcessor
+    with (
+        ThreadPoolExecutor(
+            max_workers=max_preprocess_workers, thread_name_prefix="ItemPreProc"
+        ) as item_preproc_executor,
+        ThreadPoolExecutor(
+            max_workers=max_video_frame_workers, thread_name_prefix="VideoFrames"
+        ) as video_ffmpeg_executor,
+    ):  # This executor is passed to VideoProcessor
 
         item_preprocess_futures_map = {
             item_preproc_executor.submit(

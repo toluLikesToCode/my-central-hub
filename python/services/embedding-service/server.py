@@ -29,7 +29,7 @@ PROCESSED_FILES_COUNT_TOTAL = 0  # Atomic counter for total items
 EMBEDDING_MODEL: Optional[emb_helper.CLIPEmbedder] = None
 EMBEDDING_DEVICE: Optional[str] = None
 PYTHON_MEDIA_ROOT = os.environ.get(
-    "PYTHON_MEDIA_ROOT", "/media"
+    "PYTHON_MEDIA_ROOT", "/public"
 )  # Mount point in Docker
 TARGET_VRAM_UTILIZATION = float(os.environ.get("TARGET_VRAM_UTILIZATION", 0.85))
 MAX_BATCH_ITEMS = int(
@@ -94,7 +94,9 @@ class MediaItem(BaseModel):
     source_type: str = Field(
         ..., description="'url', 'filepath', or 'buffer_id' (if multipart)"
     )
-    source: str = Field(..., description="URL, relative filepath, or buffer identifier")
+    source: str = Field(
+        ..., description="URL, relative filepath, buffer identifier, or filename"
+    )
     num_frames: Optional[int] = Field(
         None, description="Number of frames for video (uses default if None)"
     )
@@ -577,16 +579,19 @@ async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
 
     # Extract the Python-internal batch ID from the first result's debugMetadata, if present
     python_internal_batch_id = None
-    if complete_results_list and hasattr(complete_results_list[0], 'debug_metadata'):
-        debug_meta = getattr(complete_results_list[0], 'debug_metadata', None)
+    if complete_results_list and hasattr(complete_results_list[0], "debug_metadata"):
+        debug_meta = getattr(complete_results_list[0], "debug_metadata", None)
         if not debug_meta:
-            debug_meta = getattr(complete_results_list[0], 'debugMetadata', None)
+            debug_meta = getattr(complete_results_list[0], "debugMetadata", None)
         if debug_meta and isinstance(debug_meta, dict):
-            python_internal_batch_id = debug_meta.get('batch_id') or debug_meta.get('overallBatchRequestId')
+            python_internal_batch_id = debug_meta.get("batch_id") or debug_meta.get(
+                "overallBatchRequestId"
+            )
 
     return BatchEmbeddingResponse(
         results=complete_results_list,
-        batch_id=python_internal_batch_id or client_request_id,  # Use Python-internal batch_id if available
+        batch_id=python_internal_batch_id
+        or client_request_id,  # Use Python-internal batch_id if available
         processed_by_request_id=client_request_id,
     )
 
