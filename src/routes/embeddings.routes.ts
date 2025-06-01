@@ -12,4 +12,5 @@ if (config.features.embeddingService) {
   router.post('/api/embeddings', embeddingsController.handleEmbeddingsRequest);
   router.any('/api/embeddings/shutdown', embeddingsController.handleShutdownRequest);
   router.get('/api/embeddings/status', embeddingsController.handleStatusRequest);
+  router.post('/api/embeddings/error-logs', embeddingsController.handleErrorLogsRequest); // New endpoint for error logs
 }

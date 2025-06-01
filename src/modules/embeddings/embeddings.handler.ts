@@ -427,4 +427,134 @@ export const embeddingsController = {
       );
     }
   },
+
+  /**
+   * Handles POST requests to /api/embeddings/error-logs
+   * Validates, truncates, logs error logs to a new file, and returns a JSON response.
+   */
+  async handleErrorLogsRequest(req: IncomingRequest, sock: Socket): Promise<void> {
+    const requestId = req.ctx?.requestId?.toString() || randomUUID().toString();
+    const context = embeddingsLogger.createContext({
+      requestId,
+      source: 'error-logs',
+    });
+
+    if (req.method !== 'POST') {
+      embeddingsLogger.warn(
+        EmbeddingComponent.HANDLER,
+        `Method not allowed: ${req.method} for error-logs endpoint`,
+        context,
+      );
+      embeddingsLogger.removeContext(requestId);
+      return sendWithContext(
+        req,
+        sock,
+        405,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({ error: 'Method Not Allowed, use POST' }),
+      );
+    }
+
+    if (!req.body || req.body.length === 0) {
+      embeddingsLogger.warn(EmbeddingComponent.HANDLER, 'Error log request body is empty', context);
+      embeddingsLogger.removeContext(requestId);
+      return sendWithContext(
+        req,
+        sock,
+        400,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({ error: 'Request body is empty' }),
+      );
+    }
+
+    let logs: any[] = [];
+    try {
+      logs = JSON.parse(req.body.toString('utf-8'));
+      if (!Array.isArray(logs)) throw new Error('Request body must be a JSON array');
+    } catch (err: any) {
+      embeddingsLogger.error(
+        EmbeddingComponent.HANDLER,
+        'Failed to parse error log request body',
+        context,
+        { error: err.message },
+      );
+      embeddingsLogger.removeContext(requestId);
+      return sendWithContext(
+        req,
+        sock,
+        400,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({ error: 'Invalid JSON or not an array', detail: err.message }),
+      );
+    }
+
+    // Truncate long string fields in each log object
+    const TRUNCATE_LIMIT = 1024;
+    function truncateStrings(obj: any): any {
+      if (typeof obj === 'string' && obj.length > TRUNCATE_LIMIT) {
+        return obj.slice(0, TRUNCATE_LIMIT) + '... (truncated)';
+      } else if (Array.isArray(obj)) {
+        return obj.map(truncateStrings);
+      } else if (obj && typeof obj === 'object') {
+        const out: any = {};
+        for (const k in obj) {
+          if (Object.prototype.hasOwnProperty.call(obj, k)) {
+            out[k] = truncateStrings(obj[k]);
+          }
+        }
+        return out;
+      }
+      return obj;
+    }
+    const processedLogs = logs.map(truncateStrings);
+
+    // Write to a dedicated error log file (append as JSONL)
+    // Only client logs should be written here: do not log server-side errors or internal events
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    const logFilePath = path.resolve(process.cwd(), 'logs/embedding_error_logs.jsonl');
+    try {
+      await fs.mkdir(path.dirname(logFilePath), { recursive: true });
+      // Overwrite the file with only the new client logs (do not append)
+      // If you want to keep only the latest batch, use writeFile instead of appendFile
+      const lines = processedLogs.map((entry) =>
+        JSON.stringify({ ...entry, receivedAt: new Date().toISOString(), requestId }),
+      );
+      await fs.writeFile(logFilePath, lines.join('\n') + '\n', 'utf-8');
+    } catch (err: any) {
+      embeddingsLogger.error(
+        EmbeddingComponent.HANDLER,
+        'Failed to write error logs to file',
+        context,
+        { error: err.message },
+      );
+      embeddingsLogger.removeContext(requestId);
+      return sendWithContext(
+        req,
+        sock,
+        500,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({ error: 'Failed to write error logs', detail: err.message }),
+      );
+    }
+
+    embeddingsLogger.info(
+      EmbeddingComponent.HANDLER,
+      `Received and logged ${processedLogs.length} error log(s)`,
+      context,
+      { count: processedLogs.length },
+    );
+    embeddingsLogger.removeContext(requestId);
+    return sendWithContext(
+      req,
+      sock,
+      201,
+      { 'Content-Type': 'application/json' },
+      JSON.stringify({
+        status: 'received',
+        message: 'Error logs processed successfully.',
+        count: processedLogs.length,
+      }),
+    );
+  },
 };

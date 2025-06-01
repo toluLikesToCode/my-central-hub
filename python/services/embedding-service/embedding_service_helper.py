@@ -20,6 +20,7 @@ Features:
     • JSON output format for embedding and debug metadata, handled by FastAPI server.
     • Structured logging via EmbeddingLogger.
     • Modular design with classes for video processing and CLIP inference.
+    • Reporting of detailed frame extraction failures to a remote endpoint.
 """
 
 import logging
@@ -40,7 +41,7 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import (
     nullcontext,
-)  # Not used in current version but good for conditional context mgmt
+)
 import re
 import math
 import errno
@@ -49,6 +50,11 @@ import open_clip  # type: ignore
 import cv2  # type: ignore # Though unused, kept as per original file structure
 
 from dotenv import load_dotenv  # type: ignore
+
+# For native HTTP POST for error logging
+import http.client
+import urllib.parse
+import socket
 
 # Ensure .env is loaded at the very top
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -83,6 +89,8 @@ VIDEO_EXTS = [
     ".wmv",
 ]  # Common video extensions
 
+ERROR_LOG_ENDPOINT_URL = "http://192.168.1.145:8080/api/embeddings/error-logs"
+
 
 # --- Logger ---
 class EmbeddingLogger:
@@ -93,19 +101,14 @@ class EmbeddingLogger:
     ):
         self.request_id = request_id or self._generate_request_id()
         self.component_name = component_name
-        self.file_handler: Optional[logging.FileHandler] = (
-            None  # Initialize for clarity
-        )
+        self.file_handler: Optional[logging.FileHandler] = None
         self._setup_logger()
 
     def _generate_request_id(self) -> str:
         return str(uuid.uuid4())
 
     def _setup_logger(self):
-        # Correct path assuming this file is /app/embedding_service_helper.py
-        # and logs go into /app/logs/
         log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-
         try:
             os.makedirs(log_dir, exist_ok=True)
             log_file_path = os.path.join(log_dir, "python_embeddings_service.log")
@@ -121,27 +124,20 @@ class EmbeddingLogger:
             sys.stderr.write(
                 f"Warning: Error creating log directory {log_dir} or file handler: {e}. File logging will be disabled.\n"
             )
-            self.file_handler = None  # Ensure it's None if setup fails
+            self.file_handler = None
 
         self.console_handler = logging.StreamHandler(sys.stderr)
-        # Ensure %(request_id)s can be interpolated if passed in extra
         self.console_handler.setFormatter(
             logging.Formatter(
                 f"{PY_LOG_PREFIX} %(asctime)s %(levelname)s [{self.component_name}] (%(request_id)s): %(message)s",
                 "%Y-%m-%d %H:%M:%S",
             )
         )
-
-        # Create a unique logger name to avoid conflicts if this class is instantiated multiple times
-        # or if other modules use logging.getLogger with the same name.
         logger_name = f"embedding_python_{self.component_name}_{self.request_id[:8]}"
         self.logger = logging.getLogger(logger_name)
         self.logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
-
-        # Clear any existing handlers from a previous logger with the same name if reconfiguring
         if self.logger.handlers:
             self.logger.handlers.clear()
-
         self.logger.addHandler(self.console_handler)
         if self.file_handler:
             self.logger.addHandler(self.file_handler)
@@ -154,15 +150,12 @@ class EmbeddingLogger:
         extra: Optional[Dict[str, Any]] = None,
         exc_info: Union[None, bool, BaseException] = None,
     ):
-        # Ensure 'request_id' and 'component' are always in the LogRecord's dictionary for formatters
         final_extra = {"request_id": self.request_id, "component": self.component_name}
         if extra:
             final_extra.update(extra)
-
         actual_exc_info = exc_info if exc_info is not None else False
         if isinstance(exc_info, BaseException):
             actual_exc_info = True
-
         self.logger.log(level, message, extra=final_extra, exc_info=actual_exc_info)
 
     def info(self, message, extra=None):
@@ -227,6 +220,7 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 
 
 def compute_entropy(image: Image.Image) -> float:
+    # ... (omitted for brevity, same as original)
     grayscale = image.convert("L")
     histogram = grayscale.histogram()
     total_pixels = sum(histogram)
@@ -250,7 +244,7 @@ class VideoProcessor:
         request_id: Optional[str] = None,
         duration: Optional[float] = None,
         original_filename_hint: Optional[str] = None,
-        hwaccel_method: Optional[str] = None,  # Added for HW acceleration
+        hwaccel_method: Optional[str] = None,
     ):
         if not video_path:
             raise ValueError("VideoProcessor requires a valid video_path.")
@@ -262,42 +256,71 @@ class VideoProcessor:
         self.logger.set_component_name(
             f"{base_component}-{request_id[:8] if request_id else uuid.uuid4().hex[:8]}"
         )
-        if request_id:
+        if request_id:  # This request_id is the item_specific_request_id
             self.logger.set_request_id(request_id)
+            self.item_processing_request_id = request_id
+        else:
+            self.item_processing_request_id = self.logger.request_id
 
         self.executor = executor
-        self.hwaccel_method = hwaccel_method
+        self.hwaccel_method = (
+            hwaccel_method  # This is the batch-level configured HW accel method
+        )
+        self.extraction_events: List[Dict[str, Any]] = []
+
+        self._add_event(
+            "initialization",
+            details={
+                "configured_hwaccel_method": self.hwaccel_method,
+                "video_path": self.video_path,
+                "num_frames_requested": self.num_frames,
+            },
+        )
+
         if self.hwaccel_method:
             self.logger.info(
                 f"VideoProcessor for '{self.video_path}' will attempt to use HWAccel: {self.hwaccel_method}"
             )
 
-        self.duration = duration if duration is not None else self._get_duration()
+        self.duration = (
+            duration if duration is not None else self._get_duration()
+        )  # This will add duration events
+
         if self.duration is None or self.duration <= 0:
+            err_msg = f"Could not determine video duration or duration is invalid for '{self.video_path}'."
             self.logger.error(
-                f"Video duration error for '{self.video_path}'",
+                err_msg,
                 extra={"duration": self.duration, "video_path": self.video_path},
             )
-            raise ValueError(
-                f"Could not determine video duration or duration is invalid for '{self.video_path}'."
-            )
-        # self._is_temp_file attribute was not used, so removed for clarity.
+            # Event for this already added by _get_duration if it fails
+            raise ValueError(err_msg)
+
+    def _add_event(self, event_type: str, details: Optional[Dict[str, Any]] = None):
+        event = {
+            "event_type": event_type,
+            "timestamp_iso": datetime.utcnow().isoformat() + "Z",
+            "details": details or {},
+        }
+        self.extraction_events.append(event)
+        # Optionally log high-priority events through the logger as well
+        # self.logger.debug(f"VideoEvent: {event_type}", extra=details)
 
     def _get_duration(self) -> float:
         start_time = time.time()
         self.logger.debug(f"Getting duration for video: '{self.video_path}'")
+        self._add_event("duration_check_start", {"video_path": self.video_path})
+        command = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            "-i",
+            self.video_path,
+        ]
         try:
-            command = [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                "-i",
-                self.video_path,
-            ]
             result = subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
@@ -309,15 +332,26 @@ class VideoProcessor:
             duration_str = result.stdout.strip()
             if not duration_str or duration_str == "N/A":
                 err_msg = f"ffprobe returned invalid duration '{duration_str}' for '{self.video_path}'"
+                stderr_output = result.stderr.strip() if result.stderr else "N/A"
                 self.logger.error(
                     err_msg,
                     extra={
                         "stdout": result.stdout,
-                        "stderr": result.stderr,
+                        "stderr": stderr_output,
                         "video_path": self.video_path,
                     },
                 )
+                self._add_event(
+                    "duration_check_failure",
+                    {
+                        "error": err_msg,
+                        "stdout": result.stdout,
+                        "stderr": stderr_output,
+                        "command": " ".join(command),
+                    },
+                )
                 raise RuntimeError(err_msg)
+
             duration = float(duration_str)
             self.logger.debug(
                 f"Video duration: {duration:.2f}s for '{self.video_path}'",
@@ -326,37 +360,56 @@ class VideoProcessor:
                     "time_taken_ms": (time.time() - start_time) * 1000,
                 },
             )
+            self._add_event(
+                "duration_check_success",
+                {
+                    "duration_seconds": duration,
+                    "time_taken_ms": (time.time() - start_time) * 1000,
+                },
+            )
             return duration
-        except subprocess.TimeoutExpired:
+
+        except subprocess.TimeoutExpired as e_timeout:
+            err_msg = f"ffprobe timeout getting duration for '{self.video_path}'"
             self.logger.error(
-                f"ffprobe timeout getting duration for '{self.video_path}'",
-                error=None,
-                extra={"video_path": self.video_path},
+                err_msg,
+                error=e_timeout,
+                extra={"video_path": self.video_path, "command": " ".join(command)},
             )
-            raise RuntimeError(
-                f"ffprobe timeout getting duration for '{self.video_path}'"
+            self._add_event(
+                "duration_check_failure",
+                {
+                    "error": "TimeoutExpired",
+                    "message": err_msg,
+                    "command": " ".join(command),
+                },
             )
+            raise RuntimeError(err_msg) from e_timeout
         except Exception as e:
+            err_msg = f"Failed to get video duration for '{self.video_path}': {e}"
             self.logger.error(
-                f"Failed to get video duration for '{self.video_path}': {e}",
+                err_msg,
                 error=e,
-                extra={"video_path": self.video_path},
+                extra={"video_path": self.video_path, "command": " ".join(command)},
             )
-            raise RuntimeError(
-                f"Failed to get video duration for '{self.video_path}': {e}"
-            ) from e
+            self._add_event(
+                "duration_check_failure",
+                {
+                    "error": type(e).__name__,
+                    "message": str(e),
+                    "command": " ".join(command),
+                },
+            )
+            raise RuntimeError(err_msg) from e
 
     def _extract_frame_hw_accelerated(self, time_sec: float) -> Image.Image:
-        if not self.hwaccel_method:  # Should not be called if None, but as a safeguard
-            raise ValueError(
-                "HWAccel method not specified for hardware accelerated extraction."
-            )
+        if not self.hwaccel_method:
+            raise ValueError("HWAccel method not specified.")
 
         self.logger.debug(
-            f"Attempting HW accelerated frame extraction (method: {self.hwaccel_method}) at {time_sec:.2f}s from '{self.video_path}'"
+            f"Attempting HW accelerated frame extraction (method: {self.hwaccel_method}) at {time_sec:.2f}s"
         )
-
-        command = [
+        cmd_base = [
             "ffmpeg",
             "-y",
             "-loglevel",
@@ -364,32 +417,26 @@ class VideoProcessor:
             "-hwaccel",
             self.hwaccel_method,
         ]
-
-        # For many hardware acceleration methods, explicitly setting hwaccel_output_format
-        # to the method name itself ensures frames are kept in hardware memory in their
-        # native format, which is often required or optimal for the hwdownload filter.
         if self.hwaccel_method in ["cuda", "vaapi", "qsv", "vulkan", "amf", "opencl"]:
-            command.extend(["-hwaccel_output_format", self.hwaccel_method])
-
-        command.extend(
-            [
-                "-ss",
-                str(time_sec),
-                "-i",
-                self.video_path,
-                "-vf",
-                "hwdownload,format=rgb24",  # Crucial: download from HW surface & convert to RGB
-                "-vframes",
-                "1",
-                "-f",
-                "image2pipe",
-                "-c:v",
-                "mjpeg",  # Output as MJPEG to pipe
-                "-q:v",
-                "2",  # High quality MJPEG
-                "-",  # Output to stdout
-            ]
-        )
+            cmd_base.extend(["-hwaccel_output_format", self.hwaccel_method])
+        command = cmd_base + [
+            "-ss",
+            str(time_sec),
+            "-i",
+            self.video_path,
+            "-vf",
+            "hwdownload,format=rgb24",
+            "-vframes",
+            "1",
+            "-f",
+            "image2pipe",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-",
+        ]
+        cmd_str_preview = " ".join(command[:10]) + "..."  # For brevity in events
 
         try:
             result = subprocess.run(
@@ -397,34 +444,35 @@ class VideoProcessor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True,
-                timeout=25,  # Slightly longer timeout for HW init
+                timeout=25,
             )
             if not result.stdout:
-                err_msg = (
+                stderr_output = (
                     result.stderr.decode("utf-8", errors="ignore").strip()
                     if result.stderr
                     else "No stderr"
                 )
+                err_msg = f"No stdout. Stderr: {stderr_output}"
                 self.logger.error(
-                    f"ffmpeg (HWAccel: {self.hwaccel_method}) failed for '{self.video_path}' at {time_sec:.2f}s: No stdout. Stderr: {err_msg}",
+                    f"ffmpeg (HWAccel: {self.hwaccel_method}) failed for '{self.video_path}' at {time_sec:.2f}s: {err_msg}",
                     extra={
                         "time_sec": time_sec,
-                        "stderr": err_msg,
-                        "command": " ".join(command),
+                        "stderr": stderr_output,
+                        "command_preview": cmd_str_preview,
                     },
                 )
                 raise RuntimeError(
-                    f"No frame data from HWAccel ({self.hwaccel_method}). Stderr: {err_msg}"
+                    f"No frame data from HWAccel ({self.hwaccel_method}). Stderr: {stderr_output}"
                 )
             return Image.open(io.BytesIO(result.stdout)).convert("RGB")
         except subprocess.TimeoutExpired as e_timeout:
             self.logger.error(
-                f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout for '{self.video_path}' at {time_sec:.2f}s",
+                f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout at {time_sec:.2f}s",
                 error=e_timeout,
-                extra={"time_sec": time_sec, "command": " ".join(command)},
+                extra={"time_sec": time_sec, "command_preview": cmd_str_preview},
             )
             raise RuntimeError(
-                f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout extracting frame at {time_sec:.2f}s"
+                f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout extracting frame at {time_sec:.2f}s. Command: {cmd_str_preview}"
             ) from e_timeout
         except subprocess.CalledProcessError as e_call:
             stderr_output = (
@@ -433,32 +481,30 @@ class VideoProcessor:
                 else "N/A"
             )
             self.logger.error(
-                f"ffmpeg (HWAccel: {self.hwaccel_method}) returned non-zero exit code {e_call.returncode} for '{self.video_path}' at {time_sec:.2f}s. Stderr: {stderr_output}",
+                f"ffmpeg (HWAccel: {self.hwaccel_method}) error code {e_call.returncode} at {time_sec:.2f}s. Stderr: {stderr_output}",
                 error=e_call,
                 extra={
                     "time_sec": time_sec,
                     "return_code": e_call.returncode,
                     "stderr": stderr_output,
-                    "command": " ".join(command),
+                    "command_preview": cmd_str_preview,
                 },
             )
             raise RuntimeError(
-                f"HWAccel ({self.hwaccel_method}) frame extraction failed with exit code {e_call.returncode} at {time_sec:.2f}s. Stderr: {stderr_output}"
+                f"HWAccel ({self.hwaccel_method}) frame extraction failed (code {e_call.returncode}) at {time_sec:.2f}s. Stderr: {stderr_output}. Command: {cmd_str_preview}"
             ) from e_call
         except Exception as e_generic:
             self.logger.error(
-                f"Frame extraction (HWAccel: {self.hwaccel_method}) failed for '{self.video_path}' at {time_sec:.2f}s: {e_generic}",
+                f"Frame extraction (HWAccel: {self.hwaccel_method}) failed at {time_sec:.2f}s: {e_generic}",
                 error=e_generic,
-                extra={"time_sec": time_sec, "command": " ".join(command)},
+                extra={"time_sec": time_sec, "command_preview": cmd_str_preview},
             )
             raise RuntimeError(
-                f"Failed to extract frame at {time_sec:.2f}s using HWAccel ({self.hwaccel_method}): {e_generic}"
+                f"Failed to extract frame at {time_sec:.2f}s using HWAccel ({self.hwaccel_method}): {e_generic}. Command: {cmd_str_preview}"
             ) from e_generic
 
     def _extract_frame_software(self, time_sec: float) -> Image.Image:
-        self.logger.debug(
-            f"Extracting frame (software) at {time_sec:.2f}s from '{self.video_path}'"
-        )
+        self.logger.debug(f"Extracting frame (software) at {time_sec:.2f}s")
         command = [
             "ffmpeg",
             "-y",
@@ -473,11 +519,12 @@ class VideoProcessor:
             "-f",
             "image2pipe",
             "-c:v",
-            "mjpeg",  # Use modern -c:v
+            "mjpeg",
             "-q:v",
             "2",
             "-",
         ]
+        cmd_str_preview = " ".join(command[:8]) + "..."
         try:
             result = subprocess.run(
                 command,
@@ -487,31 +534,32 @@ class VideoProcessor:
                 timeout=20,
             )
             if not result.stdout:
-                err_msg = (
+                stderr_output = (
                     result.stderr.decode("utf-8", errors="ignore").strip()
                     if result.stderr
                     else "No stderr"
                 )
+                err_msg = f"No stdout. Stderr: {stderr_output}"
                 self.logger.error(
-                    f"ffmpeg (software) failed for '{self.video_path}' at {time_sec:.2f}s: No stdout. Stderr: {err_msg}",
+                    f"ffmpeg (software) failed for '{self.video_path}' at {time_sec:.2f}s: {err_msg}",
                     extra={
                         "time_sec": time_sec,
-                        "stderr": err_msg,
-                        "command": " ".join(command),
+                        "stderr": stderr_output,
+                        "command_preview": cmd_str_preview,
                     },
                 )
                 raise RuntimeError(
-                    f"No frame data from software mjpeg. Stderr: {err_msg}"
+                    f"No frame data from software mjpeg. Stderr: {stderr_output}"
                 )
             return Image.open(io.BytesIO(result.stdout)).convert("RGB")
         except subprocess.TimeoutExpired as e_timeout:
             self.logger.error(
-                f"ffmpeg (software) timeout for '{self.video_path}' at {time_sec:.2f}s",
+                f"ffmpeg (software) timeout at {time_sec:.2f}s",
                 error=e_timeout,
-                extra={"time_sec": time_sec, "command": " ".join(command)},
+                extra={"time_sec": time_sec, "command_preview": cmd_str_preview},
             )
             raise RuntimeError(
-                f"ffmpeg (software) timeout extracting frame at {time_sec:.2f}s"
+                f"ffmpeg (software) timeout extracting frame at {time_sec:.2f}s. Command: {cmd_str_preview}"
             ) from e_timeout
         except subprocess.CalledProcessError as e_call:
             stderr_output = (
@@ -520,63 +568,106 @@ class VideoProcessor:
                 else "N/A"
             )
             self.logger.error(
-                f"ffmpeg (software) returned non-zero exit code {e_call.returncode} for '{self.video_path}' at {time_sec:.2f}s. Stderr: {stderr_output}",
+                f"ffmpeg (software) error code {e_call.returncode} at {time_sec:.2f}s. Stderr: {stderr_output}",
                 error=e_call,
                 extra={
                     "time_sec": time_sec,
                     "return_code": e_call.returncode,
                     "stderr": stderr_output,
-                    "command": " ".join(command),
+                    "command_preview": cmd_str_preview,
                 },
             )
             raise RuntimeError(
-                f"Software frame extraction failed with exit code {e_call.returncode} at {time_sec:.2f}s. Stderr: {stderr_output}"
+                f"Software frame extraction failed (code {e_call.returncode}) at {time_sec:.2f}s. Stderr: {stderr_output}. Command: {cmd_str_preview}"
             ) from e_call
         except Exception as e_generic:
             self.logger.error(
-                f"Frame extraction (software) failed for '{self.video_path}' at {time_sec:.2f}s: {e_generic}",
+                f"Frame extraction (software) failed at {time_sec:.2f}s: {e_generic}",
                 error=e_generic,
-                extra={"time_sec": time_sec, "command": " ".join(command)},
+                extra={"time_sec": time_sec, "command_preview": cmd_str_preview},
             )
             raise RuntimeError(
-                f"Failed to extract frame at {time_sec:.2f}s using software mjpeg: {e_generic}"
+                f"Failed to extract frame at {time_sec:.2f}s using software mjpeg: {e_generic}. Command: {cmd_str_preview}"
             ) from e_generic
 
-    def extract_frame(self, time_sec: float) -> Image.Image:
-        """
-        Extracts a single frame from the video.
-        Tries hardware acceleration if configured, otherwise falls back to software.
-        """
+    def extract_frame(
+        self, time_sec: float
+    ) -> Tuple[Optional[Image.Image], List[Dict[str, Any]]]:
+        frame_events: List[Dict[str, Any]] = []
+        frame_pil = None
+
+        def add_frame_event(event_type: str, details: Optional[Dict[str, Any]] = None):
+            merged_details = {"video_timestamp_sec": time_sec}
+            if details:
+                merged_details.update(details)
+            event = {
+                "event_type": event_type,
+                "timestamp_iso": datetime.utcnow().isoformat() + "Z",
+                "details": merged_details,
+            }
+            frame_events.append(event)
+
         if self.hwaccel_method:
+            add_frame_event("hw_extraction_attempt", {"hw_method": self.hwaccel_method})
             try:
-                self.logger.debug(
-                    f"Attempting HW accel ({self.hwaccel_method}) for frame at {time_sec:.2f}s from '{self.video_path}'"
+                frame_pil = self._extract_frame_hw_accelerated(time_sec)
+                add_frame_event(
+                    "hw_extraction_success", {"hw_method": self.hwaccel_method}
                 )
-                return self._extract_frame_hw_accelerated(time_sec)
             except Exception as e_hw:
                 self.logger.warning(
-                    f"HW accelerated ({self.hwaccel_method}) frame extraction failed for '{self.video_path}' at {time_sec:.2f}s: {e_hw}. Falling back to software.",
-                    extra={
-                        "time_sec": time_sec,
+                    f"HW accel ({self.hwaccel_method}) failed for ts {time_sec:.2f}s: {e_hw}. Falling back.",
+                    extra={"time_sec": time_sec, "error_type": type(e_hw).__name__},
+                )
+                add_frame_event(
+                    "hw_extraction_failed_fallback_to_sw",
+                    {
+                        "hw_method": self.hwaccel_method,
                         "error_type": type(e_hw).__name__,
                         "error_message": str(e_hw),
                     },
                 )
-                # Fall through to software extraction
+                # Fall through to software
         else:
-            self.logger.debug(
-                f"No HWAccel method configured. Using software extraction for frame at {time_sec:.2f}s from '{self.video_path}'"
-            )
+            add_frame_event("hw_accel_not_configured_using_sw")
 
-        return self._extract_frame_software(time_sec)
+        if not frame_pil:  # If HW not configured, or HW failed
+            reason_for_sw = (
+                "direct_attempt_no_hw_config"
+                if not self.hwaccel_method
+                else "fallback_after_hw_failure"
+            )
+            add_frame_event("sw_extraction_attempt", {"reason": reason_for_sw})
+            try:
+                frame_pil = self._extract_frame_software(time_sec)
+                add_frame_event("sw_extraction_success", {"reason": reason_for_sw})
+            except Exception as e_sw:
+                self.logger.error(
+                    f"Software extraction failed for ts {time_sec:.2f}s (reason: {reason_for_sw}): {e_sw}",
+                    error=e_sw,
+                    extra={"time_sec": time_sec},
+                )
+                add_frame_event(
+                    "sw_extraction_failed",
+                    {
+                        "reason": reason_for_sw,
+                        "error_type": type(e_sw).__name__,
+                        "error_message": str(e_sw),
+                    },
+                )
+                # Frame_pil remains None
+
+        return frame_pil, frame_events
 
     def get_advanced_sample_times(self) -> Tuple[List[float], Dict[str, Any]]:
+        # ... (omitted for brevity, same as original logic)
+        # This method returns debug_metadata, which should be incorporated into the overall item debug meta
         self.logger.debug(
             f"Calculating sample times for '{self.video_path}' (duration: {self.duration:.2f}s, frames: {self.num_frames})"
         )
         debug_metadata: Dict[str, Any] = {
             "num_requested_frames": self.num_frames,
-            "video_duration_s": self.duration,
+            "video_duration_s": self.duration,  # Already known by VideoProcessor instance
         }
         method_used = "uniform_sampling_default"
 
@@ -586,7 +677,7 @@ class VideoProcessor:
                 "reason": "num_frames is zero or negative",
                 **debug_metadata,
             }
-        if self.duration <= 0:
+        if self.duration <= 0:  # Should have been caught in init
             return [], {
                 "method_used": "none",
                 "reason": "video duration is zero or negative",
@@ -599,47 +690,33 @@ class VideoProcessor:
 
         selected_times: List[float]
         if self.num_frames == 1:
-            selected_times = [
-                start_offset + effective_duration / 2.0
-            ]  # Centered in effective duration
-            # Ensure it's not exactly 0 if duration is very short leading to effective_duration being 0
+            selected_times = [start_offset + effective_duration / 2.0]
             if effective_duration <= 0:
                 selected_times = [self.duration / 2.0]
-
             method_used = "single_middle_frame"
         elif effective_duration <= 0.1:
-            # If effective duration is too small, take the middle frame and duplicate
             middle_time = self.duration / 2.0
             selected_times = [middle_time] * self.num_frames
             method_used = "middle_frame_duplicated_short_video"
-
-        elif (
-            self.num_frames > 1
-        ):  # Spread self.num_frames evenly across effective_duration
+        elif self.num_frames > 1:
             selected_times = [
                 start_offset + (i * effective_duration / (self.num_frames - 1))
                 for i in range(self.num_frames)
             ]
             method_used = "uniform_spread_with_offset"
-        else:  # Should not happen if num_frames == 1 is handled
+        else:
             selected_times = [self.duration / 2.0]
             method_used = "fallback_single_middle_frame"
 
-        # Ensure timestamps are within valid range and distinct enough (simplified)
-        # Clamp times strictly within [0, duration - a_tiny_bit_for_ffmpeg]
-        # ffmpeg -ss can be problematic at the exact end of the video.
         epsilon = 0.001
         selected_times = sorted(
             list(set(max(0.0, min(t, self.duration - epsilon)) for t in selected_times))
         )
-        # If clamping resulted in an empty list (e.g., duration was epsilon), provide at least one frame.
         if not selected_times and self.duration > 0:
             selected_times = [max(0.0, self.duration / 2.0 - epsilon)]
 
         debug_metadata["method_used"] = method_used
-        debug_metadata["candidate_timestamps"] = list(
-            selected_times
-        )  # Log before potential modifications
+        debug_metadata["candidate_timestamps"] = list(selected_times)
         debug_metadata["effective_sampling_duration_s"] = effective_duration
         debug_metadata["start_offset_s"] = start_offset
 
@@ -657,8 +734,14 @@ class VideoProcessor:
         extracted_frames_pil: List[Image.Image] = []
 
         timestamps, frame_sampling_debug_meta = self.get_advanced_sample_times()
+        # self.extraction_events will be populated by calls to extract_frame and other methods.
+        # We add frame_sampling_debug_meta to the final debug output.
+
         final_debug_meta: Dict[str, Any] = {
-            "frame_sampling_details": frame_sampling_debug_meta
+            "frame_sampling_details": frame_sampling_debug_meta,
+            "video_processor_instance_hwaccel_method": self.hwaccel_method,  # Effective HW method for this VP instance
+            "video_duration_s": self.duration,
+            "item_processing_request_id": self.item_processing_request_id,
         }
         final_debug_meta["num_timestamps_from_sampler"] = len(timestamps)
 
@@ -667,6 +750,8 @@ class VideoProcessor:
                 f"No timestamps returned by sampler for '{self.video_path}'.",
                 extra=final_debug_meta,
             )
+            self._add_event("no_timestamps_from_sampler_error", final_debug_meta)
+            final_debug_meta["detailed_extraction_events"] = self.extraction_events
             return [], {
                 "error": "No timestamps for frame extraction",
                 **final_debug_meta,
@@ -682,6 +767,10 @@ class VideoProcessor:
             self.executor and len(actual_timestamps_to_extract) > 1
         )
 
+        frame_extraction_attempt_details_list: List[Dict] = (
+            []
+        )  # To store events from each frame attempt
+
         if use_parallel_extraction and self.executor:
             future_to_ts_map = {
                 self.executor.submit(self.extract_frame, ts): ts
@@ -690,55 +779,108 @@ class VideoProcessor:
             for future in concurrent.futures.as_completed(future_to_ts_map):
                 ts = future_to_ts_map[future]
                 try:
-                    frame_pil = future.result()
-                    extracted_frames_pil.append(frame_pil)
-                except Exception as e_frame:
+                    frame_pil, frame_attempt_events = future.result()
+                    frame_extraction_attempt_details_list.extend(frame_attempt_events)
+                    if frame_pil:
+                        extracted_frames_pil.append(frame_pil)
+                    else:  # If frame_pil is None but no exception (e.g. SW also failed)
+                        extraction_errors_count += 1
+                        # frame_attempt_events should contain the failure details
+                except (
+                    Exception
+                ) as e_frame:  # Should be rare if extract_frame catches its own errors
                     extraction_errors_count += 1
                     self.logger.error(
-                        f"Parallel extract_frame failed for ts={ts:.2f}s: {e_frame}",
+                        f"Parallel extract_frame wrapper failed for ts={ts:.2f}s: {e_frame}",
                         error=e_frame,
                         extra={"timestamp": ts},
                     )
-        else:
+                    # Add a generic event if future.result() itself fails
+                    generic_failure_event = {
+                        "event_type": "parallel_extraction_future_error",
+                        "timestamp_iso": datetime.utcnow().isoformat() + "Z",
+                        "details": {
+                            "video_timestamp_sec": ts,
+                            "error_type": type(e_frame).__name__,
+                            "error_message": str(e_frame),
+                        },
+                    }
+                    frame_extraction_attempt_details_list.append(generic_failure_event)
+        else:  # Sequential extraction
             for ts in actual_timestamps_to_extract:
                 try:
-                    frame_pil = self.extract_frame(ts)
-                    extracted_frames_pil.append(frame_pil)
-                except Exception as e_frame:
+                    frame_pil, frame_attempt_events = self.extract_frame(ts)
+                    frame_extraction_attempt_details_list.extend(frame_attempt_events)
+                    if frame_pil:
+                        extracted_frames_pil.append(frame_pil)
+                    else:
+                        extraction_errors_count += 1
+                except Exception as e_frame:  # Should be rare
                     extraction_errors_count += 1
                     self.logger.error(
-                        f"Sequential extract_frame failed for ts={ts:.2f}s: {e_frame}",
+                        f"Sequential extract_frame wrapper failed for ts={ts:.2f}s: {e_frame}",
                         error=e_frame,
                         extra={"timestamp": ts},
                     )
+                    generic_failure_event = {
+                        "event_type": "sequential_extraction_wrapper_error",
+                        "timestamp_iso": datetime.utcnow().isoformat() + "Z",
+                        "details": {
+                            "video_timestamp_sec": ts,
+                            "error_type": type(e_frame).__name__,
+                            "error_message": str(e_frame),
+                        },
+                    }
+                    frame_extraction_attempt_details_list.append(generic_failure_event)
+
+        self.extraction_events.extend(
+            frame_extraction_attempt_details_list
+        )  # Add all frame-specific events
 
         if extraction_errors_count > 0:
             final_debug_meta["frame_extraction_error_count"] = extraction_errors_count
+            # The specific errors are in self.extraction_events
 
         if not extracted_frames_pil and len(actual_timestamps_to_extract) > 0:
             err_msg = f"All {len(actual_timestamps_to_extract)} frame extractions failed for '{self.video_path}'."
             self.logger.error(err_msg, extra=final_debug_meta)
+            self._add_event(
+                "all_frame_extractions_failed_error",
+                {"message": err_msg, **final_debug_meta},
+            )
+            final_debug_meta["detailed_extraction_events"] = self.extraction_events
             return [], {"error": err_msg, **final_debug_meta}
 
-        if 0 < len(extracted_frames_pil) < self.num_frames:
-            self.logger.warning(
-                f"Extracted {len(extracted_frames_pil)} frames, but {self.num_frames} were requested for '{self.video_path}'. Duplicating last good frame.",
-                extra=final_debug_meta,
+        if (
+            0 < len(extracted_frames_pil) < self.num_frames and extracted_frames_pil
+        ):  # Check extracted_frames_pil is not empty
+            warn_msg = f"Extracted {len(extracted_frames_pil)} frames, but {self.num_frames} were requested for '{self.video_path}'. Duplicating last good frame."
+            self.logger.warning(warn_msg, extra=final_debug_meta)
+            self._add_event(
+                "partial_frames_extracted_padding_warning",
+                {
+                    "message": warn_msg,
+                    "extracted_count": len(extracted_frames_pil),
+                    "requested_count": self.num_frames,
+                },
             )
             last_good_frame = extracted_frames_pil[-1]
             num_to_add = self.num_frames - len(extracted_frames_pil)
             extracted_frames_pil.extend(
                 [last_good_frame.copy() for _ in range(num_to_add)]
             )
-        elif not extracted_frames_pil and self.num_frames > 0:
-            self.logger.error(
-                f"No frames were ultimately available for '{self.video_path}' though {self.num_frames} were requested.",
-                extra=final_debug_meta,
+        elif (
+            not extracted_frames_pil and self.num_frames > 0
+        ):  # This case implies all extractions failed, handled above
+            # If, for some other reason, it reaches here with no frames (e.g., num_frames was 0 but timestamps non-empty)
+            err_msg_alt = f"No frames were ultimately available for '{self.video_path}' though {self.num_frames} were requested."
+            self.logger.error(err_msg_alt, extra=final_debug_meta)
+            self._add_event(
+                "no_frames_available_unexpected_error",
+                {"message": err_msg_alt, **final_debug_meta},
             )
-            return [], {
-                "error": f"No frames available after processing for {self.video_path}",
-                **final_debug_meta,
-            }
+            final_debug_meta["detailed_extraction_events"] = self.extraction_events
+            return [], {"error": err_msg_alt, **final_debug_meta}
 
         final_debug_meta["num_final_pil_frames_returned"] = len(extracted_frames_pil)
         total_extraction_duration_ms = (time.time() - overall_start_time) * 1000
@@ -746,6 +888,17 @@ class VideoProcessor:
             f"Successfully prepared {len(extracted_frames_pil)} frames in {total_extraction_duration_ms:.2f}ms for '{self.video_path}'.",
             extra={"duration_ms": total_extraction_duration_ms, **final_debug_meta},
         )
+
+        self._add_event(
+            "frame_extraction_completed",
+            {
+                "final_pil_frames": len(extracted_frames_pil),
+                "duration_ms": total_extraction_duration_ms,
+            },
+        )
+        final_debug_meta["detailed_extraction_events"] = (
+            self.extraction_events
+        )  # Ensure all events are part of the output
         return extracted_frames_pil, final_debug_meta
 
     def __del__(self):
@@ -753,6 +906,7 @@ class VideoProcessor:
 
 
 class CLIPEmbedder:
+    # ... (omitted for brevity, same as original)
     preprocess: Callable[[Any], torch.Tensor]
 
     def __init__(
@@ -799,19 +953,15 @@ class CLIPEmbedder:
                             break
                 else:
                     model_arch_candidate_parts = model_part.split("-")
-                    # Example: "laion/CLIP-ViT-B-32-laion2B-s34B-b79K" -> model_arch = ViT-B-32, pretrained = laion/CLIP-ViT-B-32-laion2B-s34B-b79K
-                    # Example: "hf-hub:laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
-                    # OpenCLIP create_model_and_transforms handles "hf-hub:" prefix for pretrained
                     if (
                         len(model_arch_candidate_parts) > 1
                         and "CLIP" in model_arch_candidate_parts[0].upper()
-                    ):  # e.g. CLIP-ViT-B-32
-                        arch_try = "-".join(model_arch_candidate_parts[1:3])  # ViT-B-32
+                    ):
+                        arch_try = "-".join(model_arch_candidate_parts[1:3])
                         for key, val in arch_name_map.items():
                             if key == arch_try.lower():
                                 model_arch = val
                                 break
-                    # For non-openai, pretrained is often the full model name, possibly with hf-hub prefix
                     pretrained_tag = (
                         f"hf-hub:{self.model_name}"
                         if not self.model_name.startswith("hf-hub:")
@@ -827,17 +977,16 @@ class CLIPEmbedder:
                 self.model,
                 _,
                 self.preprocess,
-            ) = open_clip.create_model_and_transforms(  # _ is train_preprocess, we use val_preprocess
+            ) = open_clip.create_model_and_transforms(
                 model_name=model_arch,
                 pretrained=pretrained_tag,
                 device=self.device,
-                jit=False,  # jit=False for wider compatibility
+                jit=False,
             )
             self.model.eval()
 
             if self.device not in ["cpu"]:
                 try:
-                    # Only available in PyTorch 1.12+
                     if hasattr(torch, "set_float32_matmul_precision"):
                         torch.set_float32_matmul_precision("high")
                         self.logger.debug("Set float32 matmul precision to 'high'.")
@@ -866,7 +1015,6 @@ class CLIPEmbedder:
             img_size_to_use = (
                 image_size_cfg if isinstance(image_size_cfg, int) else image_size_cfg[0]
             )
-
             self.augmentation_transforms = T.Compose(
                 [
                     T.RandomResizedCrop(img_size_to_use, scale=(0.8, 1.0)),
@@ -883,15 +1031,12 @@ class CLIPEmbedder:
         self, pil_image_list: List[Image.Image]
     ) -> torch.Tensor:
         if not pil_image_list:
-            return torch.empty(
-                0, dtype=torch.float32, device="cpu"
-            )  # Return on CPU always for empty
+            return torch.empty(0, dtype=torch.float32, device="cpu")
 
         self.logger.debug(
             f"CLIPEmbedder: Processing batch of {len(pil_image_list)} PIL images for embedding on {self.device}."
         )
         gpu_batch_start_time = time.time()
-
         tensors_for_model: List[torch.Tensor] = []
         for i, pil_img in enumerate(pil_image_list):
             try:
@@ -931,17 +1076,15 @@ class CLIPEmbedder:
 
         autocast_context = nullcontext()
         if self.device != "cpu":
-            # For CUDA, float16 is common. For MPS, bfloat16 might be preferred if available, else float16.
-            # OpenCLIP/PyTorch autocast handles this reasonably.
             autocast_context = torch.autocast(device_type=self.device.split(":")[0])
 
         with torch.no_grad(), autocast_context:
             image_features_batch = self.model.encode_image(input_tensor_batch)
-            if image_features_batch is not None:  # Should always return a tensor
+            if image_features_batch is not None:
                 image_features_batch = image_features_batch / image_features_batch.norm(
                     p=2, dim=-1, keepdim=True
                 )
-            else:  # Should not happen with OpenCLIP typically
+            else:
                 self.logger.error(
                     "Model encode_image returned None, which is unexpected."
                 )
@@ -960,14 +1103,14 @@ def _preprocess_single_item_for_batch(
     default_num_frames_for_video: int,
     parent_logger: EmbeddingLogger,
     video_processor_shared_executor: ThreadPoolExecutor,
-    item_specific_request_id: str,
-    ffmpeg_hwaccel_method_for_videos: Optional[str],  # Added for HW accel
+    item_specific_request_id: str,  # This is batch_processing_id + item_id_suffix
+    ffmpeg_hwaccel_method_for_videos: Optional[str],
 ) -> Dict[str, Any]:
 
     item_id = item_spec_dict["id"]
     media_type = item_spec_dict.get("media_type", "unknown")
     item_logger = EmbeddingLogger(
-        request_id=item_specific_request_id,
+        request_id=item_specific_request_id,  # Use the specific ID for this item's processing journey
         component_name=f"ItemPreProc-{item_id[:10]}",
     )
     item_logger.logger.setLevel(parent_logger.logger.level)
@@ -982,8 +1125,9 @@ def _preprocess_single_item_for_batch(
         "original_item_id": item_id,
         "source_type": item_spec_dict["source_type"],
         "original_filename": item_spec_dict.get("original_filename", "N/A"),
-        "requested_media_type": item_spec_dict["media_type"],
+        "requested_media_type": media_type,  # Use media_type from item_spec_dict
         "timestamp_preprocess_start_utc": datetime.utcnow().isoformat() + "Z",
+        "item_processing_request_id": item_specific_request_id,  # For error reporting correlation
     }
     temp_file_created_path: Optional[str] = None
 
@@ -992,7 +1136,7 @@ def _preprocess_single_item_for_batch(
         video_path_for_vid_processor: Optional[str] = None
         source_type = item_spec_dict["source_type"]
         source_location = item_spec_dict["source"]
-        media_type = item_spec_dict["media_type"]  # Re-assign from spec_dict for safety
+        # media_type already assigned from item_spec_dict.get("media_type")
 
         if source_type == "url":
             item_logger.debug(f"Downloading URL: {source_location}")
@@ -1000,31 +1144,23 @@ def _preprocess_single_item_for_batch(
                 source_location, stream=True, timeout=DOWNLOAD_TIMEOUT_SECONDS
             )
             response.raise_for_status()
-
             temp_suffix_raw = item_spec_dict.get(
                 "original_filename", uuid.uuid4().hex[:8]
             )
-            # Ensure suffix has an extension if original_filename might not
-            if "." not in os.path.basename(temp_suffix_raw):  # crude check
+            if "." not in os.path.basename(temp_suffix_raw):
                 ext_from_url = os.path.splitext(source_location)[1]
                 if ext_from_url and ext_from_url.lower() in IMAGE_EXTS + VIDEO_EXTS:
                     temp_suffix_raw += ext_from_url
-
             safe_suffix = "".join(
                 c if c.isalnum() or c in [".", "_", "-"] else "_"
-                for c in temp_suffix_raw  # Allow hyphen
-            )[
-                :64
-            ]  # Max length for suffix can be an issue on some systems
-
+                for c in temp_suffix_raw
+            )[:64]
             with tempfile.NamedTemporaryFile(
                 delete=False,
                 suffix=safe_suffix,
-                dir=os.environ.get(
-                    "TEMP_DOWNLOAD_DIR"
-                ),  # Optional: configurable temp dir
+                dir=os.environ.get("TEMP_DOWNLOAD_DIR"),
             ) as tmp_file:
-                for chunk in response.iter_content(chunk_size=8192):  # 8KB
+                for chunk in response.iter_content(chunk_size=8192):
                     tmp_file.write(chunk)
                 temp_file_created_path = tmp_file.name
             item_logger.info(
@@ -1068,7 +1204,6 @@ def _preprocess_single_item_for_batch(
                     "Internal error: video_path_for_vid_processor not set for video item."
                 )
                 raise ValueError("video_path_for_vid_processor not set for video.")
-
             num_frames = (
                 item_spec_dict.get("num_frames") or default_num_frames_for_video
             )
@@ -1077,14 +1212,16 @@ def _preprocess_single_item_for_batch(
                 num_frames=num_frames,
                 logger=item_logger,
                 executor=video_processor_shared_executor,
-                request_id=item_specific_request_id,
+                request_id=item_specific_request_id,  # This is the item's unique processing ID
                 duration=item_spec_dict.get("estimated_duration_s"),
                 original_filename_hint=item_spec_dict.get("original_filename"),
-                hwaccel_method=ffmpeg_hwaccel_method_for_videos,  # Pass HW accel method
+                hwaccel_method=ffmpeg_hwaccel_method_for_videos,  # Pass batch-level HW accel method
             )
             frames_list_pil, video_proc_debug_meta = vp.extract_frames()
             pil_images_for_item.extend(frames_list_pil)
-            item_debug_meta.update(video_proc_debug_meta)
+            item_debug_meta.update(
+                video_proc_debug_meta
+            )  # This includes detailed_extraction_events
             item_debug_meta["num_extracted_frames_for_item"] = len(frames_list_pil)
             item_logger.info(
                 f"Extracted {len(frames_list_pil)} frames for video '{item_spec_dict.get('original_filename', item_id)}'"
@@ -1115,7 +1252,7 @@ def _preprocess_single_item_for_batch(
         )
         return {
             "id": item_id,
-            "media_type": media_type,  # Use media_type from outer scope
+            "media_type": media_type,
             "pil_images": [],
             "error": "Unidentified image file",
             "detail": str(uie),
@@ -1153,7 +1290,9 @@ def _preprocess_single_item_for_batch(
             "detail": str(req_exc),
             "debug_metadata": item_debug_meta,
         }
-    except Exception as e_preproc:
+    except (
+        Exception
+    ) as e_preproc:  # This includes ValueError from VideoProcessor if duration is invalid
         item_logger.error(
             f"General failure preprocessing item '{item_spec_dict.get('original_filename', item_id)}': {e_preproc}",
             error=e_preproc,
@@ -1162,6 +1301,8 @@ def _preprocess_single_item_for_batch(
             datetime.utcnow().isoformat() + "Z"
         )
         item_debug_meta["preprocess_error_type"] = type(e_preproc).__name__
+        # If VideoProcessor failed (e.g. duration error), its extraction_events might be in e_preproc or need specific capture if VP raises early
+        # For now, the top-level error is recorded. The error report logic will check for detailed_extraction_events.
         return {
             "id": item_id,
             "media_type": media_type,
@@ -1175,11 +1316,113 @@ def _preprocess_single_item_for_batch(
             try:
                 os.unlink(temp_file_created_path)
                 item_logger.debug(f"Cleaned up temp file: '{temp_file_created_path}'")
-            except OSError as e_unlink_final:  # Changed variable name to avoid conflict
+            except OSError as e_unlink_final:
                 item_logger.warning(
                     f"Failed to clean up temp file '{temp_file_created_path}': {e_unlink_final}",
                     extra={"error_type": type(e_unlink_final).__name__},
                 )
+
+
+def _send_error_logs_native(
+    payload: List[Dict[str, Any]], logger: EmbeddingLogger, endpoint_url: str
+):
+    if not payload:
+        logger.debug("No frame extraction error details to report.")
+        return
+
+    logger.info(
+        f"Sending {len(payload)} frame extraction error reports to {endpoint_url}"
+    )
+    try:
+        parsed_url = urllib.parse.urlparse(endpoint_url)
+        hostname = parsed_url.hostname
+        port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
+        path = parsed_url.path or "/"  # Ensure path is at least "/"
+
+        if not hostname:
+            logger.error(
+                f"Invalid endpoint URL for error logs: {endpoint_url}. Missing hostname."
+            )
+            return
+
+        # Truncate long strings in payload for safety, e.g., command previews or error messages
+        def truncate_strings_in_payload(data, max_len=1024):
+            if isinstance(data, dict):
+                return {
+                    k: truncate_strings_in_payload(v, max_len) for k, v in data.items()
+                }
+            elif isinstance(data, list):
+                return [truncate_strings_in_payload(item, max_len) for item in data]
+            elif isinstance(data, str) and len(data) > max_len:
+                return data[:max_len] + "... (truncated)"
+            return data
+
+        truncated_payload = truncate_strings_in_payload(payload)
+        json_payload = json.dumps(
+            truncated_payload
+        )  # Use truncated payload for JSON dump
+
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(json_payload.encode("utf-8"))),  # Length of bytes
+        }
+
+        connection: Union[http.client.HTTPConnection, http.client.HTTPSConnection]
+        if parsed_url.scheme == "https":
+            connection = http.client.HTTPSConnection(hostname, port, timeout=10)
+        else:
+            connection = http.client.HTTPConnection(hostname, port, timeout=10)
+
+        connection.request(
+            "POST", path, body=json_payload.encode("utf-8"), headers=headers
+        )
+        response = connection.getresponse()
+        response_data_bytes = response.read()
+        response_data_str = response_data_bytes.decode(
+            "utf-8", errors="replace"
+        )  # Handle potential decoding errors
+
+        if 200 <= response.status < 300:
+            logger.info(
+                f"Successfully sent error logs. Status: {response.status}. Response: {response_data_str[:200]}"
+            )
+        else:
+            logger.error(
+                f"Failed to send error logs. Status: {response.status}. Response: {response_data_str[:500]}",
+                extra={
+                    "status_code": response.status,
+                    "response_body_preview": response_data_str[:500],
+                },
+            )
+        connection.close()
+
+    except ConnectionRefusedError:
+        logger.error(
+            f"Connection refused when sending error logs to {endpoint_url}.",
+            extra={"target_url": endpoint_url},
+        )
+    except socket.timeout:
+        logger.error(
+            f"Timeout when sending error logs to {endpoint_url}.",
+            extra={"target_url": endpoint_url},
+        )
+    except (
+        http.client.HTTPException,
+        OSError,
+    ) as e_http:  # More general network/HTTP errors
+        logger.error(
+            f"HTTP/OS error sending frame extraction logs to {endpoint_url}: {e_http}",
+            error=e_http,
+            extra={"target_url": endpoint_url},
+        )
+    except (
+        Exception
+    ) as e:  # Catch-all for other unexpected errors (e.g., JSON serialization if not caught earlier)
+        logger.error(
+            f"Unexpected error sending frame extraction logs to {endpoint_url}: {e}",
+            error=e,
+            extra={"target_url": endpoint_url, "payload_item_count": len(payload)},
+        )
 
 
 def process_media_batch(
@@ -1199,16 +1442,17 @@ def process_media_batch(
 
     final_results_map: Dict[str, Dict[str, Any]] = {}
     all_pil_images_for_gpu_batch: List[Image.Image] = []
-    gpu_batch_item_details_map: List[Dict[str, Any]] = []
+    gpu_batch_item_details_map: List[Dict[str, Any]] = (
+        []
+    )  # Info for items successfully preprocessed for GPU
 
     num_cores = os.cpu_count() or 1
     max_preprocess_workers = min(max(4, num_cores * 2), 32)
-    # For ffmpeg, which can be CPU intensive even with HW accel (due to pipe, etc.),
-    # avoid oversubscribing too much if many videos.
     max_video_frame_workers = min(max(2, num_cores if num_cores > 1 else 1), 16)
 
-    # Read the global HWAccel setting once for this batch run
-    ffmpeg_hwaccel_method = os.environ.get("FFMPEG_HWACCEL_METHOD")
+    ffmpeg_hwaccel_method = os.environ.get(
+        "FFMPEG_HWACCEL_METHOD"
+    )  # Batch-level config
     if ffmpeg_hwaccel_method:
         parent_batch_logger.info(
             f"Batch processing will use FFMPEG_HWACCEL_METHOD='{ffmpeg_hwaccel_method}' for videos."
@@ -1232,8 +1476,8 @@ def process_media_batch(
                 default_num_frames_for_videos,
                 parent_batch_logger,
                 video_ffmpeg_executor,
-                f"{batch_processing_id}_{item_data_dict['id'][:8]}",
-                ffmpeg_hwaccel_method,  # Pass the determined HW accel method
+                f"{batch_processing_id}_{item_data_dict['id'][:8]}",  # item_specific_request_id
+                ffmpeg_hwaccel_method,  # Pass batch-level HW accel method
             ): item_data_dict["id"]
             for item_data_dict in items_data_as_dicts
         }
@@ -1247,8 +1491,25 @@ def process_media_batch(
             )
 
             try:
-                item_preproc_output_dict = future_obj.result()
+                item_preproc_output_dict = (
+                    future_obj.result()
+                )  # This is the dict from _preprocess_single_item_for_batch
                 item_id_from_result = item_preproc_output_dict["id"]
+
+                # Store all results, including those with preprocessing errors, in final_results_map first.
+                # This ensures debug_metadata is preserved.
+                final_results_map[item_id_from_result] = {
+                    "id": item_id_from_result,
+                    "embedding": None,  # Default, may be overwritten
+                    "error": item_preproc_output_dict.get("error"),
+                    "detail": item_preproc_output_dict.get("detail"),
+                    "debugMetadata": {
+                        **(item_preproc_output_dict.get("debug_metadata", {})),
+                        "model": clip_embedder_instance.model_name,
+                        "device": clip_embedder_instance.device,
+                        "batch_processing_status": "preprocessing_completed",  # Initial status
+                    },
+                }
 
                 if item_preproc_output_dict.get("error"):
                     parent_batch_logger.warning(
@@ -1258,19 +1519,10 @@ def process_media_batch(
                             "error_details": item_preproc_output_dict,
                         },
                     )
-                    final_results_map[item_id_from_result] = {
-                        "id": item_id_from_result,
-                        "embedding": None,
-                        "error": item_preproc_output_dict["error"],
-                        "detail": item_preproc_output_dict.get("detail"),
-                        "debugMetadata": {
-                            **(item_preproc_output_dict.get("debug_metadata", {})),
-                            "model": clip_embedder_instance.model_name,
-                            "device": clip_embedder_instance.device,
-                            "batch_processing_status": "failed_preprocessing",
-                        },
-                    }
-                    continue
+                    final_results_map[item_id_from_result]["debugMetadata"][
+                        "batch_processing_status"
+                    ] = "failed_preprocessing"
+                    continue  # Skip adding to GPU batch
 
                 if not item_preproc_output_dict.get("pil_images"):
                     parent_batch_logger.warning(
@@ -1280,20 +1532,18 @@ def process_media_batch(
                             "preproc_output": item_preproc_output_dict,
                         },
                     )
-                    final_results_map[item_id_from_result] = {
-                        "id": item_id_from_result,
-                        "embedding": None,
-                        "error": "No images/frames extracted (internal)",
-                        "detail": "Preprocessing yielded no processable PIL images, and no explicit error was set.",
-                        "debugMetadata": {
-                            **(item_preproc_output_dict.get("debug_metadata", {})),
-                            "model": clip_embedder_instance.model_name,
-                            "device": clip_embedder_instance.device,
-                            "batch_processing_status": "no_images_from_preprocessing_unexpected",
-                        },
-                    }
+                    final_results_map[item_id_from_result][
+                        "error"
+                    ] = "No images/frames extracted (internal)"
+                    final_results_map[item_id_from_result][
+                        "detail"
+                    ] = "Preprocessing yielded no processable PIL images, and no explicit error was set."
+                    final_results_map[item_id_from_result]["debugMetadata"][
+                        "batch_processing_status"
+                    ] = "no_images_from_preprocessing_unexpected"
                     continue
 
+                # If successfully preprocessed and has images, add to GPU batch consideration
                 gpu_batch_item_details_map.append(
                     {
                         "item_id": item_id_from_result,
@@ -1302,9 +1552,7 @@ def process_media_batch(
                             item_preproc_output_dict["pil_images"]
                         ),
                         "start_idx_in_gpu_batch": len(all_pil_images_for_gpu_batch),
-                        "original_debug_metadata": item_preproc_output_dict.get(
-                            "debug_metadata", {}
-                        ),
+                        # original_debug_metadata is now part of final_results_map[item_id_from_result]["debugMetadata"]
                     }
                 )
                 all_pil_images_for_gpu_batch.extend(
@@ -1324,19 +1572,21 @@ def process_media_batch(
                     error=e_future_generic,
                     extra={"item_id": original_item_id},
                 )
-                final_results_map[original_item_id] = {
-                    "id": original_item_id,
-                    "embedding": None,
-                    "error": "Internal error handling preprocessing result",
-                    "detail": str(e_future_generic),
-                    "debugMetadata": {
-                        "model": clip_embedder_instance.model_name,
-                        "device": clip_embedder_instance.device,
-                        "batch_processing_status": "internal_error_future_result",
-                        "error_type": type(e_future_generic).__name__,
-                    },
-                }
-
+                final_results_map[original_item_id] = (
+                    {  # Overwrite if already exists from a partial success
+                        "id": original_item_id,
+                        "embedding": None,
+                        "error": "Internal error handling preprocessing result",
+                        "detail": str(e_future_generic),
+                        "debugMetadata": {
+                            "model": clip_embedder_instance.model_name,
+                            "device": clip_embedder_instance.device,
+                            "batch_processing_status": "internal_error_future_result",
+                            "error_type": type(e_future_generic).__name__,
+                        },
+                    }
+                )
+    # --- GPU Processing Stage ---
     if not all_pil_images_for_gpu_batch:
         parent_batch_logger.warning(
             f"Batch '{batch_processing_id}': No images/frames to process on GPU after parallel preprocessing stage.",
@@ -1345,221 +1595,248 @@ def process_media_batch(
                 "items_in_gpu_map_count": len(gpu_batch_item_details_map),
             },
         )
-        for item_map_detail in gpu_batch_item_details_map:
+        # Update status for items that were supposed to go to GPU but didn't because batch was empty
+        for (
+            item_map_detail
+        ) in gpu_batch_item_details_map:  # These are items that passed preprocessing
             item_id_chk = item_map_detail["item_id"]
-            if item_id_chk not in final_results_map:
-                final_results_map[item_id_chk] = {
-                    "id": item_id_chk,
-                    "embedding": None,
-                    "error": "Internal: No images for GPU batch despite seemingly successful item preprocessing",
-                    "debugMetadata": {
-                        **(item_map_detail.get("original_debug_metadata", {})),
-                        "model": clip_embedder_instance.model_name,
-                        "device": clip_embedder_instance.device,
-                        "batch_processing_status": "gpu_batch_empty_after_successful_preproc",
-                    },
+            if final_results_map[item_id_chk].get("debugMetadata"):
+                final_results_map[item_id_chk]["debugMetadata"][
+                    "batch_processing_status"
+                ] = "gpu_batch_empty_before_inference"
+            else:  # Should not happen if preproc was successful
+                final_results_map[item_id_chk]["debugMetadata"] = {
+                    "batch_processing_status": "gpu_batch_empty_before_inference_no_meta"
                 }
-        batch_total_duration_ms = (time.time() - batch_overall_start_time) * 1000
-        parent_batch_logger.info(
-            f"Batch '{batch_processing_id}' finished in {batch_total_duration_ms:.2f}ms. No items sent to GPU.",
-            extra={"duration_ms": batch_total_duration_ms},
-        )
-        return final_results_map
-
-    gpu_embeddings_tensor: Optional[torch.Tensor] = None
-    gpu_stage_failed_globally = False
-    try:
-        if clip_embedder_instance is None:
-            raise RuntimeError("CLIPEmbedder instance is None prior to GPU batch.")
-        parent_batch_logger.info(
-            f"Batch '{batch_processing_id}': Sending {len(all_pil_images_for_gpu_batch)} total images/frames to CLIP model on {clip_embedder_instance.device} for inference.",
-            extra={"gpu_batch_size": len(all_pil_images_for_gpu_batch)},
-        )
-        gpu_embeddings_tensor = clip_embedder_instance.get_embeddings_for_pil_list(
-            all_pil_images_for_gpu_batch
-        )
-    except Exception as e_gpu_stage:
-        parent_batch_logger.error(
-            f"Batch '{batch_processing_id}': GPU processing failed for the entire collected batch of {len(all_pil_images_for_gpu_batch)} images/frames: {e_gpu_stage}",
-            error=e_gpu_stage,
-        )
-        gpu_stage_failed_globally = True
-        for item_map_detail in gpu_batch_item_details_map:
-            item_id_gpu_fail = item_map_detail["item_id"]
-            if item_id_gpu_fail not in final_results_map:
-                final_results_map[item_id_gpu_fail] = {
-                    "id": item_id_gpu_fail,
-                    "embedding": None,
-                    "error": "GPU processing failed for batch",
-                    "detail": str(e_gpu_stage),
-                    "debugMetadata": {
-                        **(item_map_detail.get("original_debug_metadata", {})),
-                        "model": clip_embedder_instance.model_name,
-                        "device": clip_embedder_instance.device,
-                        "gpu_error_global": True,
-                        "batch_processing_status": "failed_gpu_inference_stage",
-                        "error_type": type(e_gpu_stage).__name__,
-                    },
-                }
-        batch_total_duration_ms = (time.time() - batch_overall_start_time) * 1000
-        parent_batch_logger.info(
-            f"Batch '{batch_processing_id}' processing terminated in {batch_total_duration_ms:.2f}ms due to GPU stage error.",
-            extra={"duration_ms": batch_total_duration_ms},
-        )
-        return final_results_map
-
-    utc_processing_timestamp = datetime.utcnow().isoformat() + "Z"
-    for item_map_detail in gpu_batch_item_details_map:
-        item_id_final = item_map_detail["item_id"]
-        if item_id_final in final_results_map:
-            continue
-
-        if gpu_embeddings_tensor is None or gpu_stage_failed_globally:
-            final_results_map[item_id_final] = {
-                "id": item_id_final,
-                "embedding": None,
-                "error": "GPU result tensor unavailable post-inference",
-                "detail": "Tensor was None or GPU processing failed globally for the batch.",
-                "debugMetadata": {
-                    **(item_map_detail.get("original_debug_metadata", {})),
-                    "model": clip_embedder_instance.model_name,
-                    "device": clip_embedder_instance.device,
-                    "batch_processing_status": "gpu_tensor_missing_post_inference_final",
-                },
-            }
-            continue
-
-        start_idx = item_map_detail["start_idx_in_gpu_batch"]
-        num_pils_for_item = item_map_detail["num_source_pil_images"]
-
-        # Ensure the slice is valid
-        if start_idx + num_pils_for_item > gpu_embeddings_tensor.shape[0]:
-            parent_batch_logger.error(
-                f"Embedding disaggregation error for item '{item_id_final}': slice indices [{start_idx}:{start_idx + num_pils_for_item}] out of bounds for tensor shape {gpu_embeddings_tensor.shape}",
-                extra={
-                    "item_id": item_id_final,
-                    "start_idx": start_idx,
-                    "num_pils": num_pils_for_item,
-                    "tensor_shape": str(gpu_embeddings_tensor.shape),
-                },
+    else:
+        gpu_embeddings_tensor: Optional[torch.Tensor] = None
+        try:
+            if clip_embedder_instance is None:
+                raise RuntimeError("CLIPEmbedder instance is None prior to GPU batch.")
+            parent_batch_logger.info(
+                f"Batch '{batch_processing_id}': Sending {len(all_pil_images_for_gpu_batch)} total images/frames to CLIP model on {clip_embedder_instance.device} for inference."
             )
-            final_results_map[item_id_final] = {
-                "id": item_id_final,
-                "embedding": None,
-                "error": "Embedding disaggregation error (slice out of bounds)",
-                "debugMetadata": {
-                    **(item_map_detail.get("original_debug_metadata", {})),
-                    "model": clip_embedder_instance.model_name,
-                    "device": clip_embedder_instance.device,
-                    "batch_processing_status": "error_disaggregating_slice_oob",
-                },
-            }
-            continue
+            gpu_embeddings_tensor = clip_embedder_instance.get_embeddings_for_pil_list(
+                all_pil_images_for_gpu_batch
+            )
 
-        item_slice_from_gpu_tensor = gpu_embeddings_tensor[
-            start_idx : start_idx + num_pils_for_item
-        ]
+            # Update results for successfully processed GPU items
+            utc_processing_timestamp = datetime.utcnow().isoformat() + "Z"
+            for item_map_detail in gpu_batch_item_details_map:
+                item_id_final = item_map_detail["item_id"]
+                if (
+                    gpu_embeddings_tensor is None
+                ):  # Should be caught by exception if model fails
+                    final_results_map[item_id_final][
+                        "error"
+                    ] = "GPU result tensor unavailable post-inference"
+                    final_results_map[item_id_final]["debugMetadata"][
+                        "batch_processing_status"
+                    ] = "gpu_tensor_missing_post_inference_final"
+                    continue
 
-        item_embedding_list: Optional[List[float]] = (
-            None  # Default to Optional for clarity
-        )
-        item_specific_gpu_debug = {}
+                start_idx = item_map_detail["start_idx_in_gpu_batch"]
+                num_pils_for_item = item_map_detail["num_source_pil_images"]
 
-        if item_map_detail["media_type"] == "image":
-            if num_pils_for_item == 1 and item_slice_from_gpu_tensor.shape[0] == 1:
-                item_embedding_list = item_slice_from_gpu_tensor[0].tolist()
-            elif (
-                num_pils_for_item == 0 and item_slice_from_gpu_tensor.shape[0] == 0
-            ):  # Image had no pils, empty tensor slice
-                item_embedding_list = []  # No embedding if no image
-                parent_batch_logger.warning(
-                    f"Image item '{item_id_final}' had 0 PILs, resulting in empty embedding.",
+                if start_idx + num_pils_for_item > gpu_embeddings_tensor.shape[0]:
+                    parent_batch_logger.error(
+                        f"Embedding disaggregation error for item '{item_id_final}': slice indices out of bounds",
+                        extra={
+                            "item_id": item_id_final,
+                            "start_idx": start_idx,
+                            "num_pils": num_pils_for_item,
+                            "tensor_shape": str(gpu_embeddings_tensor.shape),
+                        },
+                    )
+                    final_results_map[item_id_final][
+                        "error"
+                    ] = "Embedding disaggregation error (slice out of bounds)"
+                    final_results_map[item_id_final]["debugMetadata"][
+                        "batch_processing_status"
+                    ] = "error_disaggregating_slice_oob"
+                    continue
+
+                item_slice_from_gpu_tensor = gpu_embeddings_tensor[
+                    start_idx : start_idx + num_pils_for_item
+                ]
+                item_embedding_list: Optional[List[float]] = None
+                item_specific_gpu_debug = {}
+
+                if item_map_detail["media_type"] == "image":
+                    if (
+                        num_pils_for_item == 1
+                        and item_slice_from_gpu_tensor.shape[0] == 1
+                    ):
+                        item_embedding_list = item_slice_from_gpu_tensor[0].tolist()
+                    elif (
+                        num_pils_for_item == 0
+                        and item_slice_from_gpu_tensor.shape[0] == 0
+                    ):
+                        item_embedding_list = []
+                        parent_batch_logger.warning(
+                            f"Image item '{item_id_final}' had 0 PILs, resulting in empty embedding.",
+                            extra={"item_id": item_id_final},
+                        )
+                    else:  # Error case
+                        parent_batch_logger.error(
+                            f"Embedding disaggregation error for image item '{item_id_final}'",
+                            extra={
+                                "item_id": item_id_final,
+                                "slice_shape": str(item_slice_from_gpu_tensor.shape),
+                                "num_pils": num_pils_for_item,
+                            },
+                        )
+                        final_results_map[item_id_final][
+                            "error"
+                        ] = "Image embedding disaggregation error"
+                        final_results_map[item_id_final]["debugMetadata"][
+                            "batch_processing_status"
+                        ] = "error_disaggregating_image"
+                        continue
+                elif item_map_detail["media_type"] == "video":
+                    if (
+                        num_pils_for_item > 0
+                        and item_slice_from_gpu_tensor.shape[0] == num_pils_for_item
+                    ):
+                        averaged_embedding = item_slice_from_gpu_tensor.mean(dim=0)
+                        item_embedding_list = averaged_embedding.tolist()
+                        item_specific_gpu_debug[
+                            "averaged_from_n_frames_in_gpu_batch"
+                        ] = num_pils_for_item
+                    elif num_pils_for_item == 0:
+                        item_embedding_list = []
+                        item_specific_gpu_debug[
+                            "averaged_from_n_frames_in_gpu_batch"
+                        ] = 0
+                        parent_batch_logger.warning(
+                            f"Video item '{item_id_final}' had 0 PILs for averaging, resulting in empty embedding.",
+                            extra={"item_id": item_id_final},
+                        )
+                    else:  # Error case
+                        parent_batch_logger.error(
+                            f"Embedding disaggregation error for video item '{item_id_final}'",
+                            extra={
+                                "item_id": item_id_final,
+                                "slice_shape": str(item_slice_from_gpu_tensor.shape),
+                                "num_pils": num_pils_for_item,
+                            },
+                        )
+                        final_results_map[item_id_final][
+                            "error"
+                        ] = "Video embedding disaggregation error"
+                        final_results_map[item_id_final]["debugMetadata"][
+                            "batch_processing_status"
+                        ] = "error_disaggregating_video"
+                        continue
+                else:  # Unknown media type
+                    item_embedding_list = (
+                        []
+                    )  # Should not happen if validation is correct
+
+                final_results_map[item_id_final]["embedding"] = item_embedding_list
+                final_results_map[item_id_final][
+                    "error"
+                ] = None  # Clear any prior preproc error if GPU stage was reached and embedding produced
+                final_results_map[item_id_final]["detail"] = None
+                final_results_map[item_id_final]["debugMetadata"].update(
+                    {
+                        **item_specific_gpu_debug,
+                        "overall_batch_request_id": batch_processing_id,  # Main batch ID
+                        "processing_timestamp_utc": utc_processing_timestamp,
+                        "batch_processing_status": "success",
+                    }
+                )
+                parent_batch_logger.debug(
+                    f"Successfully finalized result for item '{item_id_final}'.",
                     extra={"item_id": item_id_final},
                 )
-            else:
-                parent_batch_logger.error(
-                    f"Embedding disaggregation error for image item '{item_id_final}': expected {num_pils_for_item} embedding(s), got slice shape {item_slice_from_gpu_tensor.shape}",
-                    extra={
-                        "item_id": item_id_final,
-                        "slice_shape": str(item_slice_from_gpu_tensor.shape),
-                        "num_pils": num_pils_for_item,
-                    },
+
+        except Exception as e_gpu_stage:
+            parent_batch_logger.error(
+                f"Batch '{batch_processing_id}': GPU processing failed for collected batch: {e_gpu_stage}",
+                error=e_gpu_stage,
+            )
+            # Update all items intended for this GPU batch as failed at GPU stage
+            for item_map_detail in gpu_batch_item_details_map:
+                item_id_gpu_fail = item_map_detail["item_id"]
+                final_results_map[item_id_gpu_fail][
+                    "error"
+                ] = "GPU processing failed for batch"
+                final_results_map[item_id_gpu_fail]["detail"] = str(e_gpu_stage)
+                final_results_map[item_id_gpu_fail]["debugMetadata"][
+                    "gpu_error_global"
+                ] = True
+                final_results_map[item_id_gpu_fail][
+                    "batch_processing_status"
+                ] = "failed_gpu_inference_stage"
+                final_results_map[item_id_gpu_fail]["debugMetadata"]["error_type"] = (
+                    type(e_gpu_stage).__name__
                 )
-                final_results_map[item_id_final] = {
-                    "id": item_id_final,
-                    "embedding": None,
-                    "error": "Image embedding disaggregation error",
-                    "debugMetadata": {
-                        **(item_map_detail.get("original_debug_metadata", {})),
-                        "model": clip_embedder_instance.model_name,
-                        "device": clip_embedder_instance.device,
-                        "batch_processing_status": "error_disaggregating_image",
-                    },
-                }
-                continue
-        elif item_map_detail["media_type"] == "video":
-            if (
-                num_pils_for_item > 0
-                and item_slice_from_gpu_tensor.shape[0] == num_pils_for_item
+
+    # --- Frame Extraction Error Reporting ---
+    frame_extraction_error_reports_for_batch: List[Dict[str, Any]] = []
+    for item_id, result_data in final_results_map.items():
+        debug_meta = result_data.get("debugMetadata", {})
+        if debug_meta.get("requested_media_type") == "video":
+            # Criteria for reporting:
+            # 1. There's a top-level error related to video processing for the item.
+            # 2. Or, the detailed_extraction_events log contains failure/error events.
+            report_this_item = False
+            top_level_error = result_data.get("error")
+            top_level_detail_lower = (result_data.get("detail", "") or "").lower()
+
+            if top_level_error and any(
+                kw in top_level_detail_lower
+                for kw in ["video", "frame", "ffmpeg", "duration", "extraction"]
             ):
-                averaged_embedding = item_slice_from_gpu_tensor.mean(dim=0)
-                item_embedding_list = averaged_embedding.tolist()
-                item_specific_gpu_debug["averaged_from_n_frames_in_gpu_batch"] = (
-                    num_pils_for_item
-                )
-            elif num_pils_for_item == 0:  # Video yielded no frames
-                item_embedding_list = []
-                item_specific_gpu_debug["averaged_from_n_frames_in_gpu_batch"] = 0
-                parent_batch_logger.warning(
-                    f"Video item '{item_id_final}' had 0 associated PILs in GPU batch map for averaging, resulting in empty embedding.",
-                    extra={"item_id": item_id_final},
-                )
-            else:
-                parent_batch_logger.error(
-                    f"Embedding disaggregation error for video item '{item_id_final}': expected {num_pils_for_item} embeddings for averaging, got slice shape {item_slice_from_gpu_tensor.shape}",
-                    extra={
-                        "item_id": item_id_final,
-                        "slice_shape": str(item_slice_from_gpu_tensor.shape),
-                        "num_pils": num_pils_for_item,
-                    },
-                )
-                final_results_map[item_id_final] = {
-                    "id": item_id_final,
-                    "embedding": None,
-                    "error": "Video embedding disaggregation error",
-                    "debugMetadata": {
-                        **(item_map_detail.get("original_debug_metadata", {})),
-                        "model": clip_embedder_instance.model_name,
-                        "device": clip_embedder_instance.device,
-                        "batch_processing_status": "error_disaggregating_video",
-                    },
-                }
-                continue
-        else:
-            parent_batch_logger.error(
-                f"Unknown media_type '{item_map_detail['media_type']}' for item '{item_id_final}' at disaggregation.",
-                extra={"item_id": item_id_final},
-            )
-            item_embedding_list = []
+                report_this_item = True
 
-        final_results_map[item_id_final] = {
-            "id": item_id_final,
-            "embedding": item_embedding_list,  # Can be [] if no frames/image
-            "error": None,  # No error at this stage if embedding is produced (even if empty)
-            "detail": None,
-            "debugMetadata": {
-                **(item_map_detail.get("original_debug_metadata", {})),
-                **item_specific_gpu_debug,
-                "model": clip_embedder_instance.model_name,
-                "device": clip_embedder_instance.device,
-                "overall_batch_request_id": batch_processing_id,
-                "processing_timestamp_utc": utc_processing_timestamp,
-                "batch_processing_status": "success",
-            },
-        }
-        parent_batch_logger.debug(
-            f"Successfully finalized result for item '{item_id_final}'.",
-            extra={"item_id": item_id_final},
+            extraction_events = debug_meta.get("detailed_extraction_events", [])
+            has_failure_events = any(
+                "failure" in evt.get("event_type", "")
+                or "error" in evt.get("event_type", "")
+                for evt in extraction_events
+            )
+
+            if has_failure_events:
+                report_this_item = True
+
+            if report_this_item:
+                report_entry = {
+                    "itemId": item_id,
+                    "originalFilename": debug_meta.get("original_filename", "N/A"),
+                    "itemProcessingRequestId": debug_meta.get(
+                        "item_processing_request_id"
+                    ),  # Added in _preprocess_single_item
+                    "batchConfiguredHwAccelMethod": ffmpeg_hwaccel_method,  # Global for this batch run
+                    "videoProcessorEffectiveHwAccelMethod": debug_meta.get(
+                        "video_processor_instance_hwaccel_method"
+                    ),
+                    "videoDurationSeconds": debug_meta.get("video_duration_s"),
+                    "topLevelItemError": top_level_error,
+                    "topLevelItemErrorDetail": result_data.get("detail"),
+                    "frameExtractionEvents": extraction_events,  # Send all events for this problematic video
+                    # Include summary stats from frame_sampling_details if available
+                    "frameSamplingMethod": debug_meta.get(
+                        "frame_sampling_details", {}
+                    ).get("method_used"),
+                    "requestedFramesForSampling": debug_meta.get(
+                        "frame_sampling_details", {}
+                    ).get("num_requested_frames"),
+                    "finalPilFramesReturnedForItem": debug_meta.get(
+                        "num_final_pil_frames_returned"
+                    ),
+                    "itemFrameExtractionErrorCount": debug_meta.get(
+                        "frame_extraction_error_count"
+                    ),
+                }
+                frame_extraction_error_reports_for_batch.append(report_entry)
+
+    if frame_extraction_error_reports_for_batch:
+        _send_error_logs_native(
+            frame_extraction_error_reports_for_batch,
+            parent_batch_logger,
+            ERROR_LOG_ENDPOINT_URL,
         )
 
     batch_total_duration_ms = (time.time() - batch_overall_start_time) * 1000
@@ -1568,17 +1845,12 @@ def process_media_batch(
     )
     parent_batch_logger.info(
         f"Batch '{batch_processing_id}' processing completed in {batch_total_duration_ms:.2f}ms. "
-        f"Total items: {len(items_data_as_dicts)}, Items mapped for GPU: {len(gpu_batch_item_details_map)}, "
-        f"Successful (final): {successful_items_count}, Errors: {len(items_data_as_dicts) - successful_items_count}",
+        f"Total items: {len(items_data_as_dicts)}, Successful (final): {successful_items_count}",
         extra={
             "duration_ms": batch_total_duration_ms,
             "total_items": len(items_data_as_dicts),
-            "gpu_candidate_items": len(
-                gpu_batch_item_details_map
-            ),  # items that passed preprocessing
-            "all_pil_images_for_gpu_count": len(
-                all_pil_images_for_gpu_batch
-            ),  # total frames/images sent to GPU
+            "gpu_candidate_items": len(gpu_batch_item_details_map),
+            "all_pil_images_for_gpu_count": len(all_pil_images_for_gpu_batch),
             "final_success_count": successful_items_count,
         },
     )
@@ -1586,6 +1858,7 @@ def process_media_batch(
 
 
 if __name__ == "__main__":
+    # ... (omitted for brevity, same as original)
     print("[embedding_service_helper.py] Loaded environment/config values:")
     print(f"  PYTHON_PORT={os.environ.get('PYTHON_PORT')}")
     print(f"  PYTHON_MEDIA_ROOT={os.environ.get('PYTHON_MEDIA_ROOT')}")
@@ -1600,9 +1873,5 @@ if __name__ == "__main__":
         f"  DEFAULT_VIDEO_FRAMES_TO_EXTRACT={os.environ.get('DEFAULT_VIDEO_FRAMES_TO_EXTRACT')}"
     )
     print(f"  DOWNLOAD_TIMEOUT_SECONDS={os.environ.get('DOWNLOAD_TIMEOUT_SECONDS')}")
-    print(
-        f"  FFMPEG_HWACCEL_METHOD={os.environ.get('FFMPEG_HWACCEL_METHOD')}"
-    )  # Added for new feature
-    print(
-        f"  TEMP_DOWNLOAD_DIR={os.environ.get('TEMP_DOWNLOAD_DIR')}"
-    )  # Added for new feature
+    print(f"  FFMPEG_HWACCEL_METHOD={os.environ.get('FFMPEG_HWACCEL_METHOD')}")
+    print(f"  TEMP_DOWNLOAD_DIR={os.environ.get('TEMP_DOWNLOAD_DIR')}")

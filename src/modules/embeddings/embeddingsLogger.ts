@@ -59,6 +59,12 @@ class EmbeddingsLogger {
           formatter: new JsonFormatter(),
           level: 'debug',
         }),
+        // Dedicated file for error log endpoint
+        new FileTransport({
+          filename: 'logs/embedding_error_logs.log',
+          formatter: new JsonFormatter(),
+          level: 'info',
+        }),
       ],
       level: 'debug',
       exitOnError: false,
