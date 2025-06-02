@@ -6,8 +6,8 @@ Helper module for video processing tasks, including frame extraction.
 
 This module contains the VideoProcessor class responsible for extracting
 frames from video files using various methods, including hardware acceleration
-and software fallbacks, along with scene detection and entropy-based sampling.
-It also includes utility functions like compute_entropy.
+and software fallbacks. It prioritizes a batch frame extraction method using
+a single FFmpeg process per video for efficiency.
 """
 
 import os
@@ -17,16 +17,16 @@ from datetime import datetime, timezone
 import io
 import uuid
 import math
-from PIL import Image  # type: ignore
-import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor
+from PIL import Image, UnidentifiedImageError  # type: ignore
+
+# Removed concurrent.futures and ThreadPoolExecutor from here as it's not used directly for per-video frame extraction anymore
 from typing import Optional, Tuple, List, Dict, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     # This import is only for type hinting and is not executed at runtime
     # to prevent circular dependencies. The actual EmbeddingLogger class
     # is expected to be defined in the embedding_service_helper module.
-    from embedding_service_helper import EmbeddingLogger
+    from embedding_service_helper import EmbeddingLogger  # type: ignore
 
 
 # --- Helper Functions ---
@@ -71,8 +71,10 @@ class VideoProcessor:
         self,
         num_frames: int,
         video_path: Optional[str] = None,
-        logger: Optional["EmbeddingLogger"] = None,  # String literal for type hint
-        executor: Optional[ThreadPoolExecutor] = None,
+        logger: Optional["EmbeddingLogger"] = None,
+        executor: Optional[
+            Any
+        ] = None,  # Kept for API compatibility, not used internally for frame extraction logic
         request_id: Optional[str] = None,
         duration: Optional[float] = None,
         original_filename_hint: Optional[str] = None,
@@ -87,79 +89,80 @@ class VideoProcessor:
         _effective_logger: "EmbeddingLogger"
         if logger is None:
             # Runtime import to break circular dependency and maintain API
-            # This allows VideoProcessor to use a global embedding_logger if no logger is passed.
-            from embedding_service_helper import (
-                embedding_logger as global_embedding_logger_instance,
-            )
+            from embedding_service_helper import embedding_logger as global_embedding_logger_instance  # type: ignore
 
             _effective_logger = global_embedding_logger_instance
         else:
             _effective_logger = logger
         self.logger = _effective_logger
 
-        base_component = f"VideoProc-{original_filename_hint[:20] if original_filename_hint else os.path.basename(video_path)[:20]}"
-        self.logger.set_component_name(
-            f"{base_component}-{request_id[:8] if request_id else uuid.uuid4().hex[:8]}"
+        # Ensure request_id is set for the logger instance
+        self.item_processing_request_id = request_id or getattr(
+            self.logger, "request_id", uuid.uuid4().hex
         )
-        if request_id:  # This request_id is the item_specific_request_id
-            self.logger.set_request_id(request_id)
-            self.item_processing_request_id = request_id
-        else:
-            # Assumes the logger instance (either passed or global) has a request_id attribute
-            self.item_processing_request_id = self.logger.request_id
+        if (
+            not hasattr(self.logger, "request_id")
+            or self.logger.request_id != self.item_processing_request_id
+        ):
+            self.logger.set_request_id(self.item_processing_request_id)
 
-        self.executor = executor
-        self.hwaccel_method = (
-            hwaccel_method  # This is the batch-level configured HW accel method
+        base_component_name = f"VideoProc-{original_filename_hint[:20] if original_filename_hint else os.path.basename(video_path)[:20]}"
+        log_suffix = (
+            self.item_processing_request_id.split("_")[-1]
+            if "_" in self.item_processing_request_id
+            else self.item_processing_request_id[:8]
         )
-        self._cv2_capture = (
-            None  # OpenCV VideoCapture handle for fast software frame reads
-        )
+        self.logger.set_component_name(f"{base_component_name}-{log_suffix}")
+
+        self.hwaccel_method = hwaccel_method
         self.extraction_events: List[Dict[str, Any]] = []
 
         self._add_event(
-            "initialization",
+            "initialization_start",
             details={
-                "configured_hwaccel_method": self.hwaccel_method,
                 "video_path": self.video_path,
                 "num_frames_requested": self.num_frames,
+                "configured_hwaccel_method": self.hwaccel_method,
             },
         )
 
-        if self.hwaccel_method:
-            self.logger.info(
-                f"VideoProcessor for '{self.video_path}' will attempt to use HWAccel: {self.hwaccel_method}"
+        try:
+            self.duration = (
+                duration if duration is not None else self._get_duration()
+            )  # This will add its own events
+            if self.duration is None or self.duration <= 0:
+                raise ValueError(f"Video duration is invalid: {self.duration}")
+            self._add_event(
+                "initialization_complete", {"resolved_video_duration_s": self.duration}
             )
-
-        self.duration = (
-            duration if duration is not None else self._get_duration()
-        )  # This will add duration events
-
-        if self.duration is None or self.duration <= 0:
-            err_msg = f"Could not determine video duration or duration is invalid for '{self.video_path}'."
+        except Exception as e:
+            err_msg = f"Initialization failed for VideoProcessor: {e}"
             self.logger.error(
-                err_msg,
-                extra={"duration": self.duration, "video_path": self.video_path},
+                err_msg, extra={"error": str(e), "video_path": self.video_path}
             )
-            # Event for this already added by _get_duration if it fails
-            raise ValueError(err_msg)
+            self._add_event(
+                "initialization_failure",
+                {"error": str(e), "video_path": self.video_path},
+            )
+            raise ValueError(err_msg) from e
 
     def _add_event(self, event_type: str, details: Optional[Dict[str, Any]] = None):
+        event_details = details or {}
+        # Ensure sensitive or overly verbose data is not added by default unless specified
+        # For example, avoid adding full command strings to every minor event unless it's an error event.
         event = {
             "event_type": event_type,
             "timestamp_iso": datetime.now(timezone.utc)
             .isoformat()
-            .replace("+00:00", "Z"),  # MODIFIED TIMESTAMP
-            "details": details or {},
+            .replace("+00:00", "Z"),
+            "details": event_details,
         }
         self.extraction_events.append(event)
-        # Optionally log high-priority events through the logger as well
-        # self.logger.debug(f"VideoEvent: {event_type}", extra=details)
 
     def _get_duration(self) -> float:
-        start_time = time.time()
-        self.logger.debug(f"Getting duration for video: '{self.video_path}'")
-        self._add_event("duration_check_start", {"video_path": self.video_path})
+        operation_name = "get_duration_ffprobe"
+        op_start_time = time.monotonic()
+
         command = [
             "ffprobe",
             "-v",
@@ -171,8 +174,14 @@ class VideoProcessor:
             "-i",
             self.video_path,
         ]
+        event_details = {
+            "video_path": self.video_path,
+            "command_preview": "ffprobe -show_entries format=duration...",
+        }
+        self._add_event(f"{operation_name}_start", event_details)
+
         try:
-            result = subprocess.run(
+            process = subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -180,669 +189,553 @@ class VideoProcessor:
                 text=True,
                 timeout=15,
             )
-            duration_str = result.stdout.strip()
+            duration_str = process.stdout.strip()
             if not duration_str or duration_str == "N/A":
-                err_msg = f"ffprobe returned invalid duration '{duration_str}' for '{self.video_path}'"
-                stderr_output = result.stderr.strip() if result.stderr else "N/A"
-                self.logger.error(
-                    err_msg,
-                    extra={
-                        "stdout": result.stdout,
-                        "stderr": stderr_output,
-                        "video_path": self.video_path,
-                    },
+                raise ValueError(
+                    f"ffprobe returned invalid duration string: '{duration_str}'"
                 )
-                self._add_event(
-                    "duration_check_failure",
-                    {
-                        "error": err_msg,
-                        "stdout": result.stdout,
-                        "stderr": stderr_output,
-                        "command": " ".join(command),
-                    },
-                )
-                raise RuntimeError(err_msg)
 
             duration = float(duration_str)
-            self.logger.debug(
-                f"Video duration: {duration:.2f}s for '{self.video_path}'",
-                extra={
-                    "duration": duration,
-                    "time_taken_ms": (time.time() - start_time) * 1000,
-                },
-            )
+            time_taken_ms = (time.monotonic() - op_start_time) * 1000
             self._add_event(
-                "duration_check_success",
-                {
-                    "duration_seconds": duration,
-                    "time_taken_ms": (time.time() - start_time) * 1000,
-                },
+                f"{operation_name}_success",
+                {"duration_seconds": duration, "time_taken_ms": time_taken_ms},
+            )
+            self.logger.debug(
+                f"Duration {duration:.2f}s in {time_taken_ms:.2f}ms for '{os.path.basename(self.video_path)}'"
             )
             return duration
 
         except subprocess.TimeoutExpired as e_timeout:
-            err_msg = f"ffprobe timeout getting duration for '{self.video_path}'"
-            self.logger.error(
-                err_msg,
-                error=e_timeout,
-                extra={"video_path": self.video_path, "command": " ".join(command)},
+            time_taken_ms = (time.monotonic() - op_start_time) * 1000
+            stderr_output = "N/A"
+            # Safely handle stderr which may not be present or may be None
+            stderr = getattr(e_timeout, "stderr", None)
+            if stderr is not None:
+                try:
+                    stderr_output = stderr.decode("utf-8", errors="ignore").strip()
+                except (AttributeError, UnicodeDecodeError):
+                    pass
+            err_msg = f"Timeout ({time_taken_ms:.0f}ms) getting duration"
+            self.logger.warning(
+                f"{err_msg} for '{self.video_path}'. Stderr: {stderr_output}",
+                extra={"error": str(e_timeout)},
             )
             self._add_event(
-                "duration_check_failure",
+                f"{operation_name}_timeout",
                 {
-                    "error": "TimeoutExpired",
-                    "message": err_msg,
+                    "error": str(e_timeout),
+                    "stderr": stderr_output,
                     "command": " ".join(command),
+                    "time_taken_ms": time_taken_ms,
                 },
             )
-            raise RuntimeError(err_msg) from e_timeout
-        except Exception as e:
-            err_msg = f"Failed to get video duration for '{self.video_path}': {e}"
+            raise RuntimeError(f"{err_msg}. Stderr: {stderr_output}") from e_timeout
+        except Exception as e:  # Includes CalledProcessError
+            time_taken_ms = (time.monotonic() - op_start_time) * 1000
+            stderr_output = "N/A"
+            # Safely handle stderr which may not be present or may be None
+            stderr = getattr(e, "stderr", None)
+            if stderr is not None:
+                try:
+                    stderr_output = stderr.decode("utf-8", errors="ignore").strip()
+                except (AttributeError, UnicodeDecodeError):
+                    pass
+            err_msg = (
+                f"Failed ({type(e).__name__}, {time_taken_ms:.0f}ms) getting duration"
+            )
             self.logger.error(
-                err_msg,
-                error=e,
-                extra={"video_path": self.video_path, "command": " ".join(command)},
+                f"{err_msg} for '{self.video_path}': {e}. Stderr: {stderr_output}",
+                extra={"error": str(e)},
             )
             self._add_event(
-                "duration_check_failure",
+                f"{operation_name}_failure",
                 {
-                    "error": type(e).__name__,
-                    "message": str(e),
-                    "command": " ".join(command),
-                },
-            )
-            raise RuntimeError(err_msg) from e
-
-    def _extract_frame_hw_accelerated(self, time_sec: float) -> Image.Image:
-        if not self.hwaccel_method:
-            raise ValueError("HWAccel method not specified.")
-
-        self.logger.debug(
-            f"Attempting HW accelerated frame extraction (method: {self.hwaccel_method}) at {time_sec:.2f}s"
-        )
-        cmd_base = [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "warning",  # Can be changed to "debug" or "verbose" for more detailed ffmpeg output if needed
-            "-hwaccel",
-            self.hwaccel_method,
-        ]
-        # Ensure decoded frames stay on GPU initially for hwdownload to process
-        if self.hwaccel_method == "cuda":  # Be specific for cuda
-            cmd_base.extend(["-hwaccel_output_format", "cuda"])
-
-        # MODIFIED video_filter: download as nv12 then convert pixel format to yuvj420p
-        video_filter = "hwdownload,format=nv12,format=yuvj420p"
-
-        command = cmd_base + [
-            "-ss",
-            str(time_sec),
-            "-i",
-            self.video_path,
-            "-vf",
-            video_filter,  # Use the modified filter chain
-            "-vframes",
-            "1",
-            "-f",
-            "image2pipe",
-            "-c:v",
-            "mjpeg",
-            "-q:v",
-            "2",  # Standard quality for MJPEG, good balance
-            "-",
-        ]
-
-        try:
-            self.logger.debug(f"Executing FFmpeg command: {' '.join(command)}")
-            result = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-                timeout=25,
-            )
-            if not result.stdout:
-                stderr_output = (
-                    result.stderr.decode("utf-8", errors="ignore").strip()
-                    if result.stderr
-                    else "No stderr"
-                )
-                err_msg = f"No stdout. Stderr: {stderr_output}"
-                self.logger.error(
-                    f"ffmpeg (HWAccel: {self.hwaccel_method}) failed for '{self.video_path}' at {time_sec:.2f}s: {err_msg}",
-                    extra={
-                        "time_sec": time_sec,
-                        "stderr": stderr_output,
-                        "full_command": " ".join(command),
-                    },
-                )
-                raise RuntimeError(
-                    f"No frame data from HWAccel ({self.hwaccel_method}). Stderr: {stderr_output}. Command: {' '.join(command)}"
-                )
-            return Image.open(io.BytesIO(result.stdout)).convert("RGB")
-        except subprocess.TimeoutExpired as e_timeout:
-            self.logger.error(
-                f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout at {time_sec:.2f}s. Command: {' '.join(command)}",
-                error=e_timeout,
-                extra={"time_sec": time_sec, "full_command": " ".join(command)},
-            )
-            raise RuntimeError(
-                f"ffmpeg (HWAccel: {self.hwaccel_method}) timeout extracting frame at {time_sec:.2f}s. Command: {' '.join(command)}"
-            ) from e_timeout
-        except subprocess.CalledProcessError as e_call:
-            stderr_output = (
-                e_call.stderr.decode("utf-8", errors="ignore").strip()
-                if e_call.stderr
-                else "N/A"
-            )
-            runtime_error_message = (
-                f"HWAccel ({self.hwaccel_method}) frame extraction failed (code {e_call.returncode}) "
-                f"at {time_sec:.2f}s. Stderr: {stderr_output}. Command: {' '.join(command)}"
-            )
-            self.logger.error(
-                runtime_error_message,
-                error=e_call,
-                extra={
-                    "time_sec": time_sec,
-                    "return_code": e_call.returncode,
-                    "stderr": stderr_output,
-                    "full_command": " ".join(command),
-                },
-            )
-            raise RuntimeError(runtime_error_message) from e_call
-        except Exception as e_generic:
-            self.logger.error(
-                f"Frame extraction (HWAccel: {self.hwaccel_method}) failed at {time_sec:.2f}s: {e_generic}. Command: {' '.join(command)}",
-                error=e_generic,
-                extra={"time_sec": time_sec, "full_command": " ".join(command)},
-            )
-            raise RuntimeError(
-                f"Failed to extract frame at {time_sec:.2f}s using HWAccel ({self.hwaccel_method}): {e_generic}. Command: {' '.join(command)}"
-            ) from e_generic
-
-    def _extract_frame_software(self, time_sec: float) -> Image.Image:
-        self.logger.debug(
-            f"Attempting software frame extraction using FFmpeg (PPM) at {time_sec:.2f}s for '{self.video_path}'."
-        )
-
-        command = [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "warning",
-            "-hide_banner",
-            "-threads",
-            "0",
-            "-ss",
-            str(time_sec),
-            "-i",
-            self.video_path,
-            "-vframes",
-            "1",
-            "-f",
-            "image2pipe",
-            "-c:v",
-            "ppm",
-            "-",
-        ]
-        cmd_str_preview = (
-            " ".join(command[:5])
-            + f" -ss {str(time_sec)} -i ... "
-            + " ".join(command[-5:])
-        )
-
-        try:
-            self.logger.debug(
-                f"Executing FFmpeg software extraction command: {' '.join(command)}"
-            )
-
-            process_start_time = time.time()
-            result = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-                timeout=20,
-            )
-            process_duration_ms = (time.time() - process_start_time) * 1000
-
-            if not result.stdout:
-                stderr_output = (
-                    result.stderr.decode("utf-8", errors="ignore").strip()
-                    if result.stderr
-                    else "No stderr"
-                )
-                err_msg = f"No stdout (frame data) from FFmpeg. Stderr: {stderr_output}"
-                self.logger.error(
-                    f"FFmpeg (software PPM) failed for '{self.video_path}' at {time_sec:.2f}s: {err_msg}",
-                    extra={
-                        "time_sec": time_sec,
-                        "stderr": stderr_output,
-                        "full_command": " ".join(command),
-                        "video_path": self.video_path,
-                        "duration_ms": process_duration_ms,
-                    },
-                )
-                raise RuntimeError(
-                    f"No frame data from software FFmpeg (PPM) at {time_sec:.2f}s. Stderr: {stderr_output}. Command preview: {cmd_str_preview}"
-                )
-
-            self.logger.debug(
-                f"FFmpeg (software PPM) successfully extracted frame at {time_sec:.2f}s in {process_duration_ms:.2f}ms. Output size: {len(result.stdout)} bytes.",
-                extra={
-                    "time_sec": time_sec,
-                    "video_path": self.video_path,
-                    "duration_ms": process_duration_ms,
-                    "output_bytes": len(result.stdout),
-                },
-            )
-            return Image.open(io.BytesIO(result.stdout)).convert("RGB")
-
-        except subprocess.TimeoutExpired as e_timeout:
-            stderr_output = (
-                e_timeout.stderr.decode("utf-8", errors="ignore").strip()
-                if e_timeout.stderr
-                else "N/A (timeout before stderr)"
-            )
-            self.logger.error(
-                f"FFmpeg (software PPM) timeout extracting frame from '{self.video_path}' at {time_sec:.2f}s. Stderr: {stderr_output}",
-                error=e_timeout,
-                extra={
-                    "time_sec": time_sec,
-                    "full_command": " ".join(command),
-                    "video_path": self.video_path,
-                    "stderr_on_timeout": stderr_output,
-                },
-            )
-            raise RuntimeError(
-                f"FFmpeg (software PPM) timeout extracting frame at {time_sec:.2f}s. Command preview: {cmd_str_preview}. Stderr: {stderr_output}"
-            ) from e_timeout
-
-        except subprocess.CalledProcessError as e_call:
-            stderr_output = (
-                e_call.stderr.decode("utf-8", errors="ignore").strip()
-                if e_call.stderr
-                else "N/A"
-            )
-            self.logger.error(
-                f"FFmpeg (software PPM) error (code {e_call.returncode}) for '{self.video_path}' at {time_sec:.2f}s. Stderr: {stderr_output}",
-                error=e_call,
-                extra={
-                    "time_sec": time_sec,
-                    "return_code": e_call.returncode,
-                    "stderr": stderr_output,
-                    "full_command": " ".join(command),
-                    "video_path": self.video_path,
-                },
-            )
-            raise RuntimeError(
-                f"Software FFmpeg (PPM) frame extraction failed (code {e_call.returncode}) at {time_sec:.2f}s. Stderr: {stderr_output}. Command preview: {cmd_str_preview}"
-            ) from e_call
-
-        except FileNotFoundError:
-            self.logger.error(
-                f"FFmpeg executable not found. Please ensure FFmpeg is installed and in PATH. Video: '{self.video_path}', Time: {time_sec:.2f}s",
-                extra={
-                    "time_sec": time_sec,
-                    "full_command": " ".join(command),
-                    "video_path": self.video_path,
-                },
-            )
-            raise RuntimeError(
-                f"FFmpeg executable not found for software extraction. Command preview: {cmd_str_preview}"
-            )
-
-        except Exception as e_generic:
-            stderr_info = "N/A"
-            if hasattr(e_generic, "stderr") and e_generic.stderr:  # type: ignore
-                try:
-                    stderr_info = e_generic.stderr.decode("utf-8", errors="ignore").strip()  # type: ignore
-                except Exception:
-                    stderr_info = "Error decoding stderr"
-
-            self.logger.error(
-                f"Generic error during FFmpeg (software PPM) frame extraction from '{self.video_path}' at {time_sec:.2f}s: {e_generic}. Stderr: {stderr_info}",
-                error=e_generic,
-                extra={
-                    "time_sec": time_sec,
-                    "full_command": " ".join(command),
-                    "video_path": self.video_path,
-                    "stderr_info": stderr_info,
-                },
-            )
-            raise RuntimeError(
-                f"Failed to extract frame at {time_sec:.2f}s using software FFmpeg (PPM): {e_generic}. Command preview: {cmd_str_preview}. Stderr: {stderr_info}"
-            ) from e_generic
-
-    def extract_frame(
-        self, time_sec: float
-    ) -> Tuple[Optional[Image.Image], List[Dict[str, Any]]]:
-        frame_events: List[Dict[str, Any]] = []
-        frame_pil = None
-
-        def add_frame_event(event_type: str, details: Optional[Dict[str, Any]] = None):
-            merged_details = {"video_timestamp_sec": time_sec}
-            if details:
-                merged_details.update(details)
-            event = {
-                "event_type": event_type,
-                "timestamp_iso": datetime.now(timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z"),  # MODIFIED TIMESTAMP
-                "details": merged_details,
-            }
-            frame_events.append(event)
-
-        try:
-            if self.hwaccel_method:
-                add_frame_event(
-                    "hw_extraction_attempt", {"hw_method": self.hwaccel_method}
-                )
-                try:
-                    frame_pil = self._extract_frame_hw_accelerated(time_sec)
-                    add_frame_event(
-                        "hw_extraction_success", {"hw_method": self.hwaccel_method}
-                    )
-                except Exception as e_hw:
-                    self.logger.warning(
-                        f"HW accel ({self.hwaccel_method}) failed for ts {time_sec:.2f}s: {e_hw}. Falling back.",
-                        extra={"time_sec": time_sec, "error_type": type(e_hw).__name__},
-                    )
-                    add_frame_event(
-                        "hw_extraction_failed_fallback_to_sw",
-                        {
-                            "hw_method": self.hwaccel_method,
-                            "error_type": type(e_hw).__name__,
-                            "error_message": str(e_hw),
-                        },
-                    )
-                    # Fall through to software
-            else:
-                add_frame_event(
-                    "hw_accel_not_configured_using_sw",
-                    {
-                        # "hw_method": self.hwaccel_method, # Redundant if it's None/empty
-                        "time_sec": time_sec,
-                        "video_path": self.video_path,
-                    },
-                )
-
-            if not frame_pil:  # If HW not configured, or HW failed
-                reason_for_sw = (
-                    "direct_attempt_no_hw_config"
-                    if not self.hwaccel_method
-                    else "fallback_after_hw_failure"
-                )
-                add_frame_event("sw_extraction_attempt", {"reason": reason_for_sw})
-                try:
-                    frame_pil = self._extract_frame_software(time_sec)
-                    add_frame_event("sw_extraction_success", {"reason": reason_for_sw})
-                except Exception as e_sw:
-                    self.logger.error(
-                        f"Software extraction failed for ts {time_sec:.2f}s (reason: {reason_for_sw}): {e_sw}",
-                        error=e_sw,
-                        extra={"time_sec": time_sec},
-                    )
-                    add_frame_event(
-                        "sw_extraction_failed",
-                        {
-                            "reason": reason_for_sw,
-                            "error_type": type(e_sw).__name__,
-                            "error_message": str(e_sw),
-                        },
-                    )
-                    # Frame_pil remains None
-        except Exception as e:
-            # Catch-all for any unexpected error in the extraction logic
-            self.logger.error(
-                f"Unexpected error in extract_frame at {time_sec:.2f}s: {e}",
-                error=e,
-                extra={"time_sec": time_sec},
-            )
-            add_frame_event(
-                "frame_extraction_error",
-                {
+                    "error": str(e),
                     "error_type": type(e).__name__,
-                    "error_message": str(e),
+                    "stderr": stderr_output,
+                    "command": " ".join(command),
+                    "time_taken_ms": time_taken_ms,
                 },
             )
-            frame_pil = None
+            raise RuntimeError(f"{err_msg}: {e}. Stderr: {stderr_output}") from e
 
-        return frame_pil, frame_events
+    def _execute_ffmpeg_for_multiple_frames(
+        self, timestamps: List[float], use_hw_accel: bool
+    ) -> Tuple[List[Optional[Image.Image]], Dict[str, Any]]:
+        """
+        Core FFmpeg execution logic for extracting multiple frames in a single process.
+        Can be used with or without hardware acceleration.
+        """
+        if not timestamps:
+            return [], {
+                "extracted_frame_count": 0,
+                "requested_frame_count": 0,
+                "status": "no_timestamps",
+            }
+
+        op_start_time = time.monotonic()
+        # Ensure timestamps are unique and sorted for the select filter for predictability.
+        # Keep original index to map results back.
+        indexed_timestamps = sorted(
+            [(ts, i) for i, ts in enumerate(timestamps)], key=lambda x: x[0]
+        )
+        unique_sorted_timestamps = [ts for ts, _ in indexed_timestamps]
+
+        select_filter_parts = [
+            f"eq(t,{ts:.6f})" for ts in unique_sorted_timestamps
+        ]  # Using 't' for presentation timestamp
+        select_filter_str = "select='" + "+".join(select_filter_parts) + "'"
+
+        ffmpeg_cmd = ["ffmpeg", "-y", "-loglevel", "warning", "-hide_banner"]
+
+        current_hwaccel_method = self.hwaccel_method if use_hw_accel else None
+
+        if current_hwaccel_method:
+            ffmpeg_cmd.extend(["-hwaccel", current_hwaccel_method])
+            if current_hwaccel_method == "cuda":
+                ffmpeg_cmd.extend(["-hwaccel_output_format", "cuda"])
+
+        ffmpeg_cmd.extend(["-i", self.video_path])  # Input file
+
+        filter_complex_parts = [select_filter_str]
+        if current_hwaccel_method:  # If HW decoding, need to download frames
+            filter_complex_parts.append("hwdownload")
+            filter_complex_parts.append(
+                "format=nv12"
+            )  # Common intermediate after hwdownload
+
+        filter_complex_parts.append("format=yuvj420p")  # Final format for MJPEG encoder
+
+        ffmpeg_cmd.extend(["-vf", ",".join(filter_complex_parts)])
+        ffmpeg_cmd.extend(
+            [
+                "-vsync",
+                "vfr",  # Output frames matching selected timestamps
+                "-f",
+                "image2pipe",  # Output to pipe
+                "-c:v",
+                "mjpeg",  # MJPEG is good for streaming multiple distinct images
+                "-q:v",
+                "2",  # MJPEG quality
+                "-",  # Output to stdout
+            ]
+        )
+
+        exec_details = {
+            "requested_timestamps_count": len(timestamps),
+            "unique_sorted_timestamps_count": len(unique_sorted_timestamps),
+            "hw_method_attempted": current_hwaccel_method or "software",
+            "ffmpeg_command": " ".join(ffmpeg_cmd),  # Log the full command
+        }
+        self._add_event("ffmpeg_command_execution_start", exec_details)
+        self.logger.debug(f"Executing FFmpeg: {' '.join(ffmpeg_cmd)}")
+
+        frames_pil_ordered: List[Optional[Image.Image]] = [None] * len(timestamps)
+        process_return_code = -1
+        ffmpeg_stderr_output = ""
+
+        # Initialize variables here to avoid "possibly unbound" errors
+        process_start_time = time.monotonic()
+        # Increased timeout: base + per frame allowance
+        timeout_seconds = 25 + (len(unique_sorted_timestamps) * 2.5)
+
+        try:
+            process = subprocess.Popen(
+                ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout_data, stderr_data = process.communicate(timeout=timeout_seconds)
+
+            process_duration_ms = (time.monotonic() - process_start_time) * 1000
+            process_return_code = process.returncode
+            ffmpeg_stderr_output = stderr_data.decode("utf-8", errors="ignore").strip()
+
+            if process.returncode != 0:
+                self.logger.error(
+                    f"FFmpeg process failed (code {process.returncode}) for '{self.video_path}'. Stderr: {ffmpeg_stderr_output}"
+                )
+                exec_details.update(
+                    {
+                        "status": "ffmpeg_error",
+                        "return_code": process.returncode,
+                        "stderr": ffmpeg_stderr_output,
+                        "duration_ms": process_duration_ms,
+                    }
+                )
+                self._add_event("ffmpeg_command_execution_error", exec_details)
+                return frames_pil_ordered, exec_details  # Returns list of Nones
+
+            # Parse MJPEG stream
+            image_data_stream = io.BytesIO(stdout_data)
+            parsed_image_count = 0
+            while parsed_image_count < len(unique_sorted_timestamps):
+                try:
+                    img = Image.open(image_data_stream)
+                    img = img.convert("RGB")  # Ensure consistent format
+                    original_index = indexed_timestamps[parsed_image_count][1]
+                    frames_pil_ordered[original_index] = img
+                    parsed_image_count += 1
+                except (
+                    UnidentifiedImageError
+                ):  # Expected at end of stream or if data is insufficient
+                    if (
+                        image_data_stream.tell() < len(stdout_data) - 2
+                    ):  # Check if not truly at EOF
+                        self.logger.warning(
+                            f"UnidentifiedImageError parsing frame {parsed_image_count + 1}/{len(unique_sorted_timestamps)} but not at EOF. Stream pos: {image_data_stream.tell()}/{len(stdout_data)}"
+                        )
+                    break
+                except Exception as e_parse:
+                    self.logger.error(
+                        f"Error parsing frame {parsed_image_count + 1} from MJPEG stream: {e_parse}",
+                        extra={"video_path": self.video_path},
+                    )
+                    # Mark this frame as failed by leaving it as None
+                    break  # Stop trying to parse further if an unexpected error occurs
+
+            exec_details.update(
+                {
+                    "status": "success",
+                    "extracted_frame_count": parsed_image_count,
+                    "duration_ms": process_duration_ms,
+                    "stdout_bytes": len(stdout_data),
+                    "stderr_preview": ffmpeg_stderr_output[
+                        :200
+                    ],  # Log a preview of stderr even on success
+                }
+            )
+            self._add_event("ffmpeg_command_execution_success", exec_details)
+
+            if parsed_image_count < len(unique_sorted_timestamps):
+                self.logger.warning(
+                    f"Expected {len(unique_sorted_timestamps)} frames, but only parsed {parsed_image_count} for '{self.video_path}'."
+                )
+                self._add_event(
+                    "ffmpeg_frame_count_mismatch",
+                    {
+                        "expected": len(unique_sorted_timestamps),
+                        "parsed": parsed_image_count,
+                    },
+                )
+
+        except subprocess.TimeoutExpired as e_timeout:
+            process_duration_ms = (
+                (time.monotonic() - process_start_time) * 1000
+                if "process_start_time" in locals()
+                else (time.monotonic() - op_start_time) * 1000
+            )
+            ffmpeg_stderr_output = "N/A"
+            # Safely handle stderr which may not be present or may be None
+            stderr = getattr(e_timeout, "stderr", None)
+            if stderr is not None:
+                try:
+                    ffmpeg_stderr_output = stderr.decode(
+                        "utf-8", errors="ignore"
+                    ).strip()
+                except (AttributeError, UnicodeDecodeError):
+                    pass
+            self.logger.error(
+                f"FFmpeg process timeout ({timeout_seconds:.1f}s) for '{self.video_path}'. Stderr: {ffmpeg_stderr_output}"
+            )
+            exec_details.update(
+                {
+                    "status": "timeout",
+                    "stderr": ffmpeg_stderr_output,
+                    "duration_ms": process_duration_ms,
+                }
+            )
+            self._add_event("ffmpeg_command_execution_timeout", exec_details)
+        except Exception as e_general:
+            process_duration_ms = (
+                (time.monotonic() - process_start_time) * 1000
+                if "process_start_time" in locals()
+                else (time.monotonic() - op_start_time) * 1000
+            )
+            self.logger.error(
+                f"Unexpected error during FFmpeg execution for '{self.video_path}': {e_general}"
+            )
+            exec_details.update(
+                {
+                    "status": "unexpected_error",
+                    "error": str(e_general),
+                    "duration_ms": process_duration_ms,
+                }
+            )
+            self._add_event("ffmpeg_command_execution_unexpected_error", exec_details)
+
+        return frames_pil_ordered, exec_details
 
     def get_advanced_sample_times(self) -> Tuple[List[float], Dict[str, Any]]:
+        op_start_time = time.monotonic()
         self.logger.debug(
-            f"Calculating sample times for '{self.video_path}' (duration: {self.duration:.2f}s, frames: {self.num_frames})"
+            f"Calculating sample times for '{os.path.basename(self.video_path)}' (duration: {self.duration:.2f}s, frames: {self.num_frames})"
         )
-        debug_metadata: Dict[str, Any] = {
+
+        sampling_details: Dict[str, Any] = {
             "num_requested_frames": self.num_frames,
             "video_duration_s": self.duration,
         }
-        method_used = "uniform_sampling_default"
 
         if self.num_frames <= 0:
-            return [], {
-                "method_used": "none",
-                "reason": "num_frames is zero or negative",
-                **debug_metadata,
-            }
-        if self.duration <= 0:
-            return [], {
-                "method_used": "none",
-                "reason": "video duration is zero or negative",
-                **debug_metadata,
-            }
+            sampling_details.update(
+                {
+                    "method_used": "none",
+                    "reason": "num_frames_zero_or_negative",
+                    "candidate_timestamps": [],
+                }
+            )
+            self._add_event("get_sample_times_result", sampling_details)
+            return [], sampling_details
+        if self.duration <= 0:  # Should be caught by __init__ but defensive
+            sampling_details.update(
+                {
+                    "method_used": "none",
+                    "reason": "duration_zero_or_negative",
+                    "candidate_timestamps": [],
+                }
+            )
+            self._add_event("get_sample_times_result", sampling_details)
+            return [], sampling_details
 
-        start_offset = min(0.5, self.duration * 0.02)
-        end_offset = min(0.5, self.duration * 0.02)
+        start_offset = min(0.5, self.duration * 0.02)  # Avoid very start
+        end_offset = min(0.5, self.duration * 0.02)  # Avoid very end
         effective_duration = self.duration - start_offset - end_offset
 
+        method_used: str
         selected_times: List[float]
+
         if self.num_frames == 1:
-            selected_times = [start_offset + effective_duration / 2.0]
-            if effective_duration <= 0:
-                selected_times = [self.duration / 2.0]
-            method_used = "single_middle_frame"
-        elif effective_duration <= 0.1:
-            middle_time = self.duration / 2.0
+            target_time = (
+                start_offset + effective_duration / 2.0
+                if effective_duration > 0
+                else self.duration / 2.0
+            )
+            selected_times = [target_time]
+            method_used = "single_middle_frame_with_offset"
+        elif (
+            effective_duration <= 0.1
+        ):  # Video too short for meaningful spread after offsets
+            target_time = self.duration / 2.0
             selected_times = [
-                middle_time
-            ] * self.num_frames  # Duplicate for requested count
-            method_used = "middle_frame_duplicated_short_video"
-        elif self.num_frames > 1:
-            # Ensure num_frames-1 is not zero for division
+                target_time
+            ] * self.num_frames  # Duplicate the middle timestamp
+            method_used = "middle_frame_duplicated_for_short_video"
+        else:  # Spread num_frames across effective_duration
+            # If num_frames is 1, (num_frames - 1) would be 0. This case is handled above.
             selected_times = [
                 start_offset + (i * effective_duration / (self.num_frames - 1))
                 for i in range(self.num_frames)
             ]
             method_used = "uniform_spread_with_offset"
-        else:
-            selected_times = [self.duration / 2.0]  # Fallback if logic missed
-            method_used = "fallback_single_middle_frame"
 
-        epsilon = 0.001
-        selected_times = sorted(
-            list(set(max(0.0, min(t, self.duration - epsilon)) for t in selected_times))
+        # Ensure timestamps are within valid range [0, duration] and distinct
+        # A small epsilon to prevent requesting frame exactly at duration or slightly beyond due to float precision
+        epsilon = 1e-6
+        unique_valid_times = sorted(
+            list(
+                set(max(0.0, min(ts, self.duration - epsilon)) for ts in selected_times)
+            )
         )
-        if not selected_times and self.duration > 0:
-            selected_times = [max(0.0, self.duration / 2.0 - epsilon)]
 
-        debug_metadata["method_used"] = method_used
-        debug_metadata["candidate_timestamps"] = list(selected_times)
-        debug_metadata["effective_sampling_duration_s"] = effective_duration
-        debug_metadata["start_offset_s"] = start_offset
+        # If filtering/clamping resulted in no timestamps for a valid duration video, pick middle.
+        if not unique_valid_times and self.duration > 0:
+            unique_valid_times = [max(0.0, self.duration / 2.0 - epsilon)]
+            method_used += (
+                "_fallback_to_middle"  # Append to method_used to indicate adjustment
+            )
 
+        selected_times = unique_valid_times
+
+        sampling_details.update(
+            {
+                "method_used": method_used,
+                "candidate_timestamps": selected_times,
+                "calculated_effective_duration_s": effective_duration,
+                "calculated_start_offset_s": start_offset,
+                "time_taken_ms": (time.monotonic() - op_start_time) * 1000,
+            }
+        )
+        self._add_event("get_sample_times_result", sampling_details)
         self.logger.debug(
-            f"Selected {len(selected_times)} timestamps via {method_used}",
-            extra={"timestamps": selected_times, **debug_metadata},
+            f"Selected {len(selected_times)} timestamps ({method_used}) for '{os.path.basename(self.video_path)}'",
+            extra=sampling_details,
         )
-        return selected_times, debug_metadata
+        return selected_times, sampling_details
 
     def extract_frames(self) -> Tuple[List[Image.Image], Dict[str, Any]]:
+        overall_op_start_time = time.monotonic()
         self.logger.info(
-            f"Extracting up to {self.num_frames} frames from '{self.video_path}'"
+            f"Starting frame extraction for '{os.path.basename(self.video_path)}', {self.num_frames} frames requested."
         )
-        overall_start_time = time.time()
-        extracted_frames_pil: List[Image.Image] = []
 
         timestamps, frame_sampling_debug_meta = self.get_advanced_sample_times()
 
-        final_debug_meta: Dict[str, Any] = {
+        # Initialize debug metadata for the overall operation
+        final_debug_meta = {
             "frame_sampling_details": frame_sampling_debug_meta,
-            "video_processor_instance_hwaccel_method": self.hwaccel_method,
             "video_duration_s": self.duration,
             "item_processing_request_id": self.item_processing_request_id,
+            "num_timestamps_from_sampler": len(timestamps),
+            "initial_hwaccel_method": self.hwaccel_method,
         }
-        final_debug_meta["num_timestamps_from_sampler"] = len(timestamps)
 
         if not timestamps:
-            self.logger.warning(
-                f"No timestamps returned by sampler for '{self.video_path}'.",
-                extra=final_debug_meta,
+            self._add_event(
+                "extract_frames_aborted_no_timestamps",
+                {"reason": "Sampler returned no timestamps."},
             )
-            self._add_event("no_timestamps_from_sampler_error", final_debug_meta)
+            final_debug_meta["error"] = "No timestamps from sampler."
             final_debug_meta["detailed_extraction_events"] = self.extraction_events
-            return [], {
-                "error": "No timestamps for frame extraction",
-                **final_debug_meta,
-            }
+            return [], final_debug_meta
 
         actual_timestamps_to_extract = timestamps[: self.num_frames]
         final_debug_meta["actual_timestamps_for_extraction"] = (
             actual_timestamps_to_extract
         )
 
-        extraction_errors_count = 0
-        use_parallel_extraction = (
-            self.executor and len(actual_timestamps_to_extract) > 1
-        )
+        extracted_pil_frames: List[Image.Image] = []
+        successful_extraction_count = 0
 
-        frame_extraction_attempt_details_list: List[Dict] = []
-
-        if use_parallel_extraction and self.executor:
-            future_to_ts_map = {
-                self.executor.submit(self.extract_frame, ts): ts
-                for ts in actual_timestamps_to_extract
-            }
-            for future in concurrent.futures.as_completed(future_to_ts_map):
-                ts = future_to_ts_map[future]
-                try:
-                    frame_pil, frame_attempt_events = future.result()
-                    frame_extraction_attempt_details_list.extend(frame_attempt_events)
-                    if frame_pil:
-                        extracted_frames_pil.append(frame_pil)
-                    else:
-                        extraction_errors_count += 1
-                except Exception as e_frame:
-                    extraction_errors_count += 1
-                    self.logger.error(
-                        f"Parallel extract_frame wrapper failed for ts={ts:.2f}s: {e_frame}",
-                        error=e_frame,
-                        extra={"timestamp": ts},
-                    )
-                    generic_failure_event = {
-                        "event_type": "parallel_extraction_future_error",
-                        "timestamp_iso": datetime.now(timezone.utc)
-                        .isoformat()
-                        .replace("+00:00", "Z"),
-                        "details": {
-                            "video_timestamp_sec": ts,
-                            "error_type": type(e_frame).__name__,
-                            "error_message": str(e_frame),
-                        },
-                    }
-                    frame_extraction_attempt_details_list.append(generic_failure_event)
-        else:  # Sequential extraction
-            for ts in actual_timestamps_to_extract:
-                try:
-                    frame_pil, frame_attempt_events = self.extract_frame(ts)
-                    frame_extraction_attempt_details_list.extend(frame_attempt_events)
-                    if frame_pil:
-                        extracted_frames_pil.append(frame_pil)
-                    else:
-                        extraction_errors_count += 1
-                except Exception as e_frame:
-                    extraction_errors_count += 1
-                    self.logger.error(
-                        f"Sequential extract_frame wrapper failed for ts={ts:.2f}s: {e_frame}",
-                        error=e_frame,
-                        extra={"timestamp": ts},
-                    )
-                    generic_failure_event = {
-                        "event_type": "sequential_extraction_wrapper_error",
-                        "timestamp_iso": datetime.now(timezone.utc)
-                        .isoformat()
-                        .replace("+00:00", "Z"),
-                        "details": {
-                            "video_timestamp_sec": ts,
-                            "error_type": type(e_frame).__name__,
-                            "error_message": str(e_frame),
-                        },
-                    }
-                    frame_extraction_attempt_details_list.append(generic_failure_event)
-
-        self.extraction_events.extend(frame_extraction_attempt_details_list)
-
-        if extraction_errors_count > 0:
-            final_debug_meta["frame_extraction_error_count"] = extraction_errors_count
-
-        if not extracted_frames_pil and len(actual_timestamps_to_extract) > 0:
-            err_msg = f"All {len(actual_timestamps_to_extract)} frame extractions failed for '{self.video_path}'."
-            self.logger.error(err_msg, extra=final_debug_meta)
+        # Attempt 1: Hardware Acceleration (if configured)
+        attempted_hw = False
+        if self.hwaccel_method:
+            attempted_hw = True
             self._add_event(
-                "all_frame_extractions_failed_error",
-                {"message": err_msg, **final_debug_meta},
-            )
-            final_debug_meta["detailed_extraction_events"] = self.extraction_events
-            return [], {"error": err_msg, **final_debug_meta}
-
-        if 0 < len(extracted_frames_pil) < self.num_frames and extracted_frames_pil:
-            warn_msg = f"Extracted {len(extracted_frames_pil)} frames, but {self.num_frames} were requested for '{self.video_path}'. Duplicating last good frame."
-            self.logger.warning(warn_msg, extra=final_debug_meta)
-            self._add_event(
-                "partial_frames_extracted_padding_warning",
+                "batch_extraction_attempt_hw_start",
                 {
-                    "message": warn_msg,
-                    "extracted_count": len(extracted_frames_pil),
-                    "requested_count": self.num_frames,
+                    "hwaccel_method": self.hwaccel_method,
+                    "num_timestamps": len(actual_timestamps_to_extract),
                 },
             )
-            last_good_frame = extracted_frames_pil[-1]
-            num_to_add = self.num_frames - len(extracted_frames_pil)
-            extracted_frames_pil.extend(
-                [last_good_frame.copy() for _ in range(num_to_add)]
+            frames_hw_optional, hw_exec_details = (
+                self._execute_ffmpeg_for_multiple_frames(
+                    actual_timestamps_to_extract, use_hw_accel=True
+                )
             )
-        elif not extracted_frames_pil and self.num_frames > 0:
-            err_msg_alt = f"No frames were ultimately available for '{self.video_path}' though {self.num_frames} were requested."
-            self.logger.error(err_msg_alt, extra=final_debug_meta)
-            self._add_event(
-                "no_frames_available_unexpected_error",
-                {"message": err_msg_alt, **final_debug_meta},
-            )
-            final_debug_meta["detailed_extraction_events"] = self.extraction_events
-            return [], {"error": err_msg_alt, **final_debug_meta}
+            final_debug_meta["hw_extraction_execution_details"] = hw_exec_details
 
-        final_debug_meta["num_final_pil_frames_returned"] = len(extracted_frames_pil)
-        total_extraction_duration_ms = (time.time() - overall_start_time) * 1000
-        self.logger.info(
-            f"Successfully prepared {len(extracted_frames_pil)} frames in {total_extraction_duration_ms:.2f}ms for '{self.video_path}'.",
-            extra={"duration_ms": total_extraction_duration_ms, **final_debug_meta},
+            successful_hw_frames = [f for f in frames_hw_optional if f is not None]
+            successful_extraction_count = len(successful_hw_frames)
+
+            if successful_extraction_count == len(actual_timestamps_to_extract):
+                extracted_pil_frames = successful_hw_frames
+                self._add_event(
+                    "batch_extraction_attempt_hw_success_full",
+                    {"extracted_count": successful_extraction_count},
+                )
+            else:
+                self.logger.warning(
+                    f"HW batch extraction yielded {successful_extraction_count}/{len(actual_timestamps_to_extract)} frames for '{self.video_path}'. Stderr: {hw_exec_details.get('stderr', '')[:200]}"
+                )
+                self._add_event(
+                    "batch_extraction_attempt_hw_partial_or_fail",
+                    {
+                        "extracted_count": successful_extraction_count,
+                        "requested_count": len(actual_timestamps_to_extract),
+                        "stderr_preview": hw_exec_details.get("stderr", "")[:200],
+                    },
+                )
+                # Proceed to software fallback if HW didn't get all frames or failed
+                extracted_pil_frames = []  # Reset, as we will try to get all via SW
+                successful_extraction_count = 0
+
+        # Attempt 2: Software Fallback (if HW was not configured, or failed to get all frames)
+        if not extracted_pil_frames or successful_extraction_count < len(
+            actual_timestamps_to_extract
+        ):
+            fallback_reason = (
+                "hw_not_configured"
+                if not attempted_hw
+                else "hw_extraction_incomplete_or_failed"
+            )
+            self._add_event(
+                "batch_extraction_attempt_sw_start",
+                {
+                    "reason": fallback_reason,
+                    "num_timestamps": len(actual_timestamps_to_extract),
+                },
+            )
+            self.logger.info(
+                f"Using software batch extraction for '{self.video_path}' (reason: {fallback_reason})."
+            )
+
+            frames_sw_optional, sw_exec_details = (
+                self._execute_ffmpeg_for_multiple_frames(
+                    actual_timestamps_to_extract, use_hw_accel=False
+                )
+            )
+            final_debug_meta["sw_extraction_execution_details"] = sw_exec_details
+
+            successful_sw_frames = [f for f in frames_sw_optional if f is not None]
+            successful_extraction_count = len(successful_sw_frames)
+            extracted_pil_frames = (
+                successful_sw_frames  # This is now the definitive set
+            )
+
+            if successful_extraction_count == len(actual_timestamps_to_extract):
+                self._add_event(
+                    "batch_extraction_attempt_sw_success_full",
+                    {"extracted_count": successful_extraction_count},
+                )
+            else:
+                self.logger.error(
+                    f"Software batch extraction also failed to get all frames ({successful_extraction_count}/{len(actual_timestamps_to_extract)}) for '{self.video_path}'. Stderr: {sw_exec_details.get('stderr', '')[:200]}"
+                )
+                self._add_event(
+                    "batch_extraction_attempt_sw_partial_or_fail",
+                    {
+                        "extracted_count": successful_extraction_count,
+                        "requested_count": len(actual_timestamps_to_extract),
+                        "stderr_preview": sw_exec_details.get("stderr", "")[:200],
+                    },
+                )
+
+        # Padding if fewer frames were extracted than requested (and num_frames > 0)
+        if self.num_frames > 0:
+            if not extracted_pil_frames:
+                err_msg = f"All frame extraction attempts (HW and SW batch) failed for '{self.video_path}'."
+                self.logger.error(err_msg, extra=final_debug_meta)
+                self._add_event("all_extraction_methods_failed", {"message": err_msg})
+                final_debug_meta["error"] = err_msg
+            elif len(extracted_pil_frames) < self.num_frames:
+                warn_msg = f"Successfully extracted {len(extracted_pil_frames)} frames, but {self.num_frames} were requested. Padding with last good frame."
+                self.logger.warning(warn_msg, extra={"video_path": self.video_path})
+                self._add_event(
+                    "padding_extracted_frames",
+                    {
+                        "extracted_count": len(extracted_pil_frames),
+                        "requested_count": self.num_frames,
+                    },
+                )
+                last_good_frame = extracted_pil_frames[-1]
+                num_to_add = self.num_frames - len(extracted_pil_frames)
+                extracted_pil_frames.extend(
+                    [last_good_frame.copy() for _ in range(num_to_add)]
+                )
+
+        final_debug_meta["num_final_pil_frames_returned"] = len(extracted_pil_frames)
+        total_operation_duration_ms = (time.monotonic() - overall_op_start_time) * 1000
+        final_debug_meta["total_extract_frames_duration_ms"] = (
+            total_operation_duration_ms
         )
 
         self._add_event(
-            "frame_extraction_completed",
+            "extract_frames_completed",
             {
-                "final_pil_frames": len(extracted_frames_pil),
-                "duration_ms": total_extraction_duration_ms,
+                "final_pil_frames_count": len(extracted_pil_frames),
+                "total_duration_ms": total_operation_duration_ms,
+                "hw_attempted": attempted_hw,
+                "final_method_success_count": successful_extraction_count,  # from the last successful method
             },
         )
+
+        self.logger.info(
+            f"Finished frame extraction for '{os.path.basename(self.video_path)}': "
+            f"{len(extracted_pil_frames)} frames in {total_operation_duration_ms:.2f}ms."
+        )
         final_debug_meta["detailed_extraction_events"] = self.extraction_events
-        return extracted_frames_pil, final_debug_meta
+        return extracted_pil_frames, final_debug_meta
 
     def __del__(self):
-        # Placeholder for any cleanup, though not strictly necessary with current implementation
-        # If _cv2_capture were used, it would be released here:
-        # if self._cv2_capture:
-        #     self._cv2_capture.release()
+        # Cleanup if necessary, e.g., if self._cv2_capture was used.
         pass
