@@ -11,7 +11,6 @@ transformers>=4.32.1
 open_clip_torch>=2.0.0
 Pillow>=10.0.0
 numpy>=1.25.2
-difflib
 
 # video/image processing
 opencv-python-headless>=4.8.0  # headless OpenCV build for server
