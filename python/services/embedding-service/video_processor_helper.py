@@ -283,8 +283,10 @@ class VideoProcessor:
         unique_sorted_timestamps = [ts for ts, _ in indexed_timestamps]
 
         select_filter_parts = [
-            f"eq(t,{ts:.6f})" for ts in unique_sorted_timestamps
-        ]  # Using 't' for presentation timestamp
+            f"eq(t,{ts:.3f})" for ts in unique_sorted_timestamps
+        ]  # Using millisecond precision (.3f) instead of microsecond (.6f) for better tolerance
+        # Less precise timestamps can help match frames when internal video timestamps
+        # have small floating-point variations or when FFmpeg's internal time base differs slightly
         select_filter_str = "select='" + "+".join(select_filter_parts) + "'"
 
         ffmpeg_cmd = ["ffmpeg", "-y", "-loglevel", "warning", "-hide_banner"]
@@ -310,8 +312,8 @@ class VideoProcessor:
         ffmpeg_cmd.extend(["-vf", ",".join(filter_complex_parts)])
         ffmpeg_cmd.extend(
             [
-                "-vsync",
-                "vfr",  # Output frames matching selected timestamps
+                "-fps_mode",
+                "vfr",  # Modern equivalent of vsync=vfr, output frames matching selected timestamps
                 "-f",
                 "image2pipe",  # Output to pipe
                 "-c:v",
@@ -326,6 +328,7 @@ class VideoProcessor:
             "requested_timestamps_count": len(timestamps),
             "unique_sorted_timestamps_count": len(unique_sorted_timestamps),
             "hw_method_attempted": current_hwaccel_method or "software",
+            "timestamp_precision": "millisecond",  # Indicate we're using millisecond precision
             "ffmpeg_command": " ".join(ffmpeg_cmd),  # Log the full command
         }
         self._add_event("ffmpeg_command_execution_start", exec_details)
