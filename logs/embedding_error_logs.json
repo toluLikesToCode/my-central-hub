@@ -1,46 +1,81 @@
 [
   {
-    "itemId": "/Users/toluadegbehingbe/Library/Mobile Documents/com~apple~CloudDocs/goon/temp/tiktokgoon267.mp4",
-    "originalFilename": "tiktokgoon267.mp4",
-    "itemProcessingRequestId": "pygpu-123-71b84b_/Users/t",
-    "batchConfiguredHwAccelMethod": null,
-    "videoProcessorEffectiveHwAccelMethod": null,
-    "videoDurationSeconds": 8.2,
+    "itemId": "video17",
+    "originalFilename": "1869541902183457030_1.mp4",
+    "itemProcessingRequestId": "pygpu-2-0ad952_video17",
+    "batchConfiguredHwAccelMethod": "cuda",
+    "videoProcessorEffectiveHwAccelMethod": "cuda",
+    "videoDurationSeconds": 49.962667,
     "topLevelItemError": null,
     "topLevelItemErrorDetail": null,
     "hardwareAccelFailures": {
-      "count": 0,
-      "timestamps": [],
-      "errorTypeCounts": {},
-      "sampleErrorMessage": null
+      "count": 2,
+      "timestamps": [
+        46.88568452631579,
+        49.462667
+      ],
+      "errorTypeCounts": {
+        "RuntimeError": 2
+      },
+      "sampleErrorMessage": "Failed to extract frame at 46.89s using HWAccel (cuda): No frame data from HWAccel (cuda). Stderr: [mov,mp4,m4a,3gp,3g2,mj2 @ 0x55d3fb93b6c0] Packet corrupt (stream = 0, dts = 71321600).\n[h264 @ 0x55d3fbaa4c00] Invalid NAL unit size (5786 > 147).\n[h264 @ 0x55d3fbaa4c00] missing picture in access unit with size 151\n[in#0/mov,mp4,m4a,3gp,3g2,mj2 @ 0x55d3fb93b380] corrupt input packet in stream 0\n[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55d3fb93b6c0] stream 0, offset 0xb9a7ab: partial file\n[h264 @ 0x55d3fcc70200] Invalid NAL unit size (5786 > 147).\n[h264 @ 0x55d3fcc70200] Error splitting the input into NAL units.\n[vist#0:0/h264 @ 0x55d3fb9b9e00] [dec:h264 @ 0x55d3fbaaa5c0] Decoding error: Invalid data found when processing input\n[vf#0:0 @ 0x55d3fb9605c0] No filtered frames for output stream, trying to initialize anyway.\n[out#0/image2pipe @ 0x55d3fb93fd00] Output file is empty, nothing was encoded(check -ss / -t / -frames parameters if used). Command: ffmpeg -y -loglevel warning -hwaccel cuda -hwaccel_output_format cuda -ss ... (truncated)"
     },
     "frameSamplingMethod": "uniform_spread_with_offset",
-    "requestedFramesForSampling": 60,
-    "finalPilFramesReturnedForItem": 60,
-    "itemFrameExtractionErrorCount": 1,
-    "receivedAt": "2025-06-01T21:43:39.753Z",
-    "requestId": "251e3642-bc39-4353-8eef-62b54d2af168"
+    "requestedFramesForSampling": 20,
+    "finalPilFramesReturnedForItem": 20,
+    "itemFrameExtractionErrorCount": 2,
+    "receivedAt": "2025-06-01T23:55:00.241Z",
+    "requestId": "adeea9a7-afc3-412b-871f-35c054708ad2"
   },
   {
-    "itemId": "/Users/toluadegbehingbe/Library/Mobile Documents/com~apple~CloudDocs/goon/temp/tiktokgoon272.mp4",
-    "originalFilename": "tiktokgoon272.mp4",
-    "itemProcessingRequestId": "pygpu-123-71b84b_/Users/t",
-    "batchConfiguredHwAccelMethod": null,
-    "videoProcessorEffectiveHwAccelMethod": null,
-    "videoDurationSeconds": 5.5,
+    "itemId": "video12",
+    "originalFilename": "1869534809430900837_1.mp4",
+    "itemProcessingRequestId": "pygpu-2-0ad952_video12",
+    "batchConfiguredHwAccelMethod": "cuda",
+    "videoProcessorEffectiveHwAccelMethod": "cuda",
+    "videoDurationSeconds": 47.914667,
     "topLevelItemError": null,
     "topLevelItemErrorDetail": null,
     "hardwareAccelFailures": {
-      "count": 0,
-      "timestamps": [],
-      "errorTypeCounts": {},
-      "sampleErrorMessage": null
+      "count": 1,
+      "timestamps": [
+        47.414667
+      ],
+      "errorTypeCounts": {
+        "RuntimeError": 1
+      },
+      "sampleErrorMessage": "Failed to extract frame at 47.41s using HWAccel (cuda): No frame data from HWAccel (cuda). Stderr: [mov,mp4,m4a,3gp,3g2,mj2 @ 0x55983bde26c0] Packet corrupt (stream = 0, dts = 72396800).\n[h264 @ 0x55983bf4ad00] Invalid NAL unit size (11563 > 10555).\n[h264 @ 0x55983bf4ad00] missing picture in access unit with size 10559\n[in#0/mov,mp4,m4a,3gp,3g2,mj2 @ 0x55983bde2380] corrupt input packet in stream 0\n[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55983bde26c0] stream 0, offset 0xa9d628: partial file\n[h264 @ 0x55983cd1b800] Invalid NAL unit size (11563 > 10555).\n[h264 @ 0x55983cd1b800] Error splitting the input into NAL units.\n[vist#0:0/h264 @ 0x55983be06a40] [dec:h264 @ 0x55983bf5dd80] Decoding error: Invalid data found when processing input\n[vf#0:0 @ 0x55983bf62900] No filtered frames for output stream, trying to initialize anyway.\n[out#0/image2pipe @ 0x55983be5ff80] Output file is empty, nothing was encoded(check -ss / -t / -frames parameters if used). Command: ffmpeg -y -loglevel warning -hwaccel cuda -hwaccel_output_format c... (truncated)"
     },
     "frameSamplingMethod": "uniform_spread_with_offset",
-    "requestedFramesForSampling": 60,
-    "finalPilFramesReturnedForItem": 60,
+    "requestedFramesForSampling": 20,
+    "finalPilFramesReturnedForItem": 20,
     "itemFrameExtractionErrorCount": 1,
-    "receivedAt": "2025-06-01T21:43:39.753Z",
-    "requestId": "251e3642-bc39-4353-8eef-62b54d2af168"
+    "receivedAt": "2025-06-01T23:55:00.241Z",
+    "requestId": "adeea9a7-afc3-412b-871f-35c054708ad2"
+  },
+  {
+    "itemId": "video30",
+    "originalFilename": "1890053552363786578_1.mp4",
+    "itemProcessingRequestId": "pygpu-2-0ad952_video30",
+    "batchConfiguredHwAccelMethod": "cuda",
+    "videoProcessorEffectiveHwAccelMethod": "cuda",
+    "videoDurationSeconds": 299.885714,
+    "topLevelItemError": null,
+    "topLevelItemErrorDetail": null,
+    "hardwareAccelFailures": {
+      "count": 1,
+      "timestamps": [
+        299.385714
+      ],
+      "errorTypeCounts": {
+        "RuntimeError": 1
+      },
+      "sampleErrorMessage": "Failed to extract frame at 299.39s using HWAccel (cuda): No frame data from HWAccel (cuda). Stderr: [vf#0:0 @ 0x55b7f79f7500] No filtered frames for output stream, trying to initialize anyway.\n[out#0/image2pipe @ 0x55b7f791c000] Output file is empty, nothing was encoded(check -ss / -t / -frames parameters if used). Command: ffmpeg -y -loglevel warning -hwaccel cuda -hwaccel_output_format cuda -ss 299.385714 -i /app/public/1890053552363786578_1.mp4 -vf hwdownload,format=nv12,format=yuvj420p -vframes 1 -f image2pipe -c:v mjpeg -q:v 2 -. Command: ffmpeg -y -loglevel warning -hwaccel cuda -hwaccel_output_format cuda -ss 299.385714 -i /app/public/1890053552363786578_1.mp4 -vf hwdownload,format=nv12,format=yuvj420p -vframes 1 -f image2pipe -c:v mjpeg -q:v 2 -"
+    },
+    "frameSamplingMethod": "uniform_spread_with_offset",
+    "requestedFramesForSampling": 20,
+    "finalPilFramesReturnedForItem": 20,
+    "itemFrameExtractionErrorCount": 1,
+    "receivedAt": "2025-06-01T23:55:00.241Z",
+    "requestId": "adeea9a7-afc3-412b-871f-35c054708ad2"
   }
 ]

@@ -110,6 +110,9 @@ class MediaItem(BaseModel):
 class BatchEmbeddingRequest(BaseModel):
     items: List[MediaItem]
     request_id: Optional[str] = None
+    isDryRun: Optional[Union[bool, str]] = Field(
+        None, description="If true, response will not include embeddings or timestamps."
+    )
 
 
 class EmbeddingResult(BaseModel):
@@ -486,39 +489,22 @@ async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
         )
 
         for i, res_or_exc in enumerate(all_item_results_from_futures):
-            # Need to map back to original item ID if gather doesn't preserve order of resolution with IDs
-            # Assuming results from gather are in the same order as futures passed to it
-            # This is fragile. It's better if futures carry the ID or results are dicts.
-            # The `BatchingManager` resolves futures with EmbeddingResult which has an `id`.
-
             if isinstance(res_or_exc, EmbeddingResult):
                 results_list.append(res_or_exc)
             elif isinstance(res_or_exc, Exception):
-                # This means an exception bubbled up from a future that wasn't caught and wrapped in EmbeddingResult by BatchManager
-                # Attempt to find which item this was for, though it's hard if only exception is returned by gather.
-                # For now, log it as a general error for the request.
-                # This should be rare if BatchingManager always resolves futures.
                 item_id_for_error = "unknown_item_due_to_gather_exception"
-                # Try to find the corresponding item if possible (e.g. if only one failed)
-                # This part is tricky and ideally BatchingManager handles all errors gracefully by resolving futures
                 logger.error(
                     f"Raw exception from asyncio.gather for request '{client_request_id}': {res_or_exc}",
                     exc_info=res_or_exc,
                 )
-                # If many items, it's hard to attribute.
-                # We will rely on the fact that BatchingManager resolves all futures.
-            else:  # Should be EmbeddingResult, but if not:
+            else:
                 logger.warning(
                     f"Unknown type {type(res_or_exc)} from asyncio.gather for request '{client_request_id}'. Item: {str(res_or_exc)[:200]}"
                 )
-                # This case needs an ID to form a proper EmbeddingResult. If it doesn't have one, it's problematic.
-                # This indicates a bug in BatchingManager future resolution.
-
     except Exception as e_gather:
         logger.error(
             f"Critical error during asyncio.gather for request '{client_request_id}': {e_gather}"
         )
-        # All items in this client request failed if gather itself fails.
         results_list.clear()
         for item_model_instance in data.items:
             results_list.append(
@@ -531,22 +517,19 @@ async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
                 )
             )
 
-    # Ensure all originally requested items have a result in the list sent back to client
     final_output_results_map = {res.id: res for res in results_list}
     complete_results_list = []
     for requested_item in data.items:
         if requested_item.id in final_output_results_map:
             complete_results_list.append(final_output_results_map[requested_item.id])
         else:
-            # This means the item's future was not resolved or result was lost
-            # Check if the future was created and if it resolved with an error that wasn't added to results_list
             missing_item_future = item_futures.get(requested_item.id)
             if missing_item_future and missing_item_future.done():
                 try:
                     missing_item_result = missing_item_future.result()
                     if isinstance(missing_item_result, EmbeddingResult):
                         complete_results_list.append(missing_item_result)
-                    else:  # Fallback
+                    else:
                         complete_results_list.append(
                             EmbeddingResult(
                                 id=requested_item.id,
@@ -566,7 +549,7 @@ async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
                             debugMetadata={},
                         )
                     )
-            else:  # Future not found or not done, means it likely errored before even gather, or logic error
+            else:
                 complete_results_list.append(
                     EmbeddingResult(
                         id=requested_item.id,
@@ -576,6 +559,26 @@ async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
                         debugMetadata={},
                     )
                 )
+
+    # --- DRY RUN LOGIC ---
+    is_dry_run = False
+    if hasattr(data, "isDryRun"):
+        if isinstance(data.isDryRun, str):
+            is_dry_run = data.isDryRun.lower() == "true"
+        elif isinstance(data.isDryRun, bool):
+            is_dry_run = data.isDryRun
+    if is_dry_run:
+        for res in complete_results_list:
+            res.embedding = []
+            debug_meta = getattr(res, "debug_metadata", None)
+            if not debug_meta:
+                debug_meta = getattr(res, "debugMetadata", None)
+            if debug_meta and isinstance(debug_meta, dict):
+                # candidate_timestamps
+                if "frame_sampling_details" in debug_meta and isinstance(debug_meta["frame_sampling_details"], dict):
+                    debug_meta["frame_sampling_details"]["candidate_timestamps"] = []
+                if "actual_timestamps_for_extraction" in debug_meta:
+                    debug_meta["actual_timestamps_for_extraction"] = []
 
     # Extract the Python-internal batch ID from the first result's debugMetadata, if present
     python_internal_batch_id = None
