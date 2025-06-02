@@ -244,49 +244,64 @@ class CLIPEmbedder:
         Parse a CLIP_MODEL specification into a (model_arch, pretrained_tag) tuple
         compatible with open_clip.create_model_and_transforms.
 
-        Supports:
-          - openai/clip-vit-base-patch32
-          - any huggingface CLIP hub ID (e.g. laion/CLIP-ViT-H-14-laion2B-s32B-b79K)
-          - bare arch names like "ViT-B-32" or "vit-l-14"
+        Dynamically matches input strings to available open_clip models and tags.
+        Provides robust fallback and clear error reporting if no match is found.
         """
+        import difflib
+
         spec = model_spec.strip()
-        size_map = {"base": "B", "large": "L", "huge": "H"}
+        # Query all available (arch, tag) pairs from open_clip
+        available_models = open_clip.list_pretrained()
+        # available_models: List[Tuple[str, str]]
+        # Normalize for matching
 
-        # If HuggingFace LAION model, map to open_clip's known pretrained tag
-        hf_laion_map = {
-            # Add more mappings as needed
-            "laion/CLIP-ViT-H-14-laion2B-s32B-b79K": ("ViT-H-14", "laion2b_s32b_b79k"),
-            "laion/CLIP-ViT-B-32-laion2B-s34B-b79K": ("ViT-B-32", "laion2b_s34b_b79k"),
-            "laion/CLIP-ViT-L-14-laion2B-s32B-b82K": ("ViT-L-14", "laion2b_s32b_b82k"),
-        }
-        if spec in hf_laion_map:
-            return hf_laion_map[spec]
+        def norm(s):
+            return s.replace("-", "").replace("_", "").replace("/", "").lower()
 
-        # Hugging Face or OpenAI hub notation
+        norm_spec = norm(spec)
+        # Try exact match on (arch, tag) or HuggingFace/LAION style
+        for arch, tag in available_models:
+            if norm_spec == norm(f"{arch}-{tag}") or norm_spec == norm(f"{arch}{tag}"):
+                return arch, tag
+        # Try partial/fuzzy match on arch or tag
+        arch_candidates = [
+            arch
+            for arch, _ in available_models
+            if norm(arch) in norm_spec or norm_spec in norm(arch)
+        ]
+        if arch_candidates:
+            # Pick the first arch with the most common pretrained tag
+            arch = arch_candidates[0]
+            tags = open_clip.list_pretrained_tags(arch)
+            # Prefer laion2b or openai tags if present
+            preferred = [t for t in tags if "laion" in t or "openai" in t]
+            tag = preferred[0] if preferred else tags[0]
+            return arch, tag
+        # Fuzzy match using difflib
+        all_model_strings = [f"{arch}-{tag}" for arch, tag in available_models]
+        close = difflib.get_close_matches(
+            norm_spec, [norm(s) for s in all_model_strings], n=1, cutoff=0.7
+        )
+        if close:
+            idx = [norm(s) for s in all_model_strings].index(close[0])
+            arch, tag = available_models[idx]
+            return arch, tag
+        # If input is a HuggingFace repo (e.g. laion/CLIP-ViT-B-16-plus-240-laion2B-s34B-b88K), try to extract arch/tag
         if "/" in spec:
-            author, name = spec.split("/", 1)
-            author_l = author.lower()
-            # OpenAI official models
-            if author_l == "openai":
-                toks = name.lower().split("-")
-                try:
-                    vidx = toks.index("vit")
-                except ValueError:
-                    vidx = 0
-                size = toks[vidx + 1]
-                patch = toks[vidx + 2].replace("patch", "")
-                arch = f"ViT-{ size_map.get(size, size.upper()) }-{ patch }"
-                pretrained = "openai"
-            else:
-                # For other HF models, fallback to hf-hub (custom/private)
-                arch = name
-                pretrained = f"hf-hub:{ spec }"
-        else:
-            # no slash → treat as a bare architecture, default to OpenAI weights
-            arch = spec
-            pretrained = "openai"
-
-        return arch, pretrained
+            _, name = spec.split("/", 1)
+            # Try to find a model arch that matches the start of the name
+            for arch, tag in available_models:
+                if norm(name).startswith(norm(arch)):
+                    return arch, tag
+        # If input is a bare arch, try to find a matching arch
+        for arch, tag in available_models:
+            if norm(arch) == norm_spec:
+                return arch, tag
+        # No match found: raise error with available options
+        available_str = ", ".join([f"{a} ({t})" for a, t in available_models])
+        raise ValueError(
+            f"Could not match model spec '{model_spec}' to any available open_clip model. Available: {available_str}"
+        )
 
     def __init__(
         self,
