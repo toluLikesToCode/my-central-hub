@@ -257,6 +257,7 @@ class CLIPEmbedder:
             # Add more mappings as needed
             "laion/CLIP-ViT-H-14-laion2B-s32B-b79K": ("ViT-H-14", "laion2b_s32b_b79k"),
             "laion/CLIP-ViT-B-32-laion2B-s34B-b79K": ("ViT-B-32", "laion2b_s34b_b79k"),
+            "laion/CLIP-ViT-L-14-laion2B-s32B-b82K": ("ViT-L-14", "laion2b_s32b_b82k"),
         }
         if spec in hf_laion_map:
             return hf_laion_map[spec]

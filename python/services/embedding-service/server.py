@@ -111,7 +111,8 @@ class BatchEmbeddingRequest(BaseModel):
     items: List[MediaItem]
     request_id: Optional[str] = None
     isDryRun: Optional[Union[bool, str]] = Field(
-        None, description="If true, response will not include embeddings or timestamps."
+        None,
+        description="If true, response will not include embeddings or frame extraction timestamps.",
     )
 
 
@@ -575,7 +576,9 @@ async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
                 debug_meta = getattr(res, "debugMetadata", None)
             if debug_meta and isinstance(debug_meta, dict):
                 # candidate_timestamps
-                if "frame_sampling_details" in debug_meta and isinstance(debug_meta["frame_sampling_details"], dict):
+                if "frame_sampling_details" in debug_meta and isinstance(
+                    debug_meta["frame_sampling_details"], dict
+                ):
                     debug_meta["frame_sampling_details"]["candidate_timestamps"] = []
                 if "actual_timestamps_for_extraction" in debug_meta:
                     debug_meta["actual_timestamps_for_extraction"] = []
