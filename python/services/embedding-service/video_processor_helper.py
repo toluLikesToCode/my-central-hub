@@ -132,8 +132,16 @@ class VideoProcessor:
             )  # This will add its own events
             if self.duration is None or self.duration <= 0:
                 raise ValueError(f"Video duration is invalid: {self.duration}")
+
+            # Get average frame rate (FPS) for frame-based selection
+            self.avg_frame_rate = self._get_avg_frame_rate()
+
             self._add_event(
-                "initialization_complete", {"resolved_video_duration_s": self.duration}
+                "initialization_complete",
+                {
+                    "resolved_video_duration_s": self.duration,
+                    "resolved_avg_frame_rate": self.avg_frame_rate,
+                },
             )
         except Exception as e:
             err_msg = f"Initialization failed for VideoProcessor: {e}"
@@ -265,6 +273,7 @@ class VideoProcessor:
     ) -> Tuple[List[Optional[Image.Image]], Dict[str, Any]]:
         """
         Core FFmpeg execution logic for extracting multiple frames in a single process.
+        Uses frame indices (n) instead of timestamps (t) for more reliable frame selection.
         Can be used with or without hardware acceleration.
         """
         if not timestamps:
@@ -275,18 +284,30 @@ class VideoProcessor:
             }
 
         op_start_time = time.monotonic()
-        # Ensure timestamps are unique and sorted for the select filter for predictability.
-        # Keep original index to map results back.
-        indexed_timestamps = sorted(
-            [(ts, i) for i, ts in enumerate(timestamps)], key=lambda x: x[0]
-        )
-        unique_sorted_timestamps = [ts for ts, _ in indexed_timestamps]
 
-        select_filter_parts = [
-            f"eq(t,{ts:.3f})" for ts in unique_sorted_timestamps
-        ]  # Using millisecond precision (.3f) instead of microsecond (.6f) for better tolerance
-        # Less precise timestamps can help match frames when internal video timestamps
-        # have small floating-point variations or when FFmpeg's internal time base differs slightly
+        # Convert timestamps to frame indices based on average frame rate
+        # Keep track of original indices for mapping results back
+        timestamp_to_frame_indices: Dict[float, int] = {}
+        frame_index_to_timestamp_indices: Dict[int, List[int]] = {}
+
+        for i, ts in enumerate(timestamps):
+            # Calculate frame index from timestamp and FPS
+            frame_index = int(round(ts * self.avg_frame_rate))
+            timestamp_to_frame_indices[ts] = frame_index
+
+            # Map frame indices back to original timestamp indices
+            # (multiple timestamps could map to same frame)
+            if frame_index not in frame_index_to_timestamp_indices:
+                frame_index_to_timestamp_indices[frame_index] = []
+            frame_index_to_timestamp_indices[frame_index].append(i)
+
+        # Get unique sorted frame indices for the select filter
+        unique_sorted_frame_indices = sorted(
+            list(set(timestamp_to_frame_indices.values()))
+        )
+
+        # Build select filter based on frame indices (n) rather than timestamps (t)
+        select_filter_parts = [f"eq(n,{n})" for n in unique_sorted_frame_indices]
         select_filter_str = "select='" + "+".join(select_filter_parts) + "'"
 
         ffmpeg_cmd = ["ffmpeg", "-y", "-loglevel", "warning", "-hide_banner"]
@@ -313,7 +334,7 @@ class VideoProcessor:
         ffmpeg_cmd.extend(
             [
                 "-fps_mode",
-                "vfr",  # Modern equivalent of vsync=vfr, output frames matching selected timestamps
+                "vfr",  # Using modern fps_mode option for frame-accurate selection
                 "-f",
                 "image2pipe",  # Output to pipe
                 "-c:v",
@@ -326,9 +347,10 @@ class VideoProcessor:
 
         exec_details = {
             "requested_timestamps_count": len(timestamps),
-            "unique_sorted_timestamps_count": len(unique_sorted_timestamps),
+            "unique_sorted_frame_indices_count": len(unique_sorted_frame_indices),
             "hw_method_attempted": current_hwaccel_method or "software",
-            "timestamp_precision": "millisecond",  # Indicate we're using millisecond precision
+            "selection_method": "frame_index",  # Indicate we're using frame indices instead of timestamps
+            "avg_frame_rate_used": self.avg_frame_rate,
             "ffmpeg_command": " ".join(ffmpeg_cmd),  # Log the full command
         }
         self._add_event("ffmpeg_command_execution_start", exec_details)
@@ -341,7 +363,7 @@ class VideoProcessor:
         # Initialize variables here to avoid "possibly unbound" errors
         process_start_time = time.monotonic()
         # Increased timeout: base + per frame allowance
-        timeout_seconds = 25 + (len(unique_sorted_timestamps) * 2.5)
+        timeout_seconds = 25 + (len(unique_sorted_frame_indices) * 2.5)
 
         try:
             process = subprocess.Popen(
@@ -371,13 +393,19 @@ class VideoProcessor:
             # Parse MJPEG stream
             image_data_stream = io.BytesIO(stdout_data)
             parsed_image_count = 0
-            while parsed_image_count < len(unique_sorted_timestamps):
+            frames_by_index: Dict[int, Image.Image] = {}
+
+            while parsed_image_count < len(unique_sorted_frame_indices):
                 try:
                     img = Image.open(image_data_stream)
                     img = img.convert("RGB")  # Ensure consistent format
-                    original_index = indexed_timestamps[parsed_image_count][1]
-                    frames_pil_ordered[original_index] = img
-                    parsed_image_count += 1
+
+                    # Store the image by its corresponding frame index
+                    if parsed_image_count < len(unique_sorted_frame_indices):
+                        frame_index = unique_sorted_frame_indices[parsed_image_count]
+                        frames_by_index[frame_index] = img
+                        parsed_image_count += 1
+
                 except (
                     UnidentifiedImageError
                 ):  # Expected at end of stream or if data is insufficient
@@ -385,7 +413,7 @@ class VideoProcessor:
                         image_data_stream.tell() < len(stdout_data) - 2
                     ):  # Check if not truly at EOF
                         self.logger.warning(
-                            f"UnidentifiedImageError parsing frame {parsed_image_count + 1}/{len(unique_sorted_timestamps)} but not at EOF. Stream pos: {image_data_stream.tell()}/{len(stdout_data)}"
+                            f"UnidentifiedImageError parsing frame {parsed_image_count + 1}/{len(unique_sorted_frame_indices)} but not at EOF. Stream pos: {image_data_stream.tell()}/{len(stdout_data)}"
                         )
                     break
                 except Exception as e_parse:
@@ -396,10 +424,31 @@ class VideoProcessor:
                     # Mark this frame as failed by leaving it as None
                     break  # Stop trying to parse further if an unexpected error occurs
 
+            # Map the extracted frames back to their original timestamp indices
+            assigned_frames_count = 0
+            timestamp_to_frame_mapping = {}
+
+            for frame_index, frame_img in frames_by_index.items():
+                timestamp_indices = frame_index_to_timestamp_indices.get(
+                    frame_index, []
+                )
+                for timestamp_index in timestamp_indices:
+                    frames_pil_ordered[timestamp_index] = frame_img
+                    assigned_frames_count += 1
+                    # Record which timestamp got which frame for debugging
+                    if timestamp_index < len(timestamps):
+                        timestamp_to_frame_mapping[timestamps[timestamp_index]] = (
+                            frame_index
+                        )
+
+            # Add mapping details to the execution details for debugging
+            exec_details["timestamp_to_frame_mapping"] = timestamp_to_frame_mapping
+
             exec_details.update(
                 {
                     "status": "success",
                     "extracted_frame_count": parsed_image_count,
+                    "assigned_frames_count": assigned_frames_count,
                     "duration_ms": process_duration_ms,
                     "stdout_bytes": len(stdout_data),
                     "stderr_preview": ffmpeg_stderr_output[
@@ -409,14 +458,14 @@ class VideoProcessor:
             )
             self._add_event("ffmpeg_command_execution_success", exec_details)
 
-            if parsed_image_count < len(unique_sorted_timestamps):
+            if parsed_image_count < len(unique_sorted_frame_indices):
                 self.logger.warning(
-                    f"Expected {len(unique_sorted_timestamps)} frames, but only parsed {parsed_image_count} for '{self.video_path}'."
+                    f"Expected {len(unique_sorted_frame_indices)} frames, but only parsed {parsed_image_count} for '{self.video_path}'."
                 )
                 self._add_event(
                     "ffmpeg_frame_count_mismatch",
                     {
-                        "expected": len(unique_sorted_timestamps),
+                        "expected": len(unique_sorted_frame_indices),
                         "parsed": parsed_image_count,
                     },
                 )
@@ -577,6 +626,8 @@ class VideoProcessor:
         final_debug_meta = {
             "frame_sampling_details": frame_sampling_debug_meta,
             "video_duration_s": self.duration,
+            "video_avg_frame_rate": self.avg_frame_rate,
+            "selection_method": "frame_index",  # Indicate we're using frame number-based selection
             "item_processing_request_id": self.item_processing_request_id,
             "num_timestamps_from_sampler": len(timestamps),
             "initial_hwaccel_method": self.hwaccel_method,
@@ -738,6 +789,130 @@ class VideoProcessor:
         )
         final_debug_meta["detailed_extraction_events"] = self.extraction_events
         return extracted_pil_frames, final_debug_meta
+
+    def _get_avg_frame_rate(self) -> float:
+        """
+        Get the average frame rate (FPS) of the video using ffprobe.
+
+        Returns:
+            float: Average frame rate. Defaults to 30.0 if unable to determine.
+        """
+        operation_name = "get_avg_frame_rate_ffprobe"
+        op_start_time = time.monotonic()
+
+        command = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            "-i",
+            self.video_path,
+        ]
+        event_details = {
+            "video_path": self.video_path,
+            "command_preview": "ffprobe -select_streams v:0 -show_entries stream=avg_frame_rate...",
+        }
+        self._add_event(f"{operation_name}_start", event_details)
+
+        try:
+            process = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+                text=True,
+                timeout=15,
+            )
+            frame_rate_str = process.stdout.strip()
+
+            # Handle case where frame rate is returned as a fraction like "30000/1001"
+            if "/" in frame_rate_str:
+                try:
+                    numerator, denominator = map(int, frame_rate_str.split("/"))
+                    if denominator == 0:  # Avoid division by zero
+                        frame_rate = 30.0  # Default value
+                    else:
+                        frame_rate = numerator / denominator
+                except (ValueError, ZeroDivisionError):
+                    frame_rate = 30.0  # Default value
+            else:
+                try:
+                    frame_rate = float(frame_rate_str)
+                    if frame_rate <= 0 or not math.isfinite(frame_rate):
+                        frame_rate = 30.0  # Default to a reasonable FPS
+                except (ValueError, TypeError):
+                    frame_rate = 30.0  # Default value
+
+            time_taken_ms = (time.monotonic() - op_start_time) * 1000
+            self._add_event(
+                f"{operation_name}_success",
+                {
+                    "avg_frame_rate": frame_rate,
+                    "raw_value": frame_rate_str,
+                    "time_taken_ms": time_taken_ms,
+                },
+            )
+            self.logger.debug(
+                f"Average frame rate {frame_rate:.2f}fps in {time_taken_ms:.2f}ms for '{os.path.basename(self.video_path)}'"
+            )
+            return frame_rate
+
+        except subprocess.TimeoutExpired as e_timeout:
+            time_taken_ms = (time.monotonic() - op_start_time) * 1000
+            stderr_output = "N/A"
+            stderr = getattr(e_timeout, "stderr", None)
+            if stderr is not None:
+                try:
+                    stderr_output = stderr.decode("utf-8", errors="ignore").strip()
+                except (AttributeError, UnicodeDecodeError):
+                    pass
+            err_msg = f"Timeout ({time_taken_ms:.0f}ms) getting average frame rate"
+            self.logger.warning(
+                f"{err_msg} for '{self.video_path}'. Stderr: {stderr_output}",
+                extra={"error": str(e_timeout)},
+            )
+            self._add_event(
+                f"{operation_name}_timeout",
+                {
+                    "error": str(e_timeout),
+                    "stderr": stderr_output,
+                    "command": " ".join(command),
+                    "time_taken_ms": time_taken_ms,
+                    "default_fps_used": 30.0,
+                },
+            )
+            return 30.0  # Default frame rate
+        except Exception as e:  # Includes CalledProcessError
+            time_taken_ms = (time.monotonic() - op_start_time) * 1000
+            stderr_output = "N/A"
+            stderr = getattr(e, "stderr", None)
+            if stderr is not None:
+                try:
+                    stderr_output = stderr.decode("utf-8", errors="ignore").strip()
+                except (AttributeError, UnicodeDecodeError):
+                    pass
+            err_msg = f"Failed ({type(e).__name__}, {time_taken_ms:.0f}ms) getting average frame rate"
+            self.logger.error(
+                f"{err_msg} for '{self.video_path}': {e}. Stderr: {stderr_output}",
+                extra={"error": str(e)},
+            )
+            self._add_event(
+                f"{operation_name}_failure",
+                {
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "stderr": stderr_output,
+                    "command": " ".join(command),
+                    "time_taken_ms": time_taken_ms,
+                    "default_fps_used": 30.0,
+                },
+            )
+            return 30.0  # Default frame rate
 
     def __del__(self):
         # Cleanup if necessary, e.g., if self._cv2_capture was used.

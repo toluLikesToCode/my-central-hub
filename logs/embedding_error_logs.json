@@ -2,7 +2,7 @@
   {
     "itemId": "video1",
     "originalFilename": "03180417273b454b8a921588b5c0498f.mp4",
-    "itemProcessingRequestId": "pygpu-2-e96d18_video1",
+    "itemProcessingRequestId": "pygpu-2-a9d54b_video1",
     "batchConfiguredHwAccelMethod": "cuda",
     "videoProcessorEffectiveHwAccelMethod": null,
     "videoDurationSeconds": 11.8,
@@ -18,13 +18,13 @@
     "requestedFramesForSampling": 20,
     "finalPilFramesReturnedForItem": 0,
     "itemFrameExtractionErrorCount": null,
-    "receivedAt": "2025-06-02T01:09:28.950Z",
-    "requestId": "f7f51d9b-fe6b-4d13-9541-28edb0a3aaef"
+    "receivedAt": "2025-06-02T01:27:31.034Z",
+    "requestId": "5b0ba364-8643-4247-9549-4bdfdc83f2e4"
   },
   {
     "itemId": "video2",
     "originalFilename": "0e5e7dec66c6ef519a8dfec585a7f11c.mp4",
-    "itemProcessingRequestId": "pygpu-2-e96d18_video2",
+    "itemProcessingRequestId": "pygpu-2-a9d54b_video2",
     "batchConfiguredHwAccelMethod": "cuda",
     "videoProcessorEffectiveHwAccelMethod": null,
     "videoDurationSeconds": 57.991267,
@@ -40,7 +40,7 @@
     "requestedFramesForSampling": 20,
     "finalPilFramesReturnedForItem": 0,
     "itemFrameExtractionErrorCount": null,
-    "receivedAt": "2025-06-02T01:09:28.950Z",
-    "requestId": "f7f51d9b-fe6b-4d13-9541-28edb0a3aaef"
+    "receivedAt": "2025-06-02T01:27:31.034Z",
+    "requestId": "5b0ba364-8643-4247-9549-4bdfdc83f2e4"
   }
 ]
