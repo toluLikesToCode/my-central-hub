@@ -255,135 +255,152 @@ class CLIPEmbedder:
         import difflib
 
         spec = model_spec.strip()
-        
+
         # Handle HF hub prefix
         if spec.startswith("hf-hub:"):
             spec = spec[7:]  # Remove hf-hub: prefix
-        
+
         # Query all available (arch, tag) pairs from open_clip
         available_models = open_clip.list_pretrained()
-        
+
         # Known mappings for common HuggingFace repo patterns
         known_mappings = {
-            "openai/clip-vit-base-patch32": ("ViT-B-32-quickgelu", "openai"),
-            "openai/clip-vit-base-patch16": ("ViT-B-16-quickgelu", "openai"),
-            "openai/clip-vit-large-patch14": ("ViT-L-14-quickgelu", "openai"),
-            "laion/clip-vit-b-32-laion2b-s34b-b79k": ("ViT-B-32-quickgelu", "laion2b_s34b_b79k"),
-            "laion/clip-vit-l-14-laion2b-s32b-b82k": ("ViT-L-14-quickgelu", "laion2b_s32b_b82k"),
-            "laion/clip-vit-h-14-laion2b-s32b-b79k": ("ViT-H-14-quickgelu", "laion2b_s32b_b79k"),
-            "laion/clip-vit-b-16-plus-240-laion2b-s34b-b88k": ("ViT-B-16-plus-240-quickgelu", "laion2b_s34b_b88k"),
+            "openai/clip-vit-base-patch32": ("ViT-B-32", "openai"),
+            "openai/clip-vit-base-patch16": ("ViT-B-16", "openai"),
+            "openai/clip-vit-large-patch14": ("ViT-L-14", "openai"),
+            "laion/clip-vit-b-32-laion2b-s34b-b79k": ("ViT-B-32", "laion2b_s34b_b79k"),
+            "laion/clip-vit-l-14-laion2b-s32b-b82k": ("ViT-L-14", "laion2b_s32b_b82k"),
+            "laion/clip-vit-h-14-laion2b-s32b-b79k": ("ViT-H-14", "laion2b_s32b_b79k"),
+            "laion/clip-vit-b-16-plus-240-laion2b-s34b-b88k": (
+                "ViT-B-16-plus-240",
+                "laion2b_s34b_b88k",
+            ),
         }
-        
+
         # Normalize for case-insensitive matching
         def norm(s):
             return s.replace("-", "").replace("_", "").replace("/", "").lower()
-        
+
         spec_lower = spec.lower()
         norm_spec = norm(spec)
-        
+
         # 1. Check known mappings first (case-insensitive)
         for known_spec, (arch, tag) in known_mappings.items():
             if spec_lower == known_spec.lower():
                 # Verify this combination is actually available
                 if (arch, tag) in available_models:
                     return arch, tag
-        
+
         # 2. Try exact match on available (arch, tag) combinations
         for arch, tag in available_models:
             # Direct match: spec matches "arch" or "arch-tag"
-            if (norm_spec == norm(arch) or 
-                norm_spec == norm(f"{arch}-{tag}") or 
-                norm_spec == norm(f"{arch}{tag}")):
+            if (
+                norm_spec == norm(arch)
+                or norm_spec == norm(f"{arch}-{tag}")
+                or norm_spec == norm(f"{arch}{tag}")
+            ):
                 return arch, tag
-        
+
         # 3. Handle OpenAI-style naming (openai/clip-vit-*)
         if spec.startswith("openai/"):
             model_part = spec[7:]  # Remove "openai/" prefix
             # Map common OpenAI patterns
             openai_mappings = {
                 "clip-vit-base-patch32": "ViT-B-32",
-                "clip-vit-base-patch16": "ViT-B-16", 
+                "clip-vit-base-patch16": "ViT-B-16",
                 "clip-vit-large-patch14": "ViT-L-14",
                 "clip-vit-large-patch14-336": "ViT-L-14-336",
             }
-            
+
             for pattern, arch in openai_mappings.items():
                 if model_part.lower() == pattern:
                     # Find this architecture with openai pretrained
                     for avail_arch, avail_tag in available_models:
                         if avail_arch == arch and avail_tag == "openai":
                             return avail_arch, avail_tag
-        
+
         # 4. Handle HuggingFace repo patterns (laion/CLIP-*)
         if "/" in spec and spec.lower().startswith(("laion/", "openai/")):
             _, name = spec.split("/", 1)
-            
+
             # Extract architecture from HF repo name patterns
             name_lower = name.lower()
-            
+
             # Try to extract ViT architecture patterns
             if "vit" in name_lower:
                 # Common patterns: CLIP-ViT-B-32, CLIP-ViT-L-14, etc.
                 import re
+
                 # Match patterns like ViT-{size}-{patch}[-{variant}]
-                vit_match = re.search(r'vit-([hblg])-(\d+)(?:-plus-(\d+))?', name_lower)
+                vit_match = re.search(r"vit-([hblg])-(\d+)(?:-plus-(\d+))?", name_lower)
                 if vit_match:
                     size = vit_match.group(1).upper()
                     patch = vit_match.group(2)
                     plus_variant = vit_match.group(3)
-                    
+
                     if plus_variant:
                         candidate_arch = f"ViT-{size}-{patch}-plus-{plus_variant}"
                     else:
                         candidate_arch = f"ViT-{size}-{patch}"
-                    
+
                     # Find best matching pretrained for this architecture
-                    arch_matches = [(arch, tag) for arch, tag in available_models 
-                                  if arch == candidate_arch]
-                    
+                    arch_matches = [
+                        (arch, tag)
+                        for arch, tag in available_models
+                        if arch == candidate_arch
+                    ]
+
                     if arch_matches:
                         # Prefer laion tags, then others
-                        laion_matches = [match for match in arch_matches if "laion" in match[1].lower()]
+                        laion_matches = [
+                            match
+                            for match in arch_matches
+                            if "laion" in match[1].lower()
+                        ]
                         if laion_matches:
                             return laion_matches[0]
                         return arch_matches[0]
-        
+
         # 5. Fuzzy matching for partial matches
         best_match = None
         best_score = 0.0
-        
+
         for arch, tag in available_models:
             # Try matching against architecture name
             arch_score = difflib.SequenceMatcher(None, norm_spec, norm(arch)).ratio()
-            combined_score = difflib.SequenceMatcher(None, norm_spec, norm(f"{arch}-{tag}")).ratio()
-            
+            combined_score = difflib.SequenceMatcher(
+                None, norm_spec, norm(f"{arch}-{tag}")
+            ).ratio()
+
             max_score = max(arch_score, combined_score)
             if max_score > best_score and max_score > 0.7:
                 best_score = max_score
                 best_match = (arch, tag)
-        
+
         if best_match:
             return best_match
-        
+
         # 6. If input is just an architecture name, find a good default pretrained
         for arch, tag in available_models:
             if norm(arch) == norm_spec:
                 return arch, tag
-        
+
         # No match found - provide helpful error with common examples
         common_examples = [
             "openai/clip-vit-base-patch32",
-            "laion/CLIP-ViT-L-14-laion2B-s32B-b82K", 
+            "laion/CLIP-ViT-L-14-laion2B-s32B-b82K",
             "ViT-B-32",
-            "ViT-L-14"
+            "ViT-L-14",
         ]
-        
+
         # Show some available models (limit to avoid overwhelming output)
         available_sample = list(available_models)[:10]
-        available_str = ", ".join([f"{arch} (pretrained: {tag})" for arch, tag in available_sample])
+        available_str = ", ".join(
+            [f"{arch} (pretrained: {tag})" for arch, tag in available_sample]
+        )
         if len(available_models) > 10:
             available_str += f" ... and {len(available_models) - 10} more"
-        
+
         raise ValueError(
             f"Could not match model spec '{model_spec}' to any available open_clip model.\n"
             f"Common examples: {', '.join(common_examples)}\n"
