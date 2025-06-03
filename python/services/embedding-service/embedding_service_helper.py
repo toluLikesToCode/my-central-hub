@@ -265,13 +265,13 @@ class CLIPEmbedder:
         
         # Known mappings for common HuggingFace repo patterns
         known_mappings = {
-            "openai/clip-vit-base-patch32": ("ViT-B-32", "openai"),
-            "openai/clip-vit-base-patch16": ("ViT-B-16", "openai"),
-            "openai/clip-vit-large-patch14": ("ViT-L-14", "openai"),
-            "laion/clip-vit-b-32-laion2b-s34b-b79k": ("ViT-B-32", "laion2b_s34b_b79k"),
-            "laion/clip-vit-l-14-laion2b-s32b-b82k": ("ViT-L-14", "laion2b_s32b_b82k"),
-            "laion/clip-vit-h-14-laion2b-s32b-b79k": ("ViT-H-14", "laion2b_s32b_b79k"),
-            "laion/clip-vit-b-16-plus-240-laion2b-s34b-b88k": ("ViT-B-16-plus-240", "laion2b_s34b_b88k"),
+            "openai/clip-vit-base-patch32": ("ViT-B-32-quickgelu", "openai"),
+            "openai/clip-vit-base-patch16": ("ViT-B-16-quickgelu", "openai"),
+            "openai/clip-vit-large-patch14": ("ViT-L-14-quickgelu", "openai"),
+            "laion/clip-vit-b-32-laion2b-s34b-b79k": ("ViT-B-32-quickgelu", "laion2b_s34b_b79k"),
+            "laion/clip-vit-l-14-laion2b-s32b-b82k": ("ViT-L-14-quickgelu", "laion2b_s32b_b82k"),
+            "laion/clip-vit-h-14-laion2b-s32b-b79k": ("ViT-H-14-quickgelu", "laion2b_s32b_b79k"),
+            "laion/clip-vit-b-16-plus-240-laion2b-s34b-b88k": ("ViT-B-16-plus-240-quickgelu", "laion2b_s34b_b88k"),
         }
         
         # Normalize for case-insensitive matching
