@@ -13,8 +13,11 @@ build/
 Thumbs.db
 
 # Environment variables
+# Ignore all .env files
 .env
-# .env.*
+
+# But do NOT ignore the embedding-service .env file
+!python/services/embedding-service/.env
 
 # Editor folders
 .vscode/
