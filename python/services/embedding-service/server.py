@@ -58,6 +58,10 @@ logger.info(
     f"  DEFAULT_VIDEO_FRAMES_TO_EXTRACT={os.environ.get('DEFAULT_VIDEO_FRAMES_TO_EXTRACT')}"
 )
 logger.info(f"  DOWNLOAD_TIMEOUT_SECONDS={os.environ.get('DOWNLOAD_TIMEOUT_SECONDS')}")
+logger.info(f"  LARGE_ITEM_THRESHOLD_GB={os.environ.get('LARGE_ITEM_THRESHOLD_GB')}")
+logger.info(
+    f"  MAX_CONCURRENT_LARGE_ITEMS={os.environ.get('MAX_CONCURRENT_LARGE_ITEMS')}"
+)
 
 
 # Configure logging (can be more sophisticated)
@@ -151,6 +155,15 @@ class BatchingManager:
         )
         self.vram_total_gb = 0.0
         self.vram_reserved_static_gb = 0.0  # Model, etc.
+        # New: Add separate queue for large items
+        self.large_item_queue = asyncio.Queue()
+        self.large_item_threshold_gb = float(
+            os.environ.get("LARGE_ITEM_THRESHOLD_GB", 0.5)
+        )
+        self.max_concurrent_large_items = int(
+            os.environ.get("MAX_CONCURRENT_LARGE_ITEMS", 2)
+        )
+        self.current_large_items_processing = 0
         if torch.cuda.is_available():
             try:
                 torch.cuda.init()  # Ensure CUDA is initialized
@@ -167,11 +180,21 @@ class BatchingManager:
         )
 
     def estimate_vram_gb(self, item: MediaItem) -> float:
-        base_img_vram_gb = (3 * 224 * 224 * 2) / (1024**3)  # Approx for float16 224x224
+        # Improved VRAM estimation with overhead for video processing
+        base_img_vram_gb = (3 * 224 * 224 * 4) / (
+            1024**3
+        )  # Use float32 estimate for safety
         if item.media_type == "video":
             num_frames = item.num_frames or DEFAULT_VIDEO_FRAMES_TO_EXTRACT_CONFIG
-            return base_img_vram_gb * num_frames
+            # Add overhead for video processing (frame extraction, decoding buffers)
+            video_overhead_multiplier = 1.5
+            return base_img_vram_gb * num_frames * video_overhead_multiplier
         return base_img_vram_gb
+
+    def _is_large_item(self, item: MediaItem) -> bool:
+        """Determine if an item should be processed separately due to size"""
+        estimated_vram = self.estimate_vram_gb(item)
+        return estimated_vram > self.large_item_threshold_gb
 
     async def _get_available_dynamic_vram_gb(self) -> float:
         if torch.cuda.is_available():
@@ -181,25 +204,35 @@ class BatchingManager:
                 # available_for_dynamic = (free_mem_bytes / (1024**3))
                 # A simpler approach: total - static_reserved - current_active_batch_guess
                 # This is still tricky. Let's use `free_mem_bytes` as the basis.
-                return (free_mem_bytes / (1024**3)) * TARGET_VRAM_UTILIZATION
+                # Reserve more conservative memory for large items
+                safety_factor = (
+                    0.7
+                    if self.current_large_items_processing > 0
+                    else TARGET_VRAM_UTILIZATION
+                )
+                return (free_mem_bytes / (1024**3)) * safety_factor
             except Exception as e:
                 logger.warning(
                     f"Could not query CUDA memory: {e}. Falling back to conservative estimate."
                 )
                 return (
                     self.vram_total_gb - self.vram_reserved_static_gb
-                ) * 0.5  # Conservative fallback
+                ) * 0.3  # More conservative fallback
         elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
             # Very rough heuristic for MPS
             # Assume 2GB for model+system, then use a fraction of the rest
             active_batch_est_gb = (
-                self.active_items_in_gpu_processing * 0.01
-            )  # Rough guess per item
-            return (
-                max(0, self.vram_total_gb - 2.0 - active_batch_est_gb)
-                * TARGET_VRAM_UTILIZATION
+                self.active_items_in_gpu_processing * 0.02
+            )  # Increase per-item estimate
+            safety_factor = (
+                0.6
+                if self.current_large_items_processing > 0
+                else TARGET_VRAM_UTILIZATION
             )
-        return 1.0  # Default to allowing some small batches if no GPU info
+            return (
+                max(0, self.vram_total_gb - 2.0 - active_batch_est_gb) * safety_factor
+            )
+        return 0.5  # Reduced default for safety
 
     async def worker(self):
         logger.info("BatchingManager worker started.")
@@ -210,41 +243,81 @@ class BatchingManager:
             # Try to fill a batch
             try:
                 while True:  # Inner loop to accumulate batch items
-                    if (
-                        not current_batch_items_with_futures
-                    ):  # First item in a potential batch
-                        # Block until at least one item is available
-                        item_with_future = await self.queue.get()
-                        self.queue.task_done()  # Mark as processed from queue perspective
-                    else:
-                        # Try to get more items with a very short timeout if batch has started forming
+                    item_with_future = None
+
+                    # Prioritize processing large items when system is not overloaded
+                    should_process_large = (
+                        not self.large_item_queue.empty()
+                        and self.current_large_items_processing
+                        < self.max_concurrent_large_items
+                        and len(current_batch_items_with_futures)
+                        == 0  # Start fresh batch with large item
+                    )
+
+                    if should_process_large:
                         try:
                             item_with_future = await asyncio.wait_for(
-                                self.queue.get(), timeout=GPU_POLL_INTERVAL_S
+                                self.large_item_queue.get(), timeout=0.1
                             )
-                            self.queue.task_done()
+                            self.large_item_queue.task_done()
+                            logger.info(
+                                f"Processing large item: {item_with_future['item_data'].id}"
+                            )
                         except asyncio.TimeoutError:
-                            # No more items arrived quickly, process current batch
-                            break
+                            should_process_large = False
+
+                    if not should_process_large:
+                        if (
+                            not current_batch_items_with_futures
+                        ):  # First item in a potential batch
+                            # Block until at least one item is available
+                            item_with_future = await self.queue.get()
+                            self.queue.task_done()  # Mark as processed from queue perspective
+                        else:
+                            # Try to get more items with a very short timeout if batch has started forming
+                            try:
+                                item_with_future = await asyncio.wait_for(
+                                    self.queue.get(), timeout=GPU_POLL_INTERVAL_S
+                                )
+                                self.queue.task_done()
+                            except asyncio.TimeoutError:
+                                # No more items arrived quickly, process current batch
+                                break
+
+                    # If no item was obtained, continue to next iteration or break
+                    if item_with_future is None:
+                        continue
 
                     item_data: MediaItem = item_with_future["item_data"]
                     item_vram_gb = self.estimate_vram_gb(item_data)
                     available_vram_gb = await self._get_available_dynamic_vram_gb()
 
+                    # Adaptive batch size based on item complexity
+                    is_large = self._is_large_item(item_data)
+                    max_batch_size = (
+                        1
+                        if is_large
+                        else min(MAX_BATCH_ITEMS, max(1, int(available_vram_gb / 0.1)))
+                    )
+
                     if (
                         current_batch_estimated_vram_gb + item_vram_gb
                         <= available_vram_gb
-                        and len(current_batch_items_with_futures) < MAX_BATCH_ITEMS
+                        and len(current_batch_items_with_futures) < max_batch_size
                     ):
                         current_batch_items_with_futures.append(item_with_future)
                         current_batch_estimated_vram_gb += item_vram_gb
+
+                        if is_large:
+                            self.current_large_items_processing += 1
+                            break  # Process large items individually
                     else:
-                        # Item doesn't fit, or max items reached. Put back and process current.
-                        await self.queue.put(
-                            item_with_future
-                        )  # Re-queue item that didn't fit
+                        # Re-queue to appropriate queue
+                        target_queue = self.large_item_queue if is_large else self.queue
+                        await target_queue.put(item_with_future)
                         logger.debug(
-                            f"Item {item_data.id} (est: {item_vram_gb:.3f}GB) does not fit or batch full. Available VRAM: {available_vram_gb:.3f}GB. Current batch: {len(current_batch_items_with_futures)} items, {current_batch_estimated_vram_gb:.3f}GB."
+                            f"Item {item_data.id} (est: {item_vram_gb:.3f}GB, large: {is_large}) queued for later. "
+                            f"Available VRAM: {available_vram_gb:.3f}GB. Current batch: {len(current_batch_items_with_futures)} items"
                         )
                         break  # Process the batch accumulated so far
 
@@ -273,8 +346,17 @@ class BatchingManager:
                 self.active_items_in_gpu_processing += len(
                     actual_items_to_process_dicts
                 )
+
+                # Check if this batch contains large items
+                contains_large_items = any(
+                    self._is_large_item(MediaItem(**item_dict))
+                    for item_dict in actual_items_to_process_dicts
+                )
+
                 logger.info(
-                    f"Processing batch '{internal_batch_id}' with {len(actual_items_to_process_dicts)} items. Est. VRAM: {current_batch_estimated_vram_gb:.3f}GB. Queue size: {self.queue.qsize()}"
+                    f"Processing batch '{internal_batch_id}' with {len(actual_items_to_process_dicts)} items "
+                    f"(large items: {contains_large_items}). Est. VRAM: {current_batch_estimated_vram_gb:.3f}GB. "
+                    f"Queue sizes - regular: {self.queue.qsize()}, large: {self.large_item_queue.qsize()}"
                 )
 
                 try:
@@ -361,10 +443,31 @@ class BatchingManager:
                     self.active_items_in_gpu_processing -= len(
                         actual_items_to_process_dicts
                     )
+                    # Decrement large item counter if this batch contained large items
+                    if contains_large_items:
+                        self.current_large_items_processing = max(
+                            0,
+                            self.current_large_items_processing
+                            - sum(
+                                1
+                                for item_dict in actual_items_to_process_dicts
+                                if self._is_large_item(MediaItem(**item_dict))
+                            ),
+                        )
             elif (
-                self.queue.empty()
-            ):  # No items in batch, and queue is empty, sleep a bit
+                self.queue.empty() and self.large_item_queue.empty()
+            ):  # No items in batch, and both queues are empty, sleep a bit
                 await asyncio.sleep(BATCH_FLUSH_TIMEOUT_S)
+
+    async def add_item(self, item_data: MediaItem, future: asyncio.Future):
+        """Add item to appropriate queue based on size"""
+        item_with_future = {"item_data": item_data, "future": future}
+
+        if self._is_large_item(item_data):
+            await self.large_item_queue.put(item_with_future)
+            logger.debug(f"Added large item {item_data.id} to large item queue")
+        else:
+            await self.queue.put(item_with_future)
 
 
 batch_manager = BatchingManager()
@@ -462,10 +565,8 @@ async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
         future = asyncio.Future()
         item_futures[item_model_instance.id] = future
         try:
-            # MediaItem is already validated by FastAPI if type hint is BatchEmbeddingRequest
-            await batch_manager.queue.put(
-                {"item_data": item_model_instance, "future": future}
-            )
+            # Use the new add_item method to route to appropriate queue
+            await batch_manager.add_item(item_model_instance, future)
         except Exception as q_err:  # Should not happen with asyncio.Queue
             logger.error(
                 f"Failed to put item {item_model_instance.id} on queue for request '{client_request_id}': {q_err}"
