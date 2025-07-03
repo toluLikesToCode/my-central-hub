@@ -34,10 +34,10 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
 # Set default port for FastAPI server
-ENV PYTHON_PORT=3456
+ENV PYTHON_PORT=8080
 
 # Expose the port for FastAPI
-EXPOSE 3456
+EXPOSE 8080
 
 # Set default volume mount point for public media
 VOLUME ["/media"]
