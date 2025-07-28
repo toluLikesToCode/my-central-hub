@@ -18,7 +18,6 @@ This module provides a structure for collecting and exposing metrics for differe
    - `export * from './metricsController';`
    - `export * from './metricsService';`
 4. **Register the endpoint:**
-
    - In `src/routes/metrics.routes.ts`, add:
 
      ```typescript

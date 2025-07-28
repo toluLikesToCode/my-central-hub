@@ -1,9 +1,13 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+/**
+ * src/config/server.config.ts
+ * This file contains the server configuration settings.
+ */
 import dotenv from 'dotenv';
 import path, { join } from 'path';
-import { Logger } from '../utils/logger';
-
-// Instantiate logger using Logger class (default export mock was missing methods in tests)
-const logger = new Logger();
+import logger from '../utils/logger';
+import process from 'process';
+import { DateTimeConfig } from '../utils/dateFormatter';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -15,26 +19,44 @@ export const config = {
     : join(process.cwd(), 'public'),
   mediaDir: process.env.MEDIA_DIR
     ? join(process.cwd(), process.env.MEDIA_DIR)
-    : join(process.cwd(), 'media'),
+    : join(process.cwd(), 'public', 'media'),
+  // DDoS protection settings:
+  maxConnectionsPerIp: process.env.MAX_CONN_PER_IP ? parseInt(process.env.MAX_CONN_PER_IP, 10) : 50,
   headerTimeoutMs: process.env.HEADER_TIMEOUT_MS
-    ? Math.max(parseInt(process.env.HEADER_TIMEOUT_MS, 10), 0)
-    : 5000,
-  bodyTimeoutMs: process.env.BODY_TIMEOUT_MS
-    ? Math.max(parseInt(process.env.BODY_TIMEOUT_MS, 10), 0)
-    : 10000,
+    ? parseInt(process.env.HEADER_TIMEOUT_MS, 10)
+    : 10000, // 10 s to receive headers
+  bodyTimeoutMs: process.env.BODY_TIMEOUT_MS ? parseInt(process.env.BODY_TIMEOUT_MS, 10) : 30000, // 30 s to send full body
+  uploadTimeoutMs: process.env.UPLOAD_TIMEOUT_MS
+    ? parseInt(process.env.UPLOAD_TIMEOUT_MS, 10)
+    : 60000, // 60 s max per request
   /**
-   * Path to the SQLite database file. Will be created if missing.
+   * Path to the SQLite database directory. Will be created if missing.
    */
-  dbPath: process.env.DB_PATH ? process.env.DB_PATH : join(process.cwd(), 'data', 'metrics.db'),
+  dbPath: process.env.DB_PATH ? process.env.DB_PATH : join(process.cwd(), 'data'),
+  /**
+   * Admin key for privileged operations (cache management, etc.)
+   */
+  adminKey: process.env.ADMIN_KEY || 'admin-secret-key',
+  /**
+   * File caching configuration
+   */
+  fileCache: {
+    enabled: process.env.FILE_CACHE_ENABLED !== 'false', // Default to true
+    maxSize: parseInt(process.env.FILE_CACHE_MAX_SIZE || '209715200', 10), // 200MB default
+    maxAge: parseInt(process.env.FILE_CACHE_MAX_AGE || '600000', 10), // 10 minutes default
+  },
   /**
    * Feature toggles for modularity and configurability
    */
   features: {
-    metrics: true,
+    metrics: false,
     fileHosting: true,
     fileStreaming: true,
+    embeddingService: false,
+    remoteLogging: false, // Enable the remote logging feature
     // Add more features here as needed
   },
+
   /**
    * Logging configuration
    */
@@ -44,10 +66,21 @@ export const config = {
     logDir: process.env.LOG_DIR || join(process.cwd(), 'logs'), // Centralized log directory
   },
   /**
+   * Date and time formatting configuration
+   * Now using DateTimeConfig imported from dateFormatter.ts
+   */
+  dateTime: DateTimeConfig,
+
+  /**
    * Embedder configuration
    */
   embedding: {
     // Python process settings
+    maxRetries: 3,
+    retryDelayMs: 1000,
+    timeoutMs: 30000,
+    // Embedding service settings
+    serviceUrl: process.env.EMBEDDING_SERVICE_URL || 'http://192.168.1.107:3456',
     pythonExecutable: process.env.PYTHON_EXECUTABLE || 'python3',
     pythonScriptPath:
       process.env.PYTHON_SCRIPT_PATH ||
@@ -55,27 +88,63 @@ export const config = {
     pythonLogPath: process.env.PYTHON_LOG_PATH, // Optional: Path for python script's own log, defaults to alongside script if not set
     // Model/Processing Args passed to Python script
     modelArgs: [
+      '--enable_augmentation',
+      '--log',
+      '--debug',
+      '-n',
+      '30',
       // Example: '--model', 'openai/clip-vit-base-patch32' is now expected to be set here
     ],
     defaultModel: 'openai/clip-vit-base-patch32', // Default model if not in args
-    defaultNumFrames: 20,
+    defaultNumFrames: 15,
     enableAugmentation: false, // Default augmentation flag for python script
     // Service behavior
-    inactivityTimeoutMs: 5 * 60 * 1000,
-    scriptTimeoutMs: 15 * 60 * 1000,
-    debug: false,
-    log: false,
+    inactivityTimeoutMs: 10 * 60 * 1000,
+    scriptTimeoutMs: 30 * 60 * 1000,
+    debug: true,
+    log: true,
+    inputDir: process.env.EMBED_DIR,
   },
-  testMode: true, // Set to true for testing purposes
+  testMode: false, // Set to true for testing purposes
+  staticDir: process.env.STATIC_DIR || join(process.cwd(), 'public'), // Static files directory
+  // Maximum allowed JSON/body size in bytes
+  maxBodySizeBytes: process.env.MAX_BODY_SIZE_BYTES
+    ? parseInt(process.env.MAX_BODY_SIZE_BYTES, 10)
+    : 10 * 1024 * 1024, // default 10 MB
 };
 
-// Log configuration only when not running tests
-if (!config.testMode) {
-  logger.info(`Server configuration:`);
-  logger.info(`- Port: ${config.port}`);
-  logger.info(`- Public Directory: ${config.publicDir}`);
-  logger.info(`- Media Directory: ${config.mediaDir}`);
-  logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
-  logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
-  logger.info(`- Database Path: ${config.dbPath}`);
+// Only log configuration if logger is defined and we're in test mode
+if (logger && config.testMode) {
+  // Wrap in try/catch to avoid potential startup issues
+  try {
+    logger.info(`Server configuration:`);
+    logger.info(`- Port: ${config.port}`);
+    logger.info(`- Public Directory: ${config.publicDir}`);
+    logger.info(`- Media Directory: ${config.mediaDir}`);
+    logger.info(`- Log Directory: ${config.logging.logDir}`);
+    logger.info(`- Static Directory: ${config.staticDir}`);
+    logger.info(`- Header Timeout: ${config.headerTimeoutMs}ms`);
+    logger.info(`- Body Timeout: ${config.bodyTimeoutMs}ms`);
+    logger.info(`- SQLite DB path: ${config.dbPath}`);
+    logger.info(`- Admin Key: ${config.adminKey}`);
+    logger.info(`- File Cache Enabled: ${config.fileCache.enabled}`);
+    logger.info(`- File Cache Max Size: ${config.fileCache.maxSize} bytes`);
+    logger.info(`- File Cache Max Age: ${config.fileCache.maxAge}ms`);
+    logger.info(`- Active Features:`, {
+      features: Object.entries(config.features)
+        .filter(([_, enabled]) => enabled)
+        .map(([feature]) => feature),
+    });
+    logger.info(`- Log Level: ${config.logging.level}`);
+    logger.info(`- Python Executable: ${config.embedding.pythonExecutable}`);
+    logger.info(`- Python Script Path: ${config.embedding.pythonScriptPath}`);
+    logger.info(`- Embedding Inactivity Timeout: ${config.embedding.inactivityTimeoutMs}ms`);
+    logger.info(`- Embedding Script Timeout: ${config.embedding.scriptTimeoutMs}ms`);
+    logger.info(`- Active Model Args: ${config.embedding.modelArgs.join(', ')}`);
+    logger.info(`- Timezone: ${config.dateTime.timezone}`);
+    logger.info(`- Date Format: ${config.dateTime.format}`);
+  } catch (error) {
+    // In case of any logging error during startup, log to console instead
+    console.warn('Error logging configuration:', error);
+  }
 }

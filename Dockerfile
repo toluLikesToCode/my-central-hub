@@ -1,58 +1,107 @@
 # Dockerfile for my-central-hub
 
-# Use an official Node.js runtime as a parent image (Choose a version you use, e.g., 18 or 20)
-# Using '-slim' variant for smaller image size
-FROM node:18-slim
+# Use an official Node.js Debian-based runtime (slim variant)
+# This provides better compatibility for Python packages like PyTorch
+FROM node:23-slim
 
 # Set the working directory inside the container
 WORKDIR /app
+
+# --- APT Proxy Fix ---
+# Copy the custom apt configuration to handle potential proxy/cache issues
+# Ensure 'badproxy' file exists in the build context (same directory as Dockerfile)
+COPY ./badproxy /etc/apt/apt.conf.d/99fixbadproxy
+# --- End APT Proxy Fix ---
+
+# Copy package.json and package-lock.json
+COPY package.json ./
+
+RUN npm i
+RUN npm install -g typescript
+
+
 
 # Install system dependencies needed by your project:
 # - python3 and pip for your embedding_service_helper.py
 # - ffmpeg for video processing (used by embedding service)
 # - git (sometimes needed by pip packages)
-# Clean up apt-get cache afterwards to keep image size down
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    ffmpeg \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+# Combine update, install, and clean in one layer for efficiency.
+# The proxy fix should help prevent hash mismatches here.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg \
+        git \
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy package.json and package-lock.json (or yarn.lock)
-# This leverages Docker layer caching: if these files don't change,
-# npm install won't rerun on subsequent builds, speeding things up.
-COPY package*.json ./
+# Ensure 'python' points to Python 3 if needed (usually handled by python3 package)
+# RUN ln -sf /usr/bin/python3 /usr/bin/python
 
-# Install Node.js dependencies
-RUN npm install
-# If you use yarn, replace the above with:
-# COPY yarn.lock ./
-# RUN yarn install --frozen-lockfile
+# Add local node_modules bin to the path (should help find tsc)
+# Note: Setting PATH here might not affect subsequent RUN commands in the same way
+# depending on the shell execution context within Docker build.
+ENV PATH=/app/node_modules/.bin:$PATH
+
+# Set environment for production and unbuffered Python output
+# Note: NODE_ENV=production is set *before* npm ci, which is good practice
+ENV NODE_ENV=production PYTHONUNBUFFERED=1
+
+# Copy package.json and package-lock.json
+COPY package.json ./
+
+RUN npm i
+RUN npm install -g typescript
+
+# Install Node.js dependencies including devDependencies needed for the build
+# Removed --only=production flag
+RUN npm ci --frozen-lockfile
+
+# Build your TypeScript application
+# Step 1: Clean previous build output (equivalent to 'npm run clean')
+RUN rm -rf dist
+# Step 2: Directly execute the local tsc binary
+# RUN ./node_modules/.bin/tsc
+RUN npm run build
+
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y python3-pip python3-dev python-is-python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Python and pip are pre-installed in this CUDA+Python base image
+
+# --- DIAGNOSTIC STEP ---
+# Check if tsc binary exists after npm ci
+RUN ls -la /app/node_modules/.bin/tsc || echo "tsc not found in node_modules/.bin"
+# --- END DIAGNOSTIC STEP ---
+
+# Install python3 and pip3 using apt
+# Combine update and install in one RUN layer to reduce image size
+# Use -y to auto-confirm installation
+# Clean up apt cache afterwards to keep image small
+RUN apt-get update && \
+    apt-get install -y python3 python3-pip && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy Python requirements file
-COPY requirements.txt ./
+# Ensure this path is correct relative to your build context
+COPY python/requirements.txt ./requirements.txt
 
-# Install Python dependencies
-# --no-cache-dir reduces image size
-# Note: Installing PyTorch and Transformers can take time and make the image large.
-RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Copy the rest of your application code into the container
+# Ensure your .dockerignore prevents copying unnecessary files
 COPY . .
 
-# Build your TypeScript application (assuming you have a build script in package.json)
-# This compiles your .ts files (like main.ts, server.ts) into JavaScript, usually in a 'dist' folder.
-RUN npm run build
-# If you don't have a build step and run directly with ts-node, skip this line
-# and adjust the CMD instruction below accordingly.
 
-# Your server listens on a port defined in config (default 8080)
-# Expose this port from the container
+# --- Optional: Prune devDependencies after build ---
+# If you want to reduce final image size, you can remove devDependencies now
+# RUN npm prune --production
+
+# Expose the port your application listens on (e.g., 8080 from your config)
 EXPOSE 8080
 
-# Define the command to run your application
-# This assumes your build output's main entry point is dist/main.js
+# Define the command to run your *backend* application
+# This runs the compiled JavaScript output from your build step.
 CMD ["node", "dist/main.js"]
-# If you run directly with ts-node (not recommended for production):
-# CMD ["npx", "ts-node", "src/main.ts"]

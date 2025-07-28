@@ -1,6 +1,7 @@
 import { IncomingRequest } from '../entities/http';
 import { URL } from 'url';
 import logger from '../utils/logger';
+import { config } from '../config/server.config';
 
 enum ParserState {
   REQUEST_LINE,
@@ -16,8 +17,15 @@ enum ParserState {
 const ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
 const MAX_HEADER_BYTES = 8192; // 8KB
 const MAX_HEADERS = 100; // Maximum number of headers allowed
-const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_BODY_BYTES = config.maxBodySizeBytes;
 const CRLF = Buffer.from('\r\n');
+
+export class RequestEntityTooLargeError extends Error {
+  constructor(message = 'Request body too large') {
+    super(message);
+    this.name = 'RequestEntityTooLargeError';
+  }
+}
 
 export class HttpRequestParser {
   protected buffer = Buffer.alloc(0);
@@ -33,6 +41,7 @@ export class HttpRequestParser {
   private isChunked = false;
   private invalid = false;
   private lastHeaderKey: string | null = null;
+  private isBinaryContent = false;
 
   /**
    * Returns the number of pending bytes in the parser buffer.
@@ -42,7 +51,29 @@ export class HttpRequestParser {
   }
 
   feed(data: Buffer): IncomingRequest | null {
-    this.buffer = Buffer.concat([this.buffer, data]);
+    const originalBufferLength = this.buffer.length;
+    const incomingDataLength = data.length;
+
+    if (process.env.NODE_ENV === 'test') {
+      logger.debug(
+        `[HttpParser] Feed called: originalBuffer=${originalBufferLength} bytes, incomingData=${incomingDataLength} bytes`,
+      );
+    }
+
+    // Special case: if an empty buffer is passed and no data in buffer, return null immediately
+    if (data.length === 0 && this.buffer.length === 0) {
+      return null; // No data to parse
+    }
+
+    // special case: if an empty buffer is passed then its a signal
+    // to proccess next request from existing buffer
+    if (data.length === 0 && this.buffer.length > 0) {
+      // do nothing, just contnue with existing buffer below
+    } else {
+      // standard case
+      this.buffer = Buffer.concat([this.buffer, data]);
+    }
+
     try {
       while (true) {
         // REQUEST_LINE
@@ -68,7 +99,10 @@ export class HttpRequestParser {
           this.method = method;
           this.httpVersion = version;
           try {
-            this.url = new URL(reqPath, 'http://placeholder');
+            // Use defaults for LOCAL_IP and config.port if not set (for test environments)
+            const localIp = process.env.LOCAL_IP || 'localhost';
+            const port = config.port || 3000;
+            this.url = new URL(reqPath, `http://${localIp}:${port}`);
           } catch {
             this._setError('Malformed URL: ' + reqPath);
             continue;
@@ -133,6 +167,16 @@ export class HttpRequestParser {
               return this._errorResponse();
             }
           }
+
+          // Check for binary content
+          const contentType = this.headers['content-type'] || '';
+          this.isBinaryContent =
+            contentType.includes('application/octet-stream') ||
+            contentType.includes('image/') ||
+            contentType.includes('video/') ||
+            contentType.includes('audio/') ||
+            contentType.includes('multipart/form-data');
+
           // Short-circuit on parse errors
           if (this.invalid) {
             return this._errorResponse();
@@ -168,8 +212,8 @@ export class HttpRequestParser {
             continue;
           }
           if (this.contentLength > MAX_BODY_BYTES) {
-            this._setError('Request body too large');
-            continue;
+            // immediately abort parsing
+            throw new RequestEntityTooLargeError();
           }
           this.remainingBody = this.contentLength;
           if (this.buffer.length < this.remainingBody) return null;
@@ -199,8 +243,7 @@ export class HttpRequestParser {
         // CHUNK_BODY
         if (this.state === ParserState.CHUNK_BODY) {
           if (this.remainingBody > MAX_BODY_BYTES) {
-            this._setError('Chunk body too large');
-            continue;
+            throw new RequestEntityTooLargeError();
           }
           if (this.buffer.length < this.remainingBody) return null;
           const chunk = this.buffer.subarray(0, this.remainingBody);
@@ -231,6 +274,21 @@ export class HttpRequestParser {
           // capture leftover before reset (for pipelining)
           const leftover = this.buffer;
           const finalBody = this.bodyChunks.length ? Buffer.concat(this.bodyChunks) : undefined;
+
+          if (process.env.NODE_ENV === 'test') {
+            logger.debug(`[HttpParser] Request complete, leftover=${leftover.length} bytes`);
+          }
+
+          // Log information about binary content for debugging
+          if (this.isBinaryContent && finalBody) {
+            logger.debug('Parsed binary request', {
+              method: this.method,
+              contentType: this.headers['content-type'],
+              contentLength: finalBody.length,
+              path: this.url.pathname,
+            });
+          }
+
           const request = {
             method: this.method,
             path: this.url.pathname,
@@ -241,11 +299,14 @@ export class HttpRequestParser {
             url: this.url,
             body: finalBody,
             raw: '',
-            ctx: {},
+            ctx: {
+              isBinaryContent: this.isBinaryContent,
+            },
             invalid: this.invalid,
           };
-          this.reset();
+          this.reset(true);
           this.buffer = leftover; // restore leftover for next request
+          this.state = ParserState.REQUEST_LINE; // ensure ready for next pipelined request
           return request;
         }
         // ERROR
@@ -286,19 +347,25 @@ export class HttpRequestParser {
     };
   }
 
-  reset(): void {
-    this.buffer = Buffer.alloc(0);
+  reset(preserveBuffer = true): void {
+    const leftover = preserveBuffer ? this.buffer : Buffer.alloc(0);
+
+    // reset all other state
     this.state = ParserState.REQUEST_LINE;
     this.headers = {};
     this.headersMap = new Map();
     this.bodyChunks = [];
     this.method = '';
     this.httpVersion = '';
-    this.url = new URL('http://placeholder');
+    this.url = new URL('http://coolcat.com');
     this.contentLength = 0;
     this.remainingBody = 0;
     this.isChunked = false;
     this.invalid = false;
     this.lastHeaderKey = null;
+    this.isBinaryContent = false;
+
+    // Restore the leftover buffer
+    this.buffer = leftover;
   }
 }

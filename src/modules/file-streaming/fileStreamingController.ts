@@ -1,94 +1,65 @@
 import { Socket } from 'net';
-import { sendResponse } from '../../entities/sendResponse';
 import { IncomingRequest } from '../../entities/http';
-import { getHeader, getQuery } from '../../utils/httpHelpers';
-import { config } from '../../config/server.config';
-import { Logger } from '../../utils/logger';
-// Instantiate logger (default mock lacked info/error in tests)
-const logger = new Logger();
-import { getMimeType } from '../../utils/helpers';
-import { Readable } from 'stream';
-import { FileHostingService } from '../file-hosting/fileHostingService';
+import logger from '../../utils/logger';
+import { formatDate } from '../../utils/dateFormatter';
+import { fileHostingController } from '../file-hosting/fileHostingController';
 
-const fileSvc = new FileHostingService(config.mediaDir);
+// Create a specific deprecation logger
+const deprecationLogger = logger.child({
+  module: 'file-streaming',
+  deprecation: true,
+});
 
+/**
+ * @deprecated This controller is deprecated and will be removed in the next major version.
+ * Please use the fileHostingController.getFile() method from the file-hosting module instead.
+ *
+ * FileStreamingController
+ *
+ * Handles streaming media files with support for HTTP Range requests
+ * to enable efficient video/audio streaming with seeking capabilities.
+ */
 export const fileStreamingController = {
-  /** GET /stream?file=video.mp4 – streams file (supports Range) */
-  async handleStream(req: IncomingRequest, sock: Socket) {
-    if (!config.testMode) {
-      logger.info(
-        `[handleStream] url=${req.url} path=${req.path} query=${JSON.stringify(req.query)}`,
-      );
-    }
-    const fileName = getQuery(req, 'file');
-    if (!fileName) {
-      sendResponse(
-        sock,
-        400,
-        { 'Content-Type': 'text/plain' },
-        'Missing required "file" query parameter.',
-      );
-      return;
-    }
-    try {
-      const rangeHdr = getHeader(req, 'range');
-      let stream: Readable;
-      const fileStat = await fileSvc.stat(fileName);
-      const size = fileStat.size;
-      if (rangeHdr) {
-        const m = /bytes=(\d*)-(\d*)/.exec(rangeHdr);
-        if (!m) {
-          sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
-          sock.end();
-          return;
-        }
-        const startStr = m[1];
-        const endStr = m[2];
-        let start: number;
-        let end: number;
-        if (startStr) {
-          start = parseInt(startStr, 10);
-          end = endStr ? parseInt(endStr, 10) : size - 1;
-        } else {
-          const suffix = parseInt(endStr, 10);
-          start = size - suffix;
-          end = size - 1;
-        }
-        if (start > end || start < 0 || end >= size) {
-          sendResponse(sock, 416, { 'Content-Type': 'text/plain' }, '416 Range Not Satisfiable');
-          sock.end();
-          return;
-        }
-        stream = await fileSvc.readFile(fileName, { start, end });
-        if (!stream) throw new Error('Stream is undefined');
-        const len = end - start + 1;
-        sendResponse(
-          sock,
-          206,
-          {
-            'Content-Type': getMimeType(fileName) || 'application/octet-stream',
-            'Accept-Ranges': 'bytes',
-            'Content-Range': `bytes ${start}-${end}/${size}`,
-            'Content-Length': String(len),
-          },
-          stream,
-        );
-      } else {
-        stream = await fileSvc.readFile(fileName);
-        if (!stream) throw new Error('Stream is undefined');
-        const mimeType = getMimeType(fileName);
-        sendResponse(
-          sock,
-          200,
-          { 'Content-Type': mimeType, 'Content-Length': String(size) },
-          stream,
-        );
-      }
-    } catch (err) {
-      if (!config.testMode) {
-        logger.error(`[handleStream] fileName=${fileName}, error=${(err as Error).message}`);
-      }
-      sendResponse(sock, 404, { 'Content-Type': 'text/plain' }, `File "${fileName}" not found.`);
-    }
+  /**
+   * @deprecated This method is deprecated and will be removed in the next major version.
+   * Please use fileHostingController.getFile() instead.
+   *
+   * Streams a file from the media directory with Range header support
+   *
+   * This handler provides optimized media file delivery by supporting:
+   * - Partial content (206) responses for HTTP Range requests
+   * - Proper MIME type detection for various media formats
+   * - Efficient byte-range serving for video/audio seeking
+   * - Appropriate error handling with meaningful status codes
+   *
+   * @param req - The incoming HTTP request with file query parameter
+   * @param sock - The TCP socket to write response to
+   * @returns {Promise<void>} - Resolves when streaming is complete or on error
+   */
+  async handleStream(req: IncomingRequest, sock: Socket): Promise<void> {
+    // Log deprecation warning for monitoring
+    deprecationLogger.warn('Using deprecated fileStreamingController.handleStream method', {
+      requestPath: req.path,
+      clientIp: req.headers['x-forwarded-for'] || sock.remoteAddress,
+      timestamp: formatDate(new Date()),
+      migration: 'Use fileHostingController.getFile instead',
+    });
+
+    // Simply forward to the file-hosting controller to ensure compatibility
+    return fileHostingController.getFile(req, sock);
   },
 };
+
+/**
+ * @module fileStreamingController
+ * @deprecated This module is deprecated and will be removed in the next major version.
+ * Please use the file-hosting module instead.
+ *
+ * @description This module handles streaming media files with support for HTTP Range requests.
+ * It provides optimized media file delivery by supporting partial content (206) responses for HTTP Range requests,
+ * proper MIME type detection for various media formats, efficient byte-range serving for video/audio seeking,
+ * and appropriate error handling with meaningful status codes.
+ *
+ * @version 1.0.1
+ * @date 2025-05-06
+ */
