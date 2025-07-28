@@ -168,10 +168,16 @@ export function sendResponse(
       shouldClose: shouldCloseConnection,
     });
 
-    socket.write(body, (err?: Error) => {
+    socket.write(body, (err) => {
       if (err && !socket.destroyed) {
         logger.error('[sendResponse] Error writing string/buffer body', {
-          error: err.message,
+          error: {
+            message: err.message,
+            stack: err.stack, // Include stack trace for better debugging
+            type: err.name, // Include error type for better context
+            isBinary: isBinaryContent,
+            contentType: finalHeaders['Content-Type'],
+          },
           status,
         });
         socket.destroy(err); // Destroy on write error

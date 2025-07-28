@@ -52,8 +52,8 @@ export const config = {
     metrics: false,
     fileHosting: true,
     fileStreaming: true,
-    embeddingService: true,
-    remoteLogging: true, // Enable the remote logging feature
+    embeddingService: false,
+    remoteLogging: false, // Enable the remote logging feature
     // Add more features here as needed
   },
 

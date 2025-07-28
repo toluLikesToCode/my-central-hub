@@ -11,7 +11,7 @@
     "build": "npm run clean && tsc",
     "start": "npm run build && node dist/main.js",
     "start-w": "npm run build && node dist/main.js",
-    "test": "npm run build && jest --all --verbose | grep -E 'FAIL|^ ✕'",
+    "test": "npm run build && jest --all --verbose",
     "test-w": "npm run build && jest --all",
     "test:stress": "jest \"stress/**/*.test.ts\"",
     "test:ci": "jest --testPathIgnorePatterns=stress",

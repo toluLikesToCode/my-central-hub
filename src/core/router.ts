@@ -22,6 +22,7 @@ import logger, { Logger } from '../utils/logger';
 import { requestIdMiddleware } from '../core/middlewares/requestId';
 import { corsMiddleware } from '../core/middlewares/cors';
 import { optionsHandlerMiddleware } from '../core/middlewares/optionsHandler';
+import { generateNoRouteFoundHtmlFromRequest } from '../utils/noRouteFoundHelper';
 //import { stringify } from 'node:querystring';
 // import { stringify } from 'node:querystring'; use this later if needed
 // here is a short example of how to use it:
@@ -395,6 +396,7 @@ class Router {
             : 'No routes registered.';
         const isApi = req.path.startsWith('/api/');
         if (isApi) {
+          // Use JSON for API responses
           sendWithContext(
             req,
             sock,
@@ -407,12 +409,14 @@ class Router {
             }),
           );
         } else {
+          // Use HTML helper for non-API routes
+          const htmlContent = generateNoRouteFoundHtmlFromRequest(req, availablePaths);
           sendWithContext(
             req,
             sock,
             404,
-            { 'Content-Type': 'text/plain' },
-            `404 Not Found: ${req.path}\n${suggestion}`,
+            { 'Content-Type': 'text/html; charset=utf-8' },
+            htmlContent,
           );
         }
         logRequestCompletion(reqLogger, startTime, 404);

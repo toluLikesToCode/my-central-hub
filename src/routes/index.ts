@@ -12,15 +12,19 @@ import { sendWithContext } from '../entities/sendResponse';
 // Extracts the message from request body or returns default
 function extractMessage(body?: Buffer): string {
   if (!body) return 'Hello, world!';
-  let parsed: unknown;
+  const str = body.toString();
+  // Try to parse as JSON first
   try {
-    parsed = JSON.parse(body.toString());
+    const parsed = JSON.parse(str);
+    if (parsed && typeof (parsed as any).message === 'string') {
+      return (parsed as any).message;
+    }
   } catch {
-    // Invalid JSON; return default message
-    return 'Hello, world!';
+    // Not JSON, fall through to treat as raw text
   }
-  if (parsed && typeof (parsed as any).message === 'string') {
-    return (parsed as any).message;
+  // If not JSON, treat the body as plain text
+  if (str.trim().length > 0) {
+    return str;
   }
   return 'Hello, world!';
 }

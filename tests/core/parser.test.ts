@@ -10,8 +10,7 @@
 import { parser } from '../../src/core/parser';
 
 describe.skip('HTTP Parser (DEPRECATED)', () => {
-  // NOTE: All tests are skipped because they test deprecated
-  // functionality that will be removed
+  // NOTE: All tests are skipped because they test deprecate functionality that will be removed
   it('should parse a simple GET request', () => {
     const raw = 'GET /hello HTTP/1.1\r\nHost: localhost\r\nUser-Agent: test\r\n\r\n';
     const parsed = parser.parse(raw);
