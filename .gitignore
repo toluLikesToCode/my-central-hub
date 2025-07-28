@@ -4,6 +4,7 @@ node_modules/
 # Output directories
 dist/
 build/
+output/
 
 # Logs
 *.log

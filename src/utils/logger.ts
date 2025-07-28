@@ -461,7 +461,7 @@ export class FileTransport implements Transport {
       this.stream!.end(() => resolve());
     }).catch((err) => {
       console.error(`Error closing log stream ${this.filename}:`, err);
-    }
+    });
   }
 }
 
