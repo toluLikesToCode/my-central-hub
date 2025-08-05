@@ -96,10 +96,11 @@ class MediaItem(BaseModel):
     )
     media_type: str = Field(..., description="'image' or 'video'")
     source_type: str = Field(
-        ..., description="'url', 'filepath', or 'buffer_id' (if multipart)"
+        ..., description="'url', 'filepath', 'gcs_blob', or 'buffer_id' (if multipart)"
     )
     source: str = Field(
-        ..., description="URL, relative filepath, buffer identifier, or filename"
+        ...,
+        description="URL, relative filepath, GCS blob name, buffer identifier, or filename",
     )
     num_frames: Optional[int] = Field(
         None, description="Number of frames for video (uses default if None)"
