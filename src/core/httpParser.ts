@@ -1,7 +1,13 @@
 import { IncomingRequest } from '../entities/http';
 import { URL } from 'url';
-import logger from '../utils/logger';
 import { config } from '../config/server.config';
+import winston from 'winston';
+import { defaultTransports } from '../utils/transports';
+
+const logger = winston.createLogger({
+  defaultMeta: { module: 'httpParser' },
+  transports: [...defaultTransports],
+});
 
 enum ParserState {
   REQUEST_LINE,

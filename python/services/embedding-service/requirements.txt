@@ -19,7 +19,10 @@ scenedetect
 # requests for URL downloads
 requests
 
+storage
 # (Optional) logging, if not in stdlib
 # logging is part of stdlib, so not needed
+
+google-cloud-storage
 
 # (Optional) uuid, sys, os, time, signal, concurrent.futures, contextlib, datetime are all stdlib

@@ -111,7 +111,7 @@ export const config = {
   // Maximum allowed JSON/body size in bytes
   maxBodySizeBytes: process.env.MAX_BODY_SIZE_BYTES
     ? parseInt(process.env.MAX_BODY_SIZE_BYTES, 10)
-    : 10 * 1024 * 1024, // default 10 MB
+    : 1000 * 1024 * 1024, // default 1 GB
 };
 
 // Only log configuration if logger is defined and we're in test mode

@@ -13,13 +13,12 @@ import { config } from './config/server.config';
 import path from 'path';
 import process from 'process';
 import winston from 'winston';
+import { defaultTransports } from './utils/transports';
 
 const logger = winston.createLogger({
-  defaultMeta: { service: 'my-central-hub - main' },
+  defaultMeta: { module: 'main' },
   transports: [
-    new winston.transports.Console({
-      format: winston.format.combine(winston.format.timestamp(), winston.format.prettyPrint()),
-    }),
+    ...defaultTransports,
     new winston.transports.File({
       filename: path.join(config.logging.logDir, 'startup.log'),
       format: winston.format.combine(winston.format.timestamp(), winston.format.prettyPrint()),

@@ -9,19 +9,11 @@ import winston from 'winston';
 import { sendResponse } from '../entities/sendResponse';
 import { config } from '../config/server.config'; // Assuming config is imported from a config file
 import { initializeFileStats } from '../modules/file-hosting/FileStatsInitializer';
-import path from 'path';
+import { defaultTransports } from '../utils/transports';
 
 const logger = winston.createLogger({
-  defaultMeta: { service: 'my-central-hub - server' },
-  transports: [
-    new winston.transports.Console({
-      format: winston.format.combine(winston.format.timestamp(), winston.format.prettyPrint()),
-    }),
-    new winston.transports.File({
-      filename: path.join(config.logging.logDir, 'app.log'),
-      format: winston.format.combine(winston.format.timestamp(), winston.format.prettyPrint()),
-    }),
-  ],
+  defaultMeta: { module: 'server' },
+  transports: [...defaultTransports],
 });
 
 export class HttpServer {
