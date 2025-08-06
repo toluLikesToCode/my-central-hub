@@ -735,22 +735,45 @@ async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
 # New WebSocket endpoint
 @app.websocket("/ws/embed")
 async def websocket_embed_endpoint(websocket: WebSocket):
-    await websocket.accept()
+    logger.info(f"WebSocket connection attempt from {websocket.client}")
+    try:
+        await websocket.accept()
+        logger.info(f"WebSocket connection accepted from {websocket.client}")
+    except Exception as accept_error:
+        logger.error(
+            f"Error accepting WebSocket connection: {accept_error}", exc_info=True
+        )
+        return
+
     logger.info(f"WebSocket connection established from {websocket.client}")
 
     try:
         while True:
             # Receive message from client
+            raw_message = None
+            message_data = None
             try:
+                logger.debug("Waiting for WebSocket message...")
                 raw_message = await websocket.receive_text()
+                logger.info(
+                    f"Received WebSocket message: {len(raw_message)} characters"
+                )
+                logger.debug(f"Received raw message: {raw_message[:200]}...")
+
                 message_data = json.loads(raw_message)
+                logger.debug(f"Parsed message data: {message_data}")
 
                 # Parse the WebSocket request
                 ws_request = WebSocketRequest(**message_data)
+                logger.info(
+                    f"Parsed WebSocket request: type={ws_request.type}, message_id={ws_request.message_id}"
+                )
 
                 # Handle health check requests
                 if ws_request.type == "health_check":
-                    logger.info(f"WebSocket received health check request")
+                    logger.info(
+                        f"Processing WebSocket health check request with message_id: {ws_request.message_id}"
+                    )
 
                     # Get health status (same as HTTP endpoint)
                     total_queue_size = (
@@ -787,11 +810,23 @@ async def websocket_embed_endpoint(websocket: WebSocket):
                         data=health_data,
                         message_id=ws_request.message_id,
                     )
+                    logger.debug(
+                        f"Sending health check response: {health_response.model_dump_json()[:200]}..."
+                    )
                     try:
                         await websocket.send_text(health_response.model_dump_json())
-                    except (WebSocketDisconnect, RuntimeError):
+                        logger.info(
+                            f"Successfully sent health check response for message_id: {ws_request.message_id}"
+                        )
+                    except (WebSocketDisconnect, RuntimeError) as send_error:
                         logger.debug(
-                            "Cannot send health check response - WebSocket already disconnected"
+                            f"Cannot send health check response - WebSocket already disconnected: {send_error}"
+                        )
+                        break
+                    except Exception as send_error:
+                        logger.error(
+                            f"Unexpected error sending health check response: {send_error}",
+                            exc_info=True,
                         )
                         break
                     continue
@@ -1035,6 +1070,9 @@ async def websocket_embed_endpoint(websocket: WebSocket):
                     continue
 
             except json.JSONDecodeError as e:
+                logger.error(
+                    f"JSON decode error: {e}, raw_message: {raw_message[:200] if raw_message else 'N/A'}"
+                )
                 try:
                     error_response = WebSocketResponse(
                         type="error", error=f"Invalid JSON: {str(e)}"
@@ -1048,6 +1086,9 @@ async def websocket_embed_endpoint(websocket: WebSocket):
                     break
 
             except ValidationError as e:
+                logger.error(
+                    f"Validation error: {e}, message_data: {message_data if message_data else 'N/A'}"
+                )
                 try:
                     error_response = WebSocketResponse(
                         type="error", error=f"Invalid message format: {str(e)}"
@@ -1062,6 +1103,7 @@ async def websocket_embed_endpoint(websocket: WebSocket):
 
             except WebSocketDisconnect:
                 # Re-raise WebSocketDisconnect to be handled by outer handler
+                logger.debug("WebSocketDisconnect exception in inner try block")
                 raise
             except Exception as e:
                 logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
