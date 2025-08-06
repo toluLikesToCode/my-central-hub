@@ -148,14 +148,14 @@ class ServiceHealth(BaseModel):
 
 # Add WebSocket message models
 class WebSocketRequest(BaseModel):
-    type: str = Field(..., description="Message type: 'embed_batch'")
-    data: BatchEmbeddingRequest = Field(..., description="The batch request data")
+    type: str = Field(..., description="Message type: 'embed_batch' or 'health_check'")
+    data: Optional[BatchEmbeddingRequest] = Field(None, description="The batch request data (for embed_batch type)")
     message_id: Optional[str] = Field(None, description="Optional message ID for tracking")
 
 
 class WebSocketResponse(BaseModel):
-    type: str = Field(..., description="Response type: 'embed_batch_result' or 'error'")
-    data: Optional[BatchEmbeddingResponse] = Field(None, description="The batch response data")
+    type: str = Field(..., description="Response type: 'embed_batch_result', 'health_check_result', or 'error'")
+    data: Optional[Union[BatchEmbeddingResponse, ServiceHealth]] = Field(None, description="The response data")
     error: Optional[str] = Field(None, description="Error message if type is 'error'")
     message_id: Optional[str] = Field(None, description="Message ID from request")
 
@@ -735,31 +735,74 @@ async def websocket_embed_endpoint(websocket: WebSocket):
                 # Parse the WebSocket request
                 ws_request = WebSocketRequest(**message_data)
                 
-                if ws_request.type != "embed_batch":
+                # Handle health check requests
+                if ws_request.type == "health_check":
+                    logger.info(f"WebSocket received health check request")
+                    
+                    # Get health status (same as HTTP endpoint)
+                    total_queue_size = batch_manager.queue.qsize() + batch_manager.large_item_queue.qsize()
+                    health_data = ServiceHealth(
+                        status="ok" if EMBEDDING_MODEL is not None else "error_model_not_loaded",
+                        uptime_seconds=time.time() - SERVICE_START_TIME,
+                        processed_items_count=PROCESSED_FILES_COUNT_TOTAL,
+                        gpu_available=(
+                            torch.cuda.is_available()
+                            or (torch.backends.mps.is_available() and torch.backends.mps.is_built())
+                        ),
+                        model_loaded=EMBEDDING_MODEL is not None,
+                        model_name=(
+                            getattr(EMBEDDING_MODEL, "model_name", None) if EMBEDDING_MODEL else None
+                        ),
+                        device=EMBEDDING_DEVICE,
+                        request_queue_size=total_queue_size,
+                    )
+                    
+                    health_response = WebSocketResponse(
+                        type="health_check_result",
+                        data=health_data,
+                        message_id=ws_request.message_id
+                    )
+                    await websocket.send_text(health_response.model_dump_json())
+                    continue
+                
+                # Handle embed_batch requests
+                elif ws_request.type == "embed_batch":
+                    # Validate that data is provided for embed_batch requests
+                    if ws_request.data is None:
+                        error_response = WebSocketResponse(
+                            type="error",
+                            error="Missing data field for embed_batch request",
+                            message_id=ws_request.message_id
+                        )
+                        await websocket.send_text(error_response.model_dump_json())
+                        continue
+                    
+                    # Extract the batch request
+                    batch_request = ws_request.data
+                    client_request_id = (
+                        batch_request.request_id or 
+                        ws_request.message_id or 
+                        uuid.uuid4().hex
+                    )
+                    
+                    logger.info(
+                        f"WebSocket received batch request '{client_request_id}' with {len(batch_request.items)} items."
+                    )
+                    
+                    if EMBEDDING_MODEL is None:
+                        error_response = WebSocketResponse(
+                            type="error",
+                            error="Model not ready or failed to load",
+                            message_id=ws_request.message_id
+                        )
+                        await websocket.send_text(error_response.model_dump_json())
+                        continue
+                
+                # Handle unsupported message types
+                else:
                     error_response = WebSocketResponse(
                         type="error",
                         error=f"Unsupported message type: {ws_request.type}",
-                        message_id=ws_request.message_id
-                    )
-                    await websocket.send_text(error_response.model_dump_json())
-                    continue
-                
-                # Extract the batch request
-                batch_request = ws_request.data
-                client_request_id = (
-                    batch_request.request_id or 
-                    ws_request.message_id or 
-                    uuid.uuid4().hex
-                )
-                
-                logger.info(
-                    f"WebSocket received batch request '{client_request_id}' with {len(batch_request.items)} items."
-                )
-                
-                if EMBEDDING_MODEL is None:
-                    error_response = WebSocketResponse(
-                        type="error",
-                        error="Model not ready or failed to load",
                         message_id=ws_request.message_id
                     )
                     await websocket.send_text(error_response.model_dump_json())

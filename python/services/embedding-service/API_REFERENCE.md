@@ -81,6 +81,15 @@ All communication uses JSON messages with the following structure:
 }
 ```
 
+**Health Check Message:**
+
+```json
+{
+  "type": "health_check",
+  "message_id": "optional-tracking-id"
+}
+```
+
 ##### Server Response Message
 
 **Success Response:**
@@ -92,6 +101,25 @@ All communication uses JSON messages with the following structure:
     "results": [...],
     "batch_id": "batch-12345",
     "processed_by_request_id": "req-67890"
+  },
+  "message_id": "optional-tracking-id"
+}
+```
+
+**Health Check Response:**
+
+```json
+{
+  "type": "health_check_result",
+  "data": {
+    "status": "ok",
+    "uptime_seconds": 12345.67,
+    "processed_items_count": 1000,
+    "gpu_available": true,
+    "model_loaded": true,
+    "model_name": "openai/clip-vit-base-patch32",
+    "device": "cuda:0",
+    "request_queue_size": 5
   },
   "message_id": "optional-tracking-id"
 }
@@ -111,28 +139,45 @@ All communication uses JSON messages with the following structure:
 
 ##### WebSocketRequest
 
-| Field        | Type                    | Required | Description                                     |
-| ------------ | ----------------------- | -------- | ----------------------------------------------- |
-| `type`       | `string`                | Yes      | Must be `"embed_batch"`                         |
-| `data`       | `BatchEmbeddingRequest` | Yes      | Same as HTTP endpoint request body              |
-| `message_id` | `string \| null`        | No       | Optional ID for tracking request/response pairs |
+| Field        | Type                            | Required | Description                                                 |
+| ------------ | ------------------------------- | -------- | ----------------------------------------------------------- |
+| `type`       | `string`                        | Yes      | `"embed_batch"` or `"health_check"`                         |
+| `data`       | `BatchEmbeddingRequest \| null` | No       | Required for `"embed_batch"`, not used for `"health_check"` |
+| `message_id` | `string \| null`                | No       | Optional ID for tracking request/response pairs             |
 
 ##### WebSocketResponse
 
-| Field        | Type                             | Required | Description                                      |
-| ------------ | -------------------------------- | -------- | ------------------------------------------------ |
-| `type`       | `string`                         | Yes      | `"embed_batch_result"` or `"error"`              |
-| `data`       | `BatchEmbeddingResponse \| null` | No       | Response data (null for error responses)         |
-| `error`      | `string \| null`                 | No       | Error message (only present for error responses) |
-| `message_id` | `string \| null`                 | No       | Echoed message ID from request                   |
+| Field        | Type                                              | Required | Description                                                   |
+| ------------ | ------------------------------------------------- | -------- | ------------------------------------------------------------- |
+| `type`       | `string`                                          | Yes      | `"embed_batch_result"`, `"health_check_result"`, or `"error"` |
+| `data`       | `BatchEmbeddingResponse \| ServiceHealth \| null` | No       | Response data (null for error responses)                      |
+| `error`      | `string \| null`                                  | No       | Error message (only present for error responses)              |
+| `message_id` | `string \| null`                                  | No       | Echoed message ID from request                                |
 
 #### WebSocket Connection Lifecycle
 
 1. **Connect**: Client establishes WebSocket connection
-2. **Send**: Client sends JSON request message
+2. **Send**: Client sends JSON request message (embed_batch or health_check)
 3. **Receive**: Server processes request and sends JSON response
-4. **Repeat**: Connection stays open for multiple requests
+4. **Repeat**: Connection stays open for multiple requests (mix of batches and health checks)
 5. **Disconnect**: Either side can close connection
+
+#### Non-Blocking Health Checks ⚡
+
+The WebSocket health check is **completely non-blocking** and can be called at any time:
+
+- **During long batch processing**: Check status while large video batches are being processed
+- **Between requests**: Monitor queue size and system status
+- **Concurrent with batches**: Health checks don't interfere with ongoing embed operations
+- **Real-time monitoring**: Get instant status updates without interrupting workflows
+
+**Health Check Benefits:**
+
+- ✅ **Zero latency impact** on batch processing
+- ✅ **Instant response** (typically <10ms)
+- ✅ **Real-time queue monitoring** during heavy workloads
+- ✅ **No timeout concerns** for long-running operations
+- ✅ **Concurrent execution** with embed requests
 
 #### Error Handling
 
@@ -147,6 +192,75 @@ All communication uses JSON messages with the following structure:
 Same error types as HTTP endpoint, returned in WebSocket error responses.
 
 #### Usage Examples
+
+##### WebSocket Health Check
+
+**Simple Health Check:**
+
+```javascript
+// Send health check request
+const healthRequest = {
+  type: 'health_check',
+  message_id: 'health-001',
+};
+ws.send(JSON.stringify(healthRequest));
+
+// Receive instant response
+ws.onmessage = (event) => {
+  const response = JSON.parse(event.data);
+  if (response.type === 'health_check_result') {
+    console.log('Queue size:', response.data.request_queue_size);
+    console.log('Model status:', response.data.model_loaded);
+    console.log('GPU available:', response.data.gpu_available);
+  }
+};
+```
+
+**Health Check During Batch Processing:**
+
+```python
+import asyncio
+import json
+import websockets
+
+async def process_with_monitoring(ws):
+    # Start a large batch request
+    batch_request = {
+        "type": "embed_batch",
+        "data": {
+            "items": [/* large video files */],
+            "request_id": "large-batch-001"
+        },
+        "message_id": "batch-001"
+    }
+    await ws.send(json.dumps(batch_request))
+
+    # Monitor progress with health checks (non-blocking)
+    monitoring = True
+    while monitoring:
+        # Send health check every 5 seconds
+        health_check = {
+            "type": "health_check",
+            "message_id": f"health-{asyncio.get_event_loop().time()}"
+        }
+        await ws.send(json.dumps(health_check))
+
+        # Wait for either health response or batch completion
+        response_raw = await ws.recv()
+        response = json.loads(response_raw)
+
+        if response["type"] == "health_check_result":
+            queue_size = response["data"]["request_queue_size"]
+            print(f"Queue size: {queue_size}, still processing...")
+            if queue_size == 0:
+                print("Processing likely complete!")
+            await asyncio.sleep(5)  # Check again in 5 seconds
+
+        elif response["type"] == "embed_batch_result":
+            print("Batch processing completed!")
+            monitoring = False
+            return response["data"]
+```
 
 ##### Python WebSocket Client
 
@@ -256,17 +370,19 @@ const results = await client.embedBatch({
 
 #### WebSocket vs HTTP Comparison
 
-| Feature                   | HTTP `/api/embed_batch`       | WebSocket `/ws/embed`        |
-| ------------------------- | ----------------------------- | ---------------------------- |
-| **Request Format**        | ✅ Same                       | ✅ Same (wrapped in message) |
-| **Response Format**       | ✅ Same                       | ✅ Same (wrapped in message) |
-| **Processing Logic**      | ✅ Identical                  | ✅ Identical                 |
-| **Timeout Limits**        | ❌ HTTP client timeouts       | ✅ No timeout limits         |
-| **Connection Overhead**   | ❌ New connection per request | ✅ Persistent connection     |
-| **Long-running Requests** | ❌ May timeout                | ✅ Handles any duration      |
-| **Multiple Requests**     | ❌ New connection each time   | ✅ Reuse same connection     |
-| **Error Handling**        | ✅ HTTP status codes          | ✅ Message-level errors      |
-| **Browser Compatibility** | ✅ Universal support          | ✅ Modern browser support    |
+| Feature                   | HTTP `/api/embed_batch`            | WebSocket `/ws/embed`             |
+| ------------------------- | ---------------------------------- | --------------------------------- |
+| **Request Format**        | ✅ Same                            | ✅ Same (wrapped in message)      |
+| **Response Format**       | ✅ Same                            | ✅ Same (wrapped in message)      |
+| **Processing Logic**      | ✅ Identical                       | ✅ Identical                      |
+| **Timeout Limits**        | ❌ HTTP client timeouts            | ✅ No timeout limits              |
+| **Connection Overhead**   | ❌ New connection per request      | ✅ Persistent connection          |
+| **Long-running Requests** | ❌ May timeout                     | ✅ Handles any duration           |
+| **Multiple Requests**     | ❌ New connection each time        | ✅ Reuse same connection          |
+| **Health Monitoring**     | ❌ Separate HTTP requests          | ✅ Built-in non-blocking checks   |
+| **Real-time Status**      | ❌ Not available during processing | ✅ Live monitoring during batches |
+| **Error Handling**        | ✅ HTTP status codes               | ✅ Message-level errors           |
+| **Browser Compatibility** | ✅ Universal support               | ✅ Modern browser support         |
 
 ---
 
@@ -447,6 +563,72 @@ Common debug metadata fields include:
 
 ### WebSocket Examples
 
+#### Health Check During Batch Processing
+
+```javascript
+// JavaScript WebSocket client with health monitoring
+const ws = new WebSocket('ws://localhost:8080/ws/embed');
+
+ws.onopen = () => {
+  // Start a large batch request
+  const batchRequest = {
+    type: 'embed_batch',
+    data: {
+      items: [
+        // Large video files that take time to process
+        {
+          id: 'vid-001',
+          media_type: 'video',
+          source_type: 'gcs_blob',
+          source: 'videos/large-video-1.mp4',
+          num_frames: 50,
+        },
+        {
+          id: 'vid-002',
+          media_type: 'video',
+          source_type: 'gcs_blob',
+          source: 'videos/large-video-2.mp4',
+          num_frames: 75,
+        },
+      ],
+      request_id: 'large-batch-001',
+    },
+    message_id: 'batch-001',
+  };
+
+  ws.send(JSON.stringify(batchRequest));
+
+  // Monitor progress every 5 seconds (non-blocking)
+  const healthCheckInterval = setInterval(() => {
+    const healthCheck = {
+      type: 'health_check',
+      message_id: `health-${Date.now()}`,
+    };
+    ws.send(JSON.stringify(healthCheck));
+  }, 5000);
+
+  // Stop monitoring when batch completes
+  ws.addEventListener('message', (event) => {
+    const response = JSON.parse(event.data);
+    if (response.type === 'embed_batch_result') {
+      clearInterval(healthCheckInterval);
+    }
+  });
+};
+
+ws.onmessage = (event) => {
+  const response = JSON.parse(event.data);
+
+  if (response.type === 'health_check_result') {
+    console.log(`Queue size: ${response.data.request_queue_size}`);
+    console.log(`Processing status: ${response.data.status}`);
+    console.log(`Processed items: ${response.data.processed_items_count}`);
+  } else if (response.type === 'embed_batch_result') {
+    console.log('Batch completed!', response.data.results.length, 'results');
+  }
+};
+```
+
 #### Single Image via WebSocket
 
 ```javascript
@@ -602,7 +784,9 @@ curl -X POST "http://localhost:8080/api/embed_batch" \
 - **Persistent Connections**: Eliminate connection overhead for multiple requests
 - **Real-time Processing**: Immediate response delivery without HTTP handshake delays
 - **Connection Reuse**: Process thousands of items on single connection
-- **Bi-directional**: Server can send status updates or progress notifications (future feature)
+- **Non-Blocking Health Checks**: Monitor system status during long-running batches without interruption
+- **Live Progress Monitoring**: Real-time queue size and processing status updates
+- **Bi-directional**: Server can send status updates or progress notifications
 
 ### Batch Processing
 
