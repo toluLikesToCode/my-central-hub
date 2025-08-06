@@ -1,24 +1,24 @@
 [
   {
-    "itemId": "video1",
-    "originalFilename": "03180417273b454b8a921588b5c0498f.mp4",
-    "itemProcessingRequestId": "pygpu-104-810a49_video1",
+    "itemId": "video-id-1",
+    "originalFilename": "media-content-02042",
+    "itemProcessingRequestId": "pygpu-2-abd60c_video-id",
     "batchConfiguredHwAccelMethod": "cuda",
     "videoProcessorEffectiveHwAccelMethod": null,
-    "videoDurationSeconds": null,
-    "topLevelItemError": "Preprocessing failed: ValueError",
-    "topLevelItemErrorDetail": "Initialization failed for VideoProcessor: Failed (ValueError, 81ms) getting duration: ffprobe returned invalid duration string: 'N/A'. Stderr: N/A",
+    "videoDurationSeconds": 11,
+    "topLevelItemError": "No images/frames extracted (internal)",
+    "topLevelItemErrorDetail": "Preprocessing yielded no processable PIL images, and no explicit error was set.",
     "hardwareAccelFailures": {
       "count": 0,
       "timestamps": [],
       "errorTypeCounts": {},
       "sampleErrorMessage": null
     },
-    "frameSamplingMethod": null,
-    "requestedFramesForSampling": null,
-    "finalPilFramesReturnedForItem": null,
+    "frameSamplingMethod": "uniform_spread_with_offset",
+    "requestedFramesForSampling": 5,
+    "finalPilFramesReturnedForItem": 0,
     "itemFrameExtractionErrorCount": null,
-    "receivedAt": "2025-06-03T18:36:49.568Z",
-    "requestId": "a02f9775-ffbd-4ea4-a137-46cf6391f578"
+    "receivedAt": "2025-08-06T04:31:45.075Z",
+    "requestId": "requestmdzh16eo7qu0rq994k5"
   }
 ]
