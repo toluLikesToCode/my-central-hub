@@ -46,7 +46,7 @@ from contextlib import (
 import re
 import math
 import errno
-import requests  # For URL downloads
+import requests  # type: ignore # For URL downloads
 import open_clip  # type: ignore
 import cv2  # type: ignore # Though unused, kept as per original file structure
 
@@ -472,7 +472,7 @@ class CLIPEmbedder:
 
         self.enable_augmentation = enable_augmentation
         if self.enable_augmentation:
-            import torchvision.transforms as T  # Import only if needed
+            import torchvision.transforms as T  # type: ignore # Import only if needed
 
             # Determine image size from model config (e.g., self.model.visual.image_size)
             image_size_cfg = getattr(
