@@ -15,6 +15,7 @@ import torch  # type: ignore
 import uvicorn  # type: ignore
 from fastapi import FastAPI, HTTPException, Request, Body, WebSocket, WebSocketDisconnect  # type: ignore
 from fastapi.responses import JSONResponse  # type: ignore
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from pydantic import BaseModel, Field, ValidationError  # type: ignore
 
 # Load environment variables from .env file, if present
@@ -550,6 +551,15 @@ app = FastAPI(
     lifespan=lifespan, title="Embedding Service API V2 (Batching + WebSocket)"
 )
 
+# Add CORS middleware to handle cross-origin requests including WebSocket connections
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify exact origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/health", response_model=ServiceHealth)
 async def health_check():
@@ -736,6 +746,10 @@ async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
 @app.websocket("/ws/embed")
 async def websocket_embed_endpoint(websocket: WebSocket):
     logger.info(f"WebSocket connection attempt from {websocket.client}")
+    logger.info(f"WebSocket headers: {websocket.headers}")
+    logger.info(f"WebSocket path: {websocket.url.path}")
+    logger.info(f"WebSocket query params: {websocket.query_params}")
+
     try:
         await websocket.accept()
         logger.info(f"WebSocket connection accepted from {websocket.client}")
