@@ -69,7 +69,7 @@
     "chalk": "^4.1.2",
     "dayjs": "^1.11.13",
     "dotenv": "^16.5.0",
-    "element-crafter": "^1.0.2",
+    "element-crafter": "1.1.0",
     "form-data": "^4.0.2",
     "i": "^0.3.7",
     "image-size": "^2.0.2",
