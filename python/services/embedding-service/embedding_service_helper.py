@@ -46,7 +46,7 @@ from contextlib import (
 import re
 import math
 import errno
-import requests  # For URL downloads
+import requests  # type: ignore # For URL downloads
 import open_clip  # type: ignore
 import cv2  # type: ignore # Though unused, kept as per original file structure
 
@@ -54,6 +54,9 @@ from dotenv import load_dotenv  # type: ignore
 
 # Import VideoProcessor from the new helper file
 from video_processor_helper import VideoProcessor
+
+# Import GCS client
+from cloud import get_gcs_client
 
 # Ensure .env is loaded at the very top
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -469,7 +472,7 @@ class CLIPEmbedder:
 
         self.enable_augmentation = enable_augmentation
         if self.enable_augmentation:
-            import torchvision.transforms as T  # Import only if needed
+            import torchvision.transforms as T  # type: ignore # Import only if needed
 
             # Determine image size from model config (e.g., self.model.visual.image_size)
             image_size_cfg = getattr(
@@ -735,7 +738,7 @@ def _preprocess_single_item_for_batch(
     temp_file_created_path: Optional[str] = None
 
     try:
-        media_source_for_pil: Union[str, io.BytesIO]
+        media_source_for_pil: Union[str, io.BytesIO, None] = None
         video_path_for_vid_processor: Optional[str] = None
         source_type = item_spec_dict["source_type"]
         source_location = item_spec_dict["source"]
@@ -811,6 +814,53 @@ def _preprocess_single_item_for_batch(
                     video_path_for_vid_processor = resolved_fs_path
                 item_debug_meta["resolved_filepath"] = resolved_fs_path
 
+            case "gcs_blob":
+                item_logger.debug(f"Downloading GCS blob: {source_location}")
+                gcs_client = get_gcs_client(logger=item_logger)
+
+                if media_type == "image":
+                    # Direct download to PIL for images
+                    img = gcs_client.download_to_pil_image(source_location)
+                    if img is None:
+                        raise ValueError(
+                            f"Failed to download or convert GCS blob to PIL Image: {source_location}"
+                        )
+                    pil_images_for_item.append(img)
+                    item_debug_meta["image_dimensions"] = f"{img.width}x{img.height}"
+                    item_logger.debug(
+                        f"Downloaded and converted GCS image '{source_location}' ({img.width}x{img.height})"
+                    )
+
+                elif media_type == "video":
+                    # Download to temporary file for video processing
+                    video_content = gcs_client.download_to_memory(source_location)
+                    if video_content is None:
+                        raise ValueError(
+                            f"Failed to download GCS video blob: {source_location}"
+                        )
+
+                    # Create temporary file with appropriate extension
+                    original_filename = item_spec_dict.get(
+                        "original_filename", source_location
+                    )
+                    file_ext = os.path.splitext(original_filename)[1] or ".mp4"
+
+                    with tempfile.NamedTemporaryFile(
+                        delete=False,
+                        suffix=file_ext,
+                        dir=os.environ.get("TEMP_DOWNLOAD_DIR"),
+                    ) as tmp_file:
+                        tmp_file.write(video_content)
+                        temp_file_created_path = tmp_file.name
+
+                    video_path_for_vid_processor = temp_file_created_path
+                    item_debug_meta["gcs_downloaded_to_temp"] = temp_file_created_path
+                    item_logger.info(
+                        f"Downloaded GCS video '{source_location}' to temp file '{temp_file_created_path}'"
+                    )
+
+                item_debug_meta["gcs_blob_name"] = source_location
+
             case "buffer_id":
                 # TODO: Implement buffer_id source type handling to support in-memory buffers
                 # This would allow processing media that's already loaded in memory without writing to disk
@@ -825,12 +875,17 @@ def _preprocess_single_item_for_batch(
 
         match media_type:
             case "image":
-                img = Image.open(media_source_for_pil).convert("RGB")
-                pil_images_for_item.append(img)
-                item_debug_meta["image_dimensions"] = f"{img.width}x{img.height}"
-                item_logger.debug(
-                    f"Loaded image '{item_spec_dict.get('original_filename', item_id)}' ({img.width}x{img.height})"
-                )
+                # Skip processing if already processed by GCS case
+                if source_type == "gcs_blob":
+                    # Already processed in the source_type switch above
+                    pass
+                elif media_source_for_pil:
+                    img = Image.open(media_source_for_pil).convert("RGB")
+                    pil_images_for_item.append(img)
+                    item_debug_meta["image_dimensions"] = f"{img.width}x{img.height}"
+                    item_logger.debug(
+                        f"Loaded image '{item_spec_dict.get('original_filename', item_id)}' ({img.width}x{img.height})"
+                    )
 
             case "video":
                 if (

@@ -43,11 +43,11 @@ EXPOSE 8080
 VOLUME ["/media"]
 
 # Install Python dependencies (pinned in requirements.txt)
-COPY python/services/embedding-service/requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+COPY requirements.txt .
+RUN pip3 install -r requirements.txt
 
 # Copy entire application code, including entrypoint script
-COPY --chmod=755 python/services/embedding-service /app
+COPY --chmod=755 . /app
 
 # Set working directory
 WORKDIR /app

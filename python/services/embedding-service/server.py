@@ -11,17 +11,18 @@ from typing import List, Dict, Any, Optional, Union
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv  # type: ignore
 
-import torch
+import torch  # type: ignore
 import uvicorn  # type: ignore
-from fastapi import FastAPI, HTTPException, Request, Body  # type: ignore
+from fastapi import FastAPI, HTTPException, Request, Body, WebSocket, WebSocketDisconnect  # type: ignore
 from fastapi.responses import JSONResponse  # type: ignore
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from pydantic import BaseModel, Field, ValidationError  # type: ignore
 
 # Load environment variables from .env file, if present
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 # Assuming embedding_service_helper is in the same directory or PYTHONPATH
-import embedding_service_helper as emb_helper
+import embedding_service_helper as emb_helper  # type: ignore
 
 # --- Globals ---
 SERVICE_START_TIME = time.time()
@@ -96,10 +97,11 @@ class MediaItem(BaseModel):
     )
     media_type: str = Field(..., description="'image' or 'video'")
     source_type: str = Field(
-        ..., description="'url', 'filepath', or 'buffer_id' (if multipart)"
+        ..., description="'url', 'filepath', 'gcs_blob', or 'buffer_id' (if multipart)"
     )
     source: str = Field(
-        ..., description="URL, relative filepath, buffer identifier, or filename"
+        ...,
+        description="URL, relative filepath, GCS blob name, buffer identifier, or filename",
     )
     num_frames: Optional[int] = Field(
         None, description="Number of frames for video (uses default if None)"
@@ -143,6 +145,29 @@ class ServiceHealth(BaseModel):
     model_name: Optional[str] = None
     device: Optional[str] = None
     request_queue_size: int
+
+
+# Add WebSocket message models
+class WebSocketRequest(BaseModel):
+    type: str = Field(..., description="Message type: 'embed_batch' or 'health_check'")
+    data: Optional[BatchEmbeddingRequest] = Field(
+        None, description="The batch request data (for embed_batch type)"
+    )
+    message_id: Optional[str] = Field(
+        None, description="Optional message ID for tracking"
+    )
+
+
+class WebSocketResponse(BaseModel):
+    type: str = Field(
+        ...,
+        description="Response type: 'embed_batch_result', 'health_check_result', or 'error'",
+    )
+    data: Optional[Union[BatchEmbeddingResponse, ServiceHealth]] = Field(
+        None, description="The response data"
+    )
+    error: Optional[str] = Field(None, description="Error message if type is 'error'")
+    message_id: Optional[str] = Field(None, description="Message ID from request")
 
 
 # --- Batching Manager ---
@@ -522,11 +547,25 @@ async def lifespan(app: FastAPI):
     logger.info("Application shutdown.")
 
 
-app = FastAPI(lifespan=lifespan, title="Embedding Service API V2 (Batching)")
+app = FastAPI(
+    lifespan=lifespan, title="Embedding Service API V2 (Batching + WebSocket)"
+)
+
+# Add CORS middleware to handle cross-origin requests including WebSocket connections
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify exact origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health", response_model=ServiceHealth)
 async def health_check():
+    total_queue_size = (
+        batch_manager.queue.qsize() + batch_manager.large_item_queue.qsize()
+    )
     return ServiceHealth(
         status="ok" if EMBEDDING_MODEL is not None else "error_model_not_loaded",
         uptime_seconds=time.time() - SERVICE_START_TIME,
@@ -540,7 +579,7 @@ async def health_check():
             getattr(EMBEDDING_MODEL, "model_name", None) if EMBEDDING_MODEL else None
         ),
         device=EMBEDDING_DEVICE,
-        request_queue_size=batch_manager.queue.qsize(),
+        request_queue_size=total_queue_size,
     )
 
 
@@ -701,6 +740,405 @@ async def embed_batch_endpoint(data: BatchEmbeddingRequest, request: Request):
         or client_request_id,  # Use Python-internal batch_id if available
         processed_by_request_id=client_request_id,
     )
+
+
+# New WebSocket endpoint
+@app.websocket("/ws/embed")
+async def websocket_embed_endpoint(websocket: WebSocket):
+    logger.info(f"WebSocket connection attempt from {websocket.client}")
+    logger.info(f"WebSocket headers: {websocket.headers}")
+    logger.info(f"WebSocket path: {websocket.url.path}")
+    logger.info(f"WebSocket query params: {websocket.query_params}")
+
+    try:
+        await websocket.accept()
+        logger.info(f"WebSocket connection accepted from {websocket.client}")
+    except Exception as accept_error:
+        logger.error(
+            f"Error accepting WebSocket connection: {accept_error}", exc_info=True
+        )
+        return
+
+    logger.info(f"WebSocket connection established from {websocket.client}")
+
+    try:
+        while True:
+            # Receive message from client
+            raw_message = None
+            message_data = None
+            try:
+                logger.debug("Waiting for WebSocket message...")
+                raw_message = await websocket.receive_text()
+                logger.info(
+                    f"Received WebSocket message: {len(raw_message)} characters"
+                )
+                logger.debug(f"Received raw message: {raw_message[:200]}...")
+
+                message_data = json.loads(raw_message)
+                logger.debug(f"Parsed message data: {message_data}")
+
+                # Parse the WebSocket request
+                ws_request = WebSocketRequest(**message_data)
+                logger.info(
+                    f"Parsed WebSocket request: type={ws_request.type}, message_id={ws_request.message_id}"
+                )
+
+                # Handle health check requests
+                if ws_request.type == "health_check":
+                    logger.info(
+                        f"Processing WebSocket health check request with message_id: {ws_request.message_id}"
+                    )
+
+                    # Get health status (same as HTTP endpoint)
+                    total_queue_size = (
+                        batch_manager.queue.qsize()
+                        + batch_manager.large_item_queue.qsize()
+                    )
+                    health_data = ServiceHealth(
+                        status=(
+                            "ok"
+                            if EMBEDDING_MODEL is not None
+                            else "error_model_not_loaded"
+                        ),
+                        uptime_seconds=time.time() - SERVICE_START_TIME,
+                        processed_items_count=PROCESSED_FILES_COUNT_TOTAL,
+                        gpu_available=(
+                            torch.cuda.is_available()
+                            or (
+                                torch.backends.mps.is_available()
+                                and torch.backends.mps.is_built()
+                            )
+                        ),
+                        model_loaded=EMBEDDING_MODEL is not None,
+                        model_name=(
+                            getattr(EMBEDDING_MODEL, "model_name", None)
+                            if EMBEDDING_MODEL
+                            else None
+                        ),
+                        device=EMBEDDING_DEVICE,
+                        request_queue_size=total_queue_size,
+                    )
+
+                    health_response = WebSocketResponse(
+                        type="health_check_result",
+                        data=health_data,
+                        message_id=ws_request.message_id,
+                    )
+                    logger.debug(
+                        f"Sending health check response: {health_response.model_dump_json()[:200]}..."
+                    )
+                    try:
+                        await websocket.send_text(health_response.model_dump_json())
+                        logger.info(
+                            f"Successfully sent health check response for message_id: {ws_request.message_id}"
+                        )
+                    except (WebSocketDisconnect, RuntimeError) as send_error:
+                        logger.debug(
+                            f"Cannot send health check response - WebSocket already disconnected: {send_error}"
+                        )
+                        break
+                    except Exception as send_error:
+                        logger.error(
+                            f"Unexpected error sending health check response: {send_error}",
+                            exc_info=True,
+                        )
+                        break
+                    continue
+
+                # Handle embed_batch requests
+                elif ws_request.type == "embed_batch":
+                    # Validate that data is provided for embed_batch requests
+                    if ws_request.data is None:
+                        try:
+                            error_response = WebSocketResponse(
+                                type="error",
+                                error="Missing data field for embed_batch request",
+                                message_id=ws_request.message_id,
+                            )
+                            await websocket.send_text(error_response.model_dump_json())
+                        except (WebSocketDisconnect, RuntimeError):
+                            logger.debug(
+                                "Cannot send missing data error response - WebSocket already disconnected"
+                            )
+                            break
+                        continue
+
+                    # Extract the batch request
+                    batch_request = ws_request.data
+                    client_request_id = (
+                        batch_request.request_id
+                        or ws_request.message_id
+                        or uuid.uuid4().hex
+                    )
+
+                    logger.info(
+                        f"WebSocket received batch request '{client_request_id}' with {len(batch_request.items)} items."
+                    )
+
+                    if EMBEDDING_MODEL is None:
+                        try:
+                            error_response = WebSocketResponse(
+                                type="error",
+                                error="Model not ready or failed to load",
+                                message_id=ws_request.message_id,
+                            )
+                            await websocket.send_text(error_response.model_dump_json())
+                        except (WebSocketDisconnect, RuntimeError):
+                            logger.debug(
+                                "Cannot send model not ready error response - WebSocket already disconnected"
+                            )
+                            break
+                        continue
+
+                    # Process the request using the same logic as HTTP endpoint
+                    item_futures: Dict[str, asyncio.Future] = {}
+
+                    for item_model_instance in batch_request.items:
+                        future = asyncio.Future()
+                        item_futures[item_model_instance.id] = future
+                        try:
+                            await batch_manager.add_item(item_model_instance, future)
+                        except Exception as q_err:
+                            logger.error(
+                                f"Failed to put item {item_model_instance.id} on queue for WebSocket request '{client_request_id}': {q_err}"
+                            )
+                            error_res = EmbeddingResult(
+                                id=item_model_instance.id,
+                                embedding=None,
+                                error="Failed to queue item",
+                                detail=str(q_err),
+                                debugMetadata={},
+                            )
+                            if not future.done():
+                                future.set_result(error_res)
+
+                    # Wait for all results
+                    results_list: List[EmbeddingResult] = []
+                    try:
+                        valid_futures_to_gather = [
+                            fut for item_id, fut in item_futures.items() if fut
+                        ]
+
+                        all_item_results_from_futures = await asyncio.gather(
+                            *valid_futures_to_gather, return_exceptions=True
+                        )
+
+                        for i, res_or_exc in enumerate(all_item_results_from_futures):
+                            if isinstance(res_or_exc, EmbeddingResult):
+                                results_list.append(res_or_exc)
+                            elif isinstance(res_or_exc, Exception):
+                                logger.error(
+                                    f"Raw exception from asyncio.gather for WebSocket request '{client_request_id}': {res_or_exc}",
+                                    exc_info=res_or_exc,
+                                )
+                            else:
+                                logger.warning(
+                                    f"Unknown type {type(res_or_exc)} from asyncio.gather for WebSocket request '{client_request_id}'. Item: {str(res_or_exc)[:200]}"
+                                )
+                    except Exception as e_gather:
+                        logger.error(
+                            f"Critical error during asyncio.gather for WebSocket request '{client_request_id}': {e_gather}"
+                        )
+                        results_list.clear()
+                        for item_model_instance in batch_request.items:
+                            results_list.append(
+                                EmbeddingResult(
+                                    id=item_model_instance.id,
+                                    embedding=None,
+                                    error="Server error processing batch (gather failed)",
+                                    detail=str(e_gather),
+                                    debugMetadata={},
+                                )
+                            )
+
+                    # Build complete results list (same logic as HTTP)
+                    final_output_results_map = {res.id: res for res in results_list}
+                    complete_results_list = []
+                    for requested_item in batch_request.items:
+                        if requested_item.id in final_output_results_map:
+                            complete_results_list.append(
+                                final_output_results_map[requested_item.id]
+                            )
+                        else:
+                            missing_item_future = item_futures.get(requested_item.id)
+                            if missing_item_future and missing_item_future.done():
+                                try:
+                                    missing_item_result = missing_item_future.result()
+                                    if isinstance(missing_item_result, EmbeddingResult):
+                                        complete_results_list.append(
+                                            missing_item_result
+                                        )
+                                    else:
+                                        complete_results_list.append(
+                                            EmbeddingResult(
+                                                id=requested_item.id,
+                                                embedding=None,
+                                                error="Missing or malformed result for item",
+                                                detail=f"Raw future result: {str(missing_item_result)[:100]}",
+                                                debugMetadata={},
+                                            )
+                                        )
+                                except Exception as fut_final_exc:
+                                    complete_results_list.append(
+                                        EmbeddingResult(
+                                            id=requested_item.id,
+                                            embedding=None,
+                                            error="Error retrieving future result for missing item",
+                                            detail=str(fut_final_exc),
+                                            debugMetadata={},
+                                        )
+                                    )
+                            else:
+                                complete_results_list.append(
+                                    EmbeddingResult(
+                                        id=requested_item.id,
+                                        embedding=None,
+                                        error="Item processing did not complete or result missing",
+                                        detail="Future not found or not resolved.",
+                                        debugMetadata={},
+                                    )
+                                )
+
+                    # Handle dry run (same logic as HTTP)
+                    is_dry_run = False
+                    if hasattr(batch_request, "isDryRun"):
+                        if isinstance(batch_request.isDryRun, str):
+                            is_dry_run = batch_request.isDryRun.lower() == "true"
+                        elif isinstance(batch_request.isDryRun, bool):
+                            is_dry_run = batch_request.isDryRun
+                    if is_dry_run:
+                        for res in complete_results_list:
+                            res.embedding = []
+                            debug_meta = getattr(res, "debug_metadata", None)
+                            if not debug_meta:
+                                debug_meta = getattr(res, "debugMetadata", None)
+                            if debug_meta and isinstance(debug_meta, dict):
+                                if (
+                                    "frame_sampling_details" in debug_meta
+                                    and isinstance(
+                                        debug_meta["frame_sampling_details"], dict
+                                    )
+                                ):
+                                    debug_meta["frame_sampling_details"][
+                                        "candidate_timestamps"
+                                    ] = []
+                                if "actual_timestamps_for_extraction" in debug_meta:
+                                    debug_meta["actual_timestamps_for_extraction"] = []
+
+                    # Get batch ID (same logic as HTTP)
+                    python_internal_batch_id = None
+                    if complete_results_list and hasattr(
+                        complete_results_list[0], "debug_metadata"
+                    ):
+                        debug_meta = getattr(
+                            complete_results_list[0], "debug_metadata", None
+                        )
+                        if not debug_meta:
+                            debug_meta = getattr(
+                                complete_results_list[0], "debugMetadata", None
+                            )
+                        if debug_meta and isinstance(debug_meta, dict):
+                            python_internal_batch_id = debug_meta.get(
+                                "batch_id"
+                            ) or debug_meta.get("overallBatchRequestId")
+
+                    # Create response
+                    batch_response = BatchEmbeddingResponse(
+                        results=complete_results_list,
+                        batch_id=python_internal_batch_id or client_request_id,
+                        processed_by_request_id=client_request_id,
+                    )
+
+                    ws_response = WebSocketResponse(
+                        type="embed_batch_result",
+                        data=batch_response,
+                        message_id=ws_request.message_id,
+                    )
+
+                    # Send response
+                    try:
+                        await websocket.send_text(ws_response.model_dump_json())
+                        logger.info(
+                            f"WebSocket sent response for request '{client_request_id}'"
+                        )
+                    except (WebSocketDisconnect, RuntimeError):
+                        logger.debug(
+                            f"Cannot send batch response for request '{client_request_id}' - WebSocket already disconnected"
+                        )
+                        break
+
+                # Handle unsupported message types
+                else:
+                    try:
+                        error_response = WebSocketResponse(
+                            type="error",
+                            error=f"Unsupported message type: {ws_request.type}",
+                            message_id=ws_request.message_id,
+                        )
+                        await websocket.send_text(error_response.model_dump_json())
+                    except (WebSocketDisconnect, RuntimeError):
+                        logger.debug(
+                            "Cannot send unsupported message type error response - WebSocket already disconnected"
+                        )
+                        break
+                    continue
+
+            except json.JSONDecodeError as e:
+                logger.error(
+                    f"JSON decode error: {e}, raw_message: {raw_message[:200] if raw_message else 'N/A'}"
+                )
+                try:
+                    error_response = WebSocketResponse(
+                        type="error", error=f"Invalid JSON: {str(e)}"
+                    )
+                    await websocket.send_text(error_response.model_dump_json())
+                except (WebSocketDisconnect, RuntimeError):
+                    # WebSocket is already disconnected, can't send error response
+                    logger.debug(
+                        "Cannot send JSON decode error response - WebSocket already disconnected"
+                    )
+                    break
+
+            except ValidationError as e:
+                logger.error(
+                    f"Validation error: {e}, message_data: {message_data if message_data else 'N/A'}"
+                )
+                try:
+                    error_response = WebSocketResponse(
+                        type="error", error=f"Invalid message format: {str(e)}"
+                    )
+                    await websocket.send_text(error_response.model_dump_json())
+                except (WebSocketDisconnect, RuntimeError):
+                    # WebSocket is already disconnected, can't send error response
+                    logger.debug(
+                        "Cannot send validation error response - WebSocket already disconnected"
+                    )
+                    break
+
+            except WebSocketDisconnect:
+                # Re-raise WebSocketDisconnect to be handled by outer handler
+                logger.debug("WebSocketDisconnect exception in inner try block")
+                raise
+            except Exception as e:
+                logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
+                try:
+                    error_response = WebSocketResponse(
+                        type="error", error=f"Internal server error: {str(e)}"
+                    )
+                    await websocket.send_text(error_response.model_dump_json())
+                except (WebSocketDisconnect, RuntimeError):
+                    # WebSocket is already disconnected, can't send error response
+                    logger.debug(
+                        "Cannot send error response - WebSocket already disconnected"
+                    )
+                    break
+
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected from {websocket.client}")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}", exc_info=True)
+    finally:
+        logger.info(f"WebSocket connection closed for {websocket.client}")
 
 
 if __name__ == "__main__":
