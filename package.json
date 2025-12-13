@@ -7,10 +7,10 @@
     "dev": "npm run build && nodemon src/main.ts",
     "format": "prettier --write \"src/**/*.{ts,js,json,md}\"",
     "format:check": "prettier --check \"src/**/*.{ts,js,json,md}\"",
-    "clean": "rm -rf dist",
-    "build": "npm run clean && tsc",
-    "start": "npm run build && node dist/main.js",
-    "start-w": "npm run build && node dist/main.js",
+    "clean": "rm -rf output",
+    "build": "npm run clean && tsc && ls -la output",
+    "start": "npm run build && node output/main.js",
+    "start-w": "npm run build && node output/main.js",
     "test": "npm run build && jest --all --verbose",
     "test-w": "npm run build && jest --all",
     "test:stress": "jest \"stress/**/*.test.ts\"",
@@ -19,7 +19,7 @@
     "lint:ts": "eslint src --ext .ts",
     "lint": "npm-run-all lint:ts",
     "ci": "npm run lint && npm run type-check && npm run test:ci",
-    "e2e": "npm run build && npx jest tests/core/endToEnd.test.ts --verbose | grep -E 'FAIL|^ ✕'"
+    "e2e": "npm run build && npx jest tests/core/endToEnd.test.ts --verbose"
   },
   "repository": {
     "type": "git",
@@ -79,6 +79,7 @@
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
     "umzug": "^3.8.2",
+    "winston": "^3.17.0",
     "zod": "^3.24.3"
   }
 }

@@ -5,8 +5,8 @@ module.exports = {
   testEnvironment: 'node',
   testMatch: ['**/tests/**/*.test.ts', '**/stress/**/*.test.ts'], // <--- IMPORTANT
   moduleFileExtensions: ['ts', 'js', 'json', 'node'],
-  modulePathIgnorePatterns: ['<rootDir>/dist/'],
-  setupFilesAfterEnv: ['jest-extended/all'],
+  modulePathIgnorePatterns: ['<rootDir>/output/'],
+  setupFilesAfterEnv: ['jest-extended/all', '<rootDir>/tests/setup.jest.ts'],
   transform: {
     '^.+\\.(ts|tsx)$': [
       'ts-jest',

@@ -10,33 +10,18 @@
  */
 import { HttpServer } from './core/server';
 import { config } from './config/server.config';
-import { Logger, ConsoleTransport, PrettyFormatter, FileTransport } from './utils/logger';
 import path from 'path';
 import process from 'process';
+import winston from 'winston';
+import { defaultTransports } from './utils/transports';
 
-// Create a more comprehensive logger with both console and file transports
-const logger = new Logger({
+const logger = winston.createLogger({
+  defaultMeta: { module: 'main' },
   transports: [
-    new ConsoleTransport({
-      formatter: new PrettyFormatter({
-        useBoxes: false,
-        useColors: true,
-        showTimestamp: false,
-        indent: 3,
-        arrayLengthLimit: 15,
-        objectKeysLimit: 10,
-        maxDepth: 4,
-        stringLengthLimit: 300,
-      }),
-    }),
-    // Add a file transport specifically for application startup logs
-    new FileTransport({
+    ...defaultTransports,
+    new winston.transports.File({
       filename: path.join(config.logging.logDir, 'startup.log'),
-      formatter: new PrettyFormatter({
-        useColors: false,
-        useBoxes: false,
-        showTimestamp: true,
-      }),
+      format: winston.format.combine(winston.format.timestamp(), winston.format.prettyPrint()),
     }),
   ],
 });
@@ -73,7 +58,7 @@ async function startApplication() {
     await server.start();
 
     // Log successful startup
-    logger.success('Server started successfully', {
+    logger.info('Server started successfully', {
       port: config.port,
       publicDir: config.publicDir,
     });

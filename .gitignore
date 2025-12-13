@@ -62,5 +62,5 @@ data/metrics.db
 .gitignore
 docs/EmbeddingsAPIReference.md
 Makefile
-
+python/services/embedding-service/personal-project-main-02e1cf2744c0.json
 AGENTS.md

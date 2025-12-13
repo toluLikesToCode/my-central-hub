@@ -106,11 +106,12 @@ export const config = {
     inputDir: process.env.EMBED_DIR,
   },
   testMode: false, // Set to true for testing purposes
-  staticDir: process.env.STATIC_DIR || join(process.cwd(), 'public'), // Static files directory
+  // staticDir: process.env.STATIC_DIR || join(process.cwd(), 'public'), // Static files directory
+  staticDir: '/Users/toluadegbehingbe/Downloads',
   // Maximum allowed JSON/body size in bytes
   maxBodySizeBytes: process.env.MAX_BODY_SIZE_BYTES
     ? parseInt(process.env.MAX_BODY_SIZE_BYTES, 10)
-    : 10 * 1024 * 1024, // default 10 MB
+    : 1000 * 1024 * 1024, // default 1 GB
 };
 
 // Only log configuration if logger is defined and we're in test mode

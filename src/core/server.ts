@@ -5,10 +5,16 @@ import { HttpRequestParser, RequestEntityTooLargeError } from './httpParser';
 import router from './router';
 // Register application routes as a side-effect
 import '../routes';
-import logger from '../utils/logger';
+import winston from 'winston';
 import { sendResponse } from '../entities/sendResponse';
 import { config } from '../config/server.config'; // Assuming config is imported from a config file
 import { initializeFileStats } from '../modules/file-hosting/FileStatsInitializer';
+import { defaultTransports } from '../utils/transports';
+
+const logger = winston.createLogger({
+  defaultMeta: { module: 'server' },
+  transports: [...defaultTransports],
+});
 
 export class HttpServer {
   private server = createServer();
@@ -483,16 +489,17 @@ export class HttpServer {
         logger.info(`🚀 Server started successfully on port ${this.port}`);
 
         // Display local URLs
-        logger.info('Local URLs:');
-        urls.local.forEach((url) => {
-          logger.info(`  - \x1b[36m${url}\x1b[0m`);
+
+        logger.info('Local URLs', {
+          urls: urls.local.map((url) => url),
+          note: 'Access these URLs from the same machine',
         });
 
         // Display network URLs if available
         if (urls.network.length > 0) {
-          logger.info('Network URLs (for access from other devices):');
-          urls.network.forEach((url) => {
-            logger.info(`  - \x1b[36m${url}\x1b[0m`);
+          logger.info('Network URLs (for access from other devices):', {
+            urls: urls.network.map((url) => url),
+            note: 'Ensure your firewall allows incoming connections on this port',
           });
         } else {
           logger.info('No network URLs available (not connected to any networks)');
