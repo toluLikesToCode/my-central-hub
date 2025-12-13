@@ -196,9 +196,8 @@ if (config.features.fileHosting) {
 
     try {
       // Import the stats helper here to avoid circular dependencies
-      const { FileHostingStatsHelper } = await import(
-        '../modules/file-hosting/fileHostingStatsHelper'
-      );
+      const { FileHostingStatsHelper } =
+        await import('../modules/file-hosting/fileHostingStatsHelper');
       const statsHelper = new FileHostingStatsHelper(
         path.join(process.cwd(), 'data', 'file_stats.db'),
       );
@@ -360,9 +359,8 @@ if (config.features.fileHosting) {
 
     try {
       // Import the stats helper
-      const { FileHostingStatsHelper } = await import(
-        '../modules/file-hosting/fileHostingStatsHelper'
-      );
+      const { FileHostingStatsHelper } =
+        await import('../modules/file-hosting/fileHostingStatsHelper');
       const statsHelper = new FileHostingStatsHelper(
         path.join(process.cwd(), 'data', 'file_stats.db'),
       );
