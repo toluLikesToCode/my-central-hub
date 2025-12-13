@@ -1,7 +1,7 @@
 import { IncomingRequest } from '../entities/http';
 import { URL } from 'url';
 import { config } from '../config/server.config';
-import winston from 'winston';
+import * as winston from 'winston';
 import { defaultTransports } from '../utils/transports';
 
 const logger = winston.createLogger({

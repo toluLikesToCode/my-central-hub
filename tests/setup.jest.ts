@@ -16,6 +16,7 @@ jest.mock('winston', () => {
       combine: jest.fn(),
       timestamp: jest.fn(),
       prettyPrint: jest.fn(),
+      json: jest.fn(),
     },
   };
 });

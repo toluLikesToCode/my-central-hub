@@ -16,6 +16,7 @@
  * @module core/router
  */
 import { Socket } from 'net';
+import { randomUUID } from 'crypto';
 import { IncomingRequest } from '../entities/http';
 import { sendWithContext } from '../entities/sendResponse';
 import logger, { Logger } from '../utils/logger';
@@ -331,7 +332,7 @@ class Router {
     }
     let requestId = req.ctx?.requestId || req.headers['x-request-id'] || req.headers['request-id'];
     if (!requestId) {
-      const newRequestId = crypto.randomUUID();
+      const newRequestId = randomUUID();
       req.ctx = { ...(req.ctx || {}), requestId: newRequestId };
       requestId = newRequestId;
       req.headers['x-request-id'] = newRequestId;
