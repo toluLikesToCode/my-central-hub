@@ -62,3 +62,5 @@ data/metrics.db
 .gitignore
 docs/EmbeddingsAPIReference.md
 Makefile
+
+AGENTS.md
