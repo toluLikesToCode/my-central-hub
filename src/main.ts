@@ -12,7 +12,7 @@ import { HttpServer } from './core/server';
 import { config } from './config/server.config';
 import path from 'path';
 import process from 'process';
-import winston from 'winston';
+import * as winston from 'winston';
 import { defaultTransports } from './utils/transports';
 
 const logger = winston.createLogger({

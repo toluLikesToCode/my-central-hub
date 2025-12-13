@@ -13,6 +13,7 @@ import { formatDate } from './dateFormatter'; // Import our new date formatter
 import { config } from '../config/server.config';
 
 // --- Configuration ---
+const isTestEnv = process.env.NODE_ENV === 'test';
 
 const standardLevels = {
   error: 0,
@@ -32,6 +33,7 @@ type AllLogLevels = LogLevel | 'success' | keyof CustomLevels; // Include 'succe
 const APP_LOG_PATH =
   path.join(process.env.LOG_DIR || '', 'app.log') || path.join(process.cwd(), 'logs', 'app.log');
 const LOG_RUN_HISTORY_LENGTH = 50;
+const APP_LOG_SEPARATOR = `=== RUN STARTED [${formatDate(new Date().toISOString())}] ===`;
 
 // --- Interfaces ---
 
@@ -389,6 +391,14 @@ export class FileTransport implements Transport {
   public level?: string;
 
   constructor(options: { filename: string; formatter?: Formatter; level?: string }) {
+    if (isTestEnv) {
+      // Skip file creation during tests to avoid noisy I/O
+      this.filename = options.filename;
+      this.formatter = options.formatter ?? new JsonFormatter();
+      this.level = options.level;
+      return;
+    }
+
     this.filename = options.filename;
     // Default to JSON for files unless overridden
     this.formatter = options.formatter ?? new JsonFormatter();
@@ -579,10 +589,9 @@ export class Logger {
     };
 
     this.transports = this.options.transports;
-    if (!this.transports.includes(sharedAppLogTransport)) {
+    if (!isTestEnv && !this.transports.includes(sharedAppLogTransport)) {
       this.transports.push(sharedAppLogTransport);
     }
-    //this.transports.push(sharedAppLogTransport); // Always include the shared transport
 
     // --- Dynamic Method Implementation ---
     // This part still creates the runtime methods, but TypeScript now relies on the explicit signatures above.
@@ -718,8 +727,6 @@ const defaultLogger = new Logger({
   ],
 });
 
-const APP_LOG_SEPARATOR = `=== RUN STARTED [${formatDate(new Date().toISOString())}] ===`;
-
 function trimAppLogToLastRuns(logPath: string, maxRuns = 10) {
   try {
     if (!fs.existsSync(logPath)) return;
@@ -739,8 +746,10 @@ function trimAppLogToLastRuns(logPath: string, maxRuns = 10) {
 }
 
 // Moved run separators here, after Logger is initialized
-trimAppLogToLastRuns(APP_LOG_PATH, LOG_RUN_HISTORY_LENGTH);
-fs.appendFileSync(APP_LOG_PATH, `\n${APP_LOG_SEPARATOR}\n\n`);
+if (!isTestEnv) {
+  trimAppLogToLastRuns(APP_LOG_PATH, LOG_RUN_HISTORY_LENGTH);
+  fs.appendFileSync(APP_LOG_PATH, `\n${APP_LOG_SEPARATOR}\n\n`);
+}
 
 export default defaultLogger;
 export { standardLevels };

@@ -5,7 +5,7 @@ import { HttpRequestParser, RequestEntityTooLargeError } from './httpParser';
 import router from './router';
 // Register application routes as a side-effect
 import '../routes';
-import winston from 'winston';
+import * as winston from 'winston';
 import { sendResponse } from '../entities/sendResponse';
 import { config } from '../config/server.config'; // Assuming config is imported from a config file
 import { initializeFileStats } from '../modules/file-hosting/FileStatsInitializer';
