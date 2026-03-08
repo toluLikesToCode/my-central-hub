@@ -1,0 +1,10 @@
+FROM node:23-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ffmpeg \
+    python3 \
+    python3-pip \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/my-central-hub

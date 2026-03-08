@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile.node
+    volumes:
+      - ..:/workspace/my-central-hub:cached
+      - node_modules:/workspace/my-central-hub/node_modules
+    working_dir: /workspace/my-central-hub
+    command: sleep infinity
+    ports:
+      - "8080:8080"
+    environment:
+      EMBEDDING_SERVICE_URL: http://embed:8080
+    depends_on:
+      - embed
+
+  embed:
+    build:
+      context: ../python/services/embedding-service
+      dockerfile: Dockerfile.embed
+    volumes:
+      - ../public/media:/media
+    command: sleep infinity
+    ports:
+      - "8000:8080"
+
+volumes:
+  node_modules:
