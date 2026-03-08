@@ -1,0 +1,26 @@
+{
+  "name": "my-central-hub",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace/my-central-hub",
+  "forwardPorts": [8080, 8000],
+  "portsAttributes": {
+    "8080": {
+      "label": "Node API"
+    },
+    "8000": {
+      "label": "Embedding Service"
+    }
+  },
+  "postCreateCommand": "npm install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-vscode.vscode-typescript-next",
+        "ms-python.python"
+      ]
+    }
+  }
+}
